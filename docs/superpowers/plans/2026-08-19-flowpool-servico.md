@@ -20,6 +20,7 @@
 | `flowpool/nucleo/custos.py` | tabela de custo por (modelo, tier) e o teto diário do free |
 | `flowpool/nucleo/escolha.py` | `escolher(contas, modelo, agora, quantidade) -> Conta | None`. Função pura. |
 | `flowpool/nucleo/credito.py` | debitar previsto, reconciliar com o lido, decidir confiança |
+| `flowpool/nucleo/proxy.py` | traduz a URL de proxy da conta para o Playwright e para o `chrome.exe`. Função pura. |
 | `flowpool/dados/esquema.sql` | DDL das três tabelas |
 | `flowpool/dados/repo.py` | leitura/escrita SQLite. Única parte que conhece SQL. |
 | `flowpool/transporte/base.py` | `FlowTransport` (Protocol), `Pedido`, `Estado`, exceções |
@@ -120,8 +121,8 @@ git commit -m "chore: esqueleto do flowpool"
 ### Task 1: Tipos do domínio
 
 **Files:**
-- Create: `flowpool/nucleo/tipos.py`, `flowpool/nucleo/erros.py`
-- Test: `tests/test_tipos.py`
+- Create: `flowpool/nucleo/tipos.py`, `flowpool/nucleo/erros.py`, `flowpool/nucleo/proxy.py`
+- Test: `tests/test_tipos.py`, `tests/test_proxy.py`
 
 - [ ] **Step 0: Criar os erros de domínio**
 
@@ -137,6 +138,16 @@ class SaldoInsuficiente(Exception):
 
 class ModeloSemCusto(Exception):
     """Modelo/tier sem custo cadastrado. Erro de configuracao, nao de execucao."""
+
+
+class ProxyInvalido(Exception):
+    """A conta tem proxy configurado, mas a URL nao da para usar.
+
+    Nao e o caso de nao haver proxy — esse e o comum, e devolve None. E o caso de haver
+    um e ele estar errado, e ai falhar cedo e melhor do que abrir um navegador que sai
+    pelo IP de casa sem ninguem perceber. O IP proprio por conta existe justamente para
+    o Google nao correlacionar as contas entre si.
+    """
 ```
 
 Mora em `nucleo/` porque as camadas de cima dependem de `nucleo`, nunca o contrário. `transporte/base.py` (Task 6) reexporta `SaldoInsuficiente` daqui em vez de definir a sua própria — duas classes com o mesmo nome fariam o `except` do orquestrador pegar uma e deixar a outra passar como falha de rede.
@@ -252,6 +263,15 @@ def test_imagem_aceita_lote_e_video_nao():
     assert quantidade_maxima(Modo.IMAGEM) == 4
     for modo in (Modo.T2V, Modo.FRAMES2V, Modo.INGREDIENTS2V):
         assert quantidade_maxima(modo) == 1
+
+
+def test_conta_nasce_sem_proxy():
+    # o campo e desenhado agora e fica vazio: enquanto nao ha IP contratado, o Davi
+    # destrava com uma VPN de sistema, que o app nem enxerga
+    c = Conta(id=1, email="a@b.com", tier=Tier.FREE, perfil="perfis/1")
+    assert c.proxy is None
+    c.proxy = "http://1.2.3.4:8080"
+    assert c.proxy == "http://1.2.3.4:8080"
 ```
 
 - [ ] **Step 2: Rodar e ver falhar**
@@ -344,6 +364,13 @@ class Conta:
     saude: SaudeSessao = SaudeSessao.VIVA
     falhas: int = 0
     ativa: bool = True
+    # URL do proxy pelo qual ESTA conta sai. Vazio e o normal hoje: sem proxy
+    # contratado, o Davi destrava o Flow com uma VPN de sistema, que o app nem enxerga.
+    # Existe por conta, e nao global, porque o ponto e o Google nao conseguir
+    # correlacionar as contas entre si pelo IP. Formato: `http://host:porta`,
+    # `http://usuario:senha@host:porta` ou `socks5://host:porta` — quem traduz e
+    # `nucleo/proxy.py`.
+    proxy: str | None = None
 
 
 @dataclass
@@ -442,15 +469,347 @@ Flow. Tem default `""` só para não quebrar a ordem dos campos da dataclass —
 com default precisam vir depois dos sem default, e `produto` entra logo após `nome`. Na
 prática a API exige (Task 8), e é dele que `destino` passa a derivar.
 
-- [ ] **Step 4: Rodar e ver passar**
+`Conta.proxy` existe porque **cada conta precisa sair por um IP próprio**: manter vinte
+contas atrás de um único IP doméstico entrega ao Google exatamente a correlação que o
+pool existe para evitar. A medição de campo que dimensiona o problema é de 20/08 — o
+Flow **já recusa geração** a partir do IP de casa do Davi, e uma **VPN gratuita
+destrava**. Isso diz duas coisas: o bloqueio é por reputação de IP, e a barra é baixa.
+Não é preciso proxy residencial premium; é preciso **outro** IP.
 
-Run: `.venv/Scripts/pytest tests/test_tipos.py -q`
-Expected: `14 passed`
+O campo nasce **opcional e vazio**, e isso é a decisão, não uma pendência. Enquanto não
+houver proxy contratado, o Davi destrava com uma VPN de sistema — que o app nem
+enxerga, porque ela atua abaixo do processo. Quando ele contratar IPs (ISP estático, na
+casa de US$ 0,27 por IP), basta preencher o campo por conta. Fica no `Conta` e não numa
+configuração global justamente porque um proxy compartilhado por todo o pool não
+resolveria nada: ele apenas mudaria o IP em que as vinte contas se encontram.
 
-- [ ] **Step 5: Commit**
+Ele é `str | None` e não um par host/porta porque o que o usuário tem em mãos, quando
+compra um proxy, é uma linha única — `http://usuario:senha@host:porta`. Quebrá-la em
+campos obrigaria o painel a pedir quatro coisas onde o fornecedor entrega uma, e a
+tradução para o que o Playwright e o Chrome querem é código puro: mora em
+`nucleo/proxy.py`, no Step 4.
+
+- [ ] **Step 4: Escrever o teste que falha — a tradução do proxy**
+
+`nucleo/proxy.py` fica no núcleo porque é lógica pura e precisa de teste sem rede. Três
+funções, e a segunda é a que evita um bug silencioso caro.
+
+`tests/test_proxy.py`:
+
+```python
+import pytest
+
+from flowpool.nucleo.erros import ProxyInvalido
+from flowpool.nucleo.proxy import analisar, argumento_chrome, mascarar
+
+# --- analisar: o caso comum e nao haver proxy nenhum ---------------------------
+
+
+def test_sem_proxy_devolve_none():
+    # hoje o campo nasce vazio: o Davi destrava o Flow com uma VPN de sistema, que o
+    # app nem enxerga. Devolver None e o caminho normal, nao a excecao.
+    assert analisar(None) is None
+
+
+def test_string_vazia_devolve_none():
+    # o painel manda "" quando o campo fica em branco, e isso nao e erro de digitacao
+    assert analisar("") is None
+    assert analisar("   ") is None
+
+
+def test_host_e_porta_viram_server():
+    assert analisar("http://1.2.3.4:8080") == {"server": "http://1.2.3.4:8080"}
+
+
+def test_proxy_sem_credencial_nao_traz_usuario_nem_senha():
+    # o Playwright trata a chave presente com valor None como credencial vazia
+    cfg = analisar("http://1.2.3.4:8080")
+    assert "username" not in cfg
+    assert "password" not in cfg
+
+
+def test_credencial_sai_em_campos_separados_do_server():
+    # o Playwright quer o usuario e a senha FORA da URL do servidor
+    assert analisar("http://davi:segredo@1.2.3.4:8080") == {
+        "server": "http://1.2.3.4:8080",
+        "username": "davi",
+        "password": "segredo",
+    }
+
+
+def test_credencial_percent_encoded_volta_decodificada():
+    # senha com `@` ou `:` so cabe na URL escapada; mandar o escape cru para o
+    # Playwright autenticaria com a senha errada e o proxy recusaria sem dizer por que
+    cfg = analisar("http://u%40x:p%3As@h:1")
+    assert cfg["username"] == "u@x"
+    assert cfg["password"] == "p:s"
+
+
+def test_socks5_e_aceito():
+    assert analisar("socks5://1.2.3.4:1080") == {"server": "socks5://1.2.3.4:1080"}
+
+
+def test_esquema_desconhecido_e_erro():
+    # falhar cedo e melhor que abrir um navegador que sai pelo IP errado calado
+    with pytest.raises(ProxyInvalido, match="esquema"):
+        analisar("ftp://1.2.3.4:8080")
+
+
+def test_url_sem_porta_e_erro():
+    with pytest.raises(ProxyInvalido, match="porta"):
+        analisar("http://1.2.3.4")
+
+
+def test_url_sem_esquema_e_erro():
+    # `1.2.3.4:8080` parece certo e nao e: o urlsplit le "1.2.3.4" como esquema
+    with pytest.raises(ProxyInvalido, match="esquema"):
+        analisar("1.2.3.4:8080")
+
+
+def test_url_sem_host_e_erro():
+    with pytest.raises(ProxyInvalido, match="host"):
+        analisar("http://:8080")
+
+
+def test_porta_fora_da_faixa_e_erro():
+    # o urlsplit levanta ValueError so quando alguem le `.port`; sem traduzir, o erro
+    # apareceria la dentro do transporte, longe do cadastro que o causou
+    with pytest.raises(ProxyInvalido, match="porta"):
+        analisar("http://h:99999")
+
+
+# --- argumento_chrome: a funcao que evita o bug silencioso ---------------------
+
+
+def test_argumento_sem_proxy_e_none():
+    assert argumento_chrome(None) is None
+    assert argumento_chrome("") is None
+
+
+def test_argumento_traduz_host_e_porta():
+    assert argumento_chrome("http://1.2.3.4:8080") == "--proxy-server=http://1.2.3.4:8080"
+
+
+def test_argumento_aceita_socks5():
+    assert argumento_chrome("socks5://1.2.3.4:1080") == "--proxy-server=socks5://1.2.3.4:1080"
+
+
+def test_argumento_recusa_proxy_com_credencial():
+    # o chrome.exe cru abre um dialogo pedindo usuario e senha, e o cadastro trava sem
+    # mensagem nenhuma. Recusar aqui e o unico jeito de isso virar erro em vez de
+    # janela parada esperando alguem digitar.
+    with pytest.raises(ProxyInvalido):
+        argumento_chrome("http://davi:segredo@1.2.3.4:8080")
+
+
+def test_a_recusa_por_credencial_diz_o_que_fazer():
+    # mensagem que so diz "nao da" manda a pessoa adivinhar. As duas saidas reais sao
+    # autorizar por IP ou por um retransmissor local sem senha.
+    with pytest.raises(ProxyInvalido) as e:
+        argumento_chrome("http://davi:segredo@1.2.3.4:8080")
+    texto = str(e.value).lower()
+    assert "ip" in texto
+    assert "retransmissor" in texto
+
+
+def test_a_recusa_por_credencial_nao_repete_a_senha():
+    # a mensagem vai para a resposta HTTP e para o log — e o mesmo motivo de a
+    # resposta de conta mascarar o proxy (Task 8)
+    with pytest.raises(ProxyInvalido) as e:
+        argumento_chrome("http://davi:segredo@1.2.3.4:8080")
+    assert "segredo" not in str(e.value)
+
+
+def test_argumento_propaga_url_invalida():
+    with pytest.raises(ProxyInvalido):
+        argumento_chrome("ftp://1.2.3.4:8080")
+
+
+# --- mascarar: a credencial nao passeia pela resposta da API -------------------
+
+
+def test_mascarar_esconde_a_senha():
+    assert mascarar("http://davi:segredo@1.2.3.4:8080") == "http://davi:***@1.2.3.4:8080"
+
+
+def test_mascarar_sem_credencial_devolve_a_url_inteira():
+    assert mascarar("http://1.2.3.4:8080") == "http://1.2.3.4:8080"
+
+
+def test_mascarar_sem_proxy_e_none():
+    assert mascarar(None) is None
+    assert mascarar("") is None
+
+
+def test_mascarar_nao_levanta_com_url_torta():
+    # `mascarar` alimenta o `GET /contas`. Levantar aqui derrubaria a listagem inteira
+    # justamente quando ha uma URL errada para o usuario ver e corrigir.
+    assert "segredo" not in mascarar("nao-e-url://davi:segredo@")
+```
+
+- [ ] **Step 5: Rodar e ver falhar**
+
+Run: `.venv/Scripts/pytest tests/test_proxy.py -q`
+Expected: FAIL — `ImportError: cannot import name 'ProxyInvalido'`
+
+- [ ] **Step 6: Implementar `nucleo/proxy.py`**
+
+```python
+"""Traducao da URL de proxy de uma conta. Puro: sem rede, sem I/O, sem navegador.
+
+Cada conta do pool sai por um IP proprio para o Google nao correlacionar as contas
+entre si. Medicao de campo (20/08): o Flow ja recusa geracao a partir do IP domestico
+do Davi e uma VPN gratuita destrava — ou seja, o bloqueio e por reputacao de IP e a
+barra e baixa. Nao e preciso proxy residencial premium; e preciso OUTRO IP.
+
+Isto mora no nucleo porque e logica pura e precisa de teste sem rede. O transporte le
+o resultado; a decisao inteira sobre o que e uma URL usavel acontece aqui.
+"""
+
+from __future__ import annotations
+
+import re
+from urllib.parse import unquote, urlsplit
+
+from flowpool.nucleo.erros import ProxyInvalido
+
+# O que o Chrome e o Playwright sabem falar. `https` entra porque existe proxy que
+# atende em TLS; `socks5h` e o socks5 que resolve DNS do lado do proxy — sem ele, o
+# DNS vazaria pelo IP de casa, que e metade do que este arquivo existe para evitar.
+ESQUEMAS = ("http", "https", "socks5", "socks5h")
+
+# O que substitui a senha na resposta da API. Nao e a senha truncada: e um carimbo.
+SENHA_MASCARADA = "***"
+
+
+def _partes(url: str):
+    """`urlsplit` com os erros dele traduzidos para `ProxyInvalido`.
+
+    `.port` levanta `ValueError` para porta fora da faixa, e so na hora em que alguem
+    le o atributo. Sem traduzir aqui, o estouro apareceria dentro do transporte, longe
+    do cadastro que o causou.
+    """
+    if "://" not in url:
+        raise ProxyInvalido(
+            f"proxy {url!r} sem esquema; use http://host:porta, "
+            f"http://usuario:senha@host:porta ou socks5://host:porta")
+    partes = urlsplit(url)
+    if partes.scheme not in ESQUEMAS:
+        raise ProxyInvalido(
+            f"esquema de proxy {partes.scheme!r} desconhecido; use um de {list(ESQUEMAS)}")
+    if not partes.hostname:
+        raise ProxyInvalido(f"proxy {url!r} sem host")
+    try:
+        porta = partes.port
+    except ValueError as e:
+        raise ProxyInvalido(f"proxy {url!r} com porta invalida: {e}") from e
+    if porta is None:
+        raise ProxyInvalido(
+            f"proxy {url!r} sem porta; proxy sem porta explicita nao se conecta")
+    return partes, porta
+
+
+def analisar(url: str | None) -> dict | None:
+    """Converte a URL de proxy no formato que o Playwright espera.
+
+    Devolve None quando nao ha proxy (o caso comum hoje).
+    Levanta ProxyInvalido quando a URL existe mas nao da para usar — falhar cedo e
+    melhor que abrir um navegador que vai sair pelo IP errado sem ninguem perceber.
+
+    `username` e `password` so aparecem quando a URL os traz: o Playwright trata a
+    chave presente com valor None como credencial vazia e tenta autenticar assim.
+    """
+    if url is None or not url.strip():
+        return None
+    partes, porta = _partes(url.strip())
+
+    cfg: dict = {"server": f"{partes.scheme}://{partes.hostname}:{porta}"}
+    # a credencial so cabe na URL escapada quando tem `@` ou `:`; mandar o escape cru
+    # para o Playwright autenticaria com a senha errada e o proxy recusaria calado
+    if partes.username:
+        cfg["username"] = unquote(partes.username)
+    if partes.password:
+        cfg["password"] = unquote(partes.password)
+    return cfg
+
+
+def argumento_chrome(url: str | None) -> str | None:
+    """Traduz o proxy para a linha de comando do chrome.exe do cadastro.
+
+    O Chrome cru aceita `--proxy-server=host:porta` mas NAO aceita credencial: ele
+    abre um dialogo pedindo usuario e senha, que trava o cadastro sem mensagem util.
+    Por isso, proxy COM credencial e recusado aqui com ProxyInvalido — e a mensagem
+    precisa dizer o que fazer: usar proxy autorizado por IP, ou por um retransmissor
+    local sem senha.
+
+    O cadastro tambem precisa do proxy, e nao so a operacao: se a conta nasce no IP de
+    casa e depois passa a operar por proxy, o Google ve a mudanca — que e exatamente o
+    sinal que o proxy existe para evitar. O login tem que sair do MESMO IP do trabalho.
+    """
+    cfg = analisar(url)
+    if cfg is None:
+        return None
+    if "username" in cfg or "password" in cfg:
+        raise ProxyInvalido(
+            "o Chrome do cadastro nao aceita proxy com usuario e senha: ele abre um "
+            "dialogo de autenticacao e o cadastro fica parado sem erro nenhum. Use um "
+            "proxy autorizado por IP, ou aponte esta conta para um retransmissor local "
+            "sem senha (ex.: http://127.0.0.1:PORTA) que carregue a credencial por voce."
+        )
+    return f"--proxy-server={cfg['server']}"
+
+
+def mascarar(url: str | None) -> str | None:
+    """Esconde a senha do proxy antes de a URL sair na resposta da API.
+
+    A resposta vai para o painel e para log; credencial de proxy nao precisa passear
+    por ali. Nao levanta de proposito: `mascarar` alimenta o `GET /contas`, e derrubar
+    a listagem inteira por causa de uma URL torta esconderia justamente a URL que a
+    pessoa precisa ver para consertar. O que ele nao faz e deixar passar o que nao
+    entendeu — havendo `@` no meio, tudo antes dele some.
+    """
+    if url is None or not url.strip():
+        return None
+    bruto = url.strip()
+    try:
+        partes = urlsplit(bruto)
+        usuario, host, porta = partes.username, partes.hostname, partes.port
+    except ValueError:
+        usuario = host = porta = None
+    if usuario and host:
+        sufixo = f":{porta}" if porta else ""
+        return f"{partes.scheme}://{unquote(usuario)}:{SENHA_MASCARADA}@{host}{sufixo}"
+    if host:
+        return bruto
+    return re.sub(r"(//)[^/@]*@", rf"\1{SENHA_MASCARADA}@", bruto)
+```
+
+**Por que `argumento_chrome` é uma função separada, e não um `if` dentro do transporte.**
+O login do cadastro não passa por Playwright (Task 10) — sobe um `chrome.exe` comum por
+`subprocess`. E o login **tem que sair do mesmo IP do trabalho**: se a conta nasce no IP
+de casa e só depois passa a operar por proxy, o Google vê a mudança, que é exatamente o
+sinal que o proxy existe para evitar. Então o `chrome.exe` do cadastro também precisa do
+proxy — por outra sintaxe, e com uma incompatibilidade que **precisa ser erro**.
+
+O Chrome cru aceita `--proxy-server=` mas **não** aceita credencial embutida: ele abre um
+diálogo de autenticação. Num cadastro dirigido por `subprocess`, esse diálogo é uma
+janela parada que ninguém preenche, e o `proc.wait()` fica pendurado até o teto de 15
+minutos — sem erro, sem log, sem pista. Recusar antes de abrir a janela transforma isso
+numa mensagem que diz o que fazer.
+
+`mascarar` fica aqui, e não no `api/app.py`, pelo mesmo motivo das outras duas: é
+função pura de texto e ganha teste sem subir servidor. Quem a consome é a Task 8.
+
+- [ ] **Step 7: Rodar e ver passar**
+
+Run: `.venv/Scripts/pytest tests/test_tipos.py tests/test_proxy.py -q`
+Expected: `38 passed` (15 tipos + 23 proxy)
+
+- [ ] **Step 8: Commit**
 
 ```bash
-git add flowpool/nucleo/tipos.py tests/test_tipos.py
+git add flowpool/nucleo/tipos.py flowpool/nucleo/erros.py flowpool/nucleo/proxy.py \
+        tests/test_tipos.py tests/test_proxy.py
 git commit -m "feat: tipos do dominio do flowpool"
 ```
 
@@ -1225,7 +1584,7 @@ Expected: `3 passed`
 - [ ] **Step 7: Rodar o núcleo inteiro**
 
 Run: `.venv/Scripts/pytest -q`
-Expected: `78 passed` (14 tipos + 23 custos + 20 escolha + 18 credito + 3 pool)
+Expected: `102 passed` (15 tipos + 23 proxy + 23 custos + 20 escolha + 18 credito + 3 pool)
 
 - [ ] **Step 8: Commit**
 
@@ -1255,6 +1614,10 @@ Cinco decisões desta task que não são detalhe de implementação:
 **A tabela `projeto` tem `UNIQUE (conta_id, produto)` e `registrar_projeto` é um upsert.** A chave é o par porque projeto do Flow pertence a uma conta só: a `g2` não abre o projeto da `g1`, então o mesmo produto precisa de um projeto próprio em cada conta. O upsert (`ON CONFLICT ... DO UPDATE ... RETURNING id`) existe porque dois workers podem resolver o mesmo produto na mesma conta ao mesmo tempo; com `INSERT` puro o perdedor da corrida levantaria `IntegrityError` no meio de um job que **já pagou crédito**. O `UNIQUE` continua sendo a garantia de que não existem duas linhas para o mesmo par — o upsert só decide o que fazer quando a garantia é acionada.
 
 `job.produto` entra como `TEXT NOT NULL DEFAULT ''`. O default cobre a linha antiga e o job criado direto pelo repo; quem exige de verdade é a API.
+
+`conta.proxy` entra como `TEXT` **anulável, sem default** — e a ausência de `NOT NULL` é a decisão. Não ter proxy é o estado normal hoje: o campo fica vazio até haver IP contratado, e nesse meio-tempo o Davi destrava o Flow com uma VPN de sistema, que o app nem enxerga. Um `NOT NULL DEFAULT ''` transformaria "sem proxy" em string vazia e obrigaria cada leitor a lembrar de tratar os dois valores como a mesma coisa; `NULL` diz sozinho o que quer dizer, e `nucleo.proxy.analisar(None)` já devolve `None` sem reclamar.
+
+Ele é gravado por `salvar_conta` e lido por `_conta`, e **não** entra em `criar_conta`: quem cria conta pela API é o `POST /contas` (Task 10), que precisa do proxy antes de abrir o Chrome de login e o aplica lá — a coluna é só onde o valor descansa entre uma sessão e outra. Se ele não sobrevivesse ao restart, a conta voltaria a sair pelo IP de casa na primeira geração depois de o serviço subir, sem nada no log dizendo isso.
 
 `job.proporcao` e `job.quantidade` entram como `TEXT NOT NULL DEFAULT '9:16'` e `INTEGER NOT NULL DEFAULT 1`. Os defaults vivem em dois lugares de propósito — na dataclass (Task 1) e na coluna — porque o job criado direto pelo repo, sem passar pela API, também precisa nascer vertical e com uma geração só. Um `NULL` aqui viraria `quantidade=None` multiplicando o custo, e o erro apareceria como `TypeError` dentro de `reservar`, longe da causa.
 
@@ -1376,6 +1739,17 @@ def test_seca_ate_sobrevive_ao_banco(repo):
     c.seca_ate = datetime(2026, 8, 20, 13, 0, tzinfo=timezone.utc)
     repo.salvar_conta(c)
     assert repo.conta(id_).seca_ate == c.seca_ate
+
+
+def test_proxy_da_conta_sobrevive_ao_banco(repo):
+    # cada conta sai por um IP proprio para o Google nao correlacionar as contas; um
+    # proxy que nao sobrevive ao restart faria a conta voltar a sair pelo IP de casa
+    id_ = repo.criar_conta(email="a@b.com", tier=Tier.FREE, perfil="p/1")
+    assert repo.conta(id_).proxy is None
+    c = repo.conta(id_)
+    c.proxy = "http://davi:segredo@1.2.3.4:8080"
+    repo.salvar_conta(c)
+    assert repo.conta(id_).proxy == "http://davi:segredo@1.2.3.4:8080"
 
 
 def test_marcar_sessao_nao_toca_no_saldo(repo):
@@ -1526,7 +1900,8 @@ CREATE TABLE IF NOT EXISTS conta (
     seca_ate        TEXT,
     saude           TEXT    NOT NULL DEFAULT 'viva',
     falhas          INTEGER NOT NULL DEFAULT 0,
-    ativa           INTEGER NOT NULL DEFAULT 1
+    ativa           INTEGER NOT NULL DEFAULT 1,
+    proxy           TEXT
 );
 
 CREATE TABLE IF NOT EXISTS job (
@@ -1665,11 +2040,12 @@ class Repo:
     def salvar_conta(self, c: Conta) -> None:
         self.con.execute(
             """UPDATE conta SET tier=?, perfil=?, saldo=?, saldo_lido_em=?,
-                   saldo_confiavel=?, reset_em=?, seca_ate=?, saude=?, falhas=?, ativa=?
+                   saldo_confiavel=?, reset_em=?, seca_ate=?, saude=?, falhas=?,
+                   ativa=?, proxy=?
                WHERE id=?""",
             (c.tier.value, c.perfil, c.saldo, _txt(c.saldo_lido_em),
              int(c.saldo_confiavel), _txt(c.reset_em), _txt(c.seca_ate),
-             c.saude.value, c.falhas, int(c.ativa), c.id),
+             c.saude.value, c.falhas, int(c.ativa), c.proxy, c.id),
         )
         self.con.commit()
 
@@ -1697,7 +2073,7 @@ class Repo:
             saldo=r["saldo"], saldo_lido_em=_dt(r["saldo_lido_em"]),
             saldo_confiavel=bool(r["saldo_confiavel"]), reset_em=_dt(r["reset_em"]),
             seca_ate=_dt(r["seca_ate"]), saude=SaudeSessao(r["saude"]),
-            falhas=r["falhas"], ativa=bool(r["ativa"]),
+            falhas=r["falhas"], ativa=bool(r["ativa"]), proxy=r["proxy"],
         )
 
     # ---------- jobs ----------
@@ -1864,7 +2240,7 @@ class Repo:
 - [ ] **Step 5: Rodar e ver passar**
 
 Run: `.venv/Scripts/pytest tests/test_repo.py -q`
-Expected: `24 passed`
+Expected: `25 passed`
 
 - [ ] **Step 6: Commit**
 
@@ -2363,6 +2739,7 @@ from flowpool.nucleo.custos import custo_de
 from flowpool.nucleo.escolha import escolher
 from flowpool.nucleo.erros import SaldoInsuficiente
 from flowpool.nucleo.tipos import EstadoJob, Job, Modelo, Modo, SaudeSessao, Tier
+from flowpool.transporte.base import ErroTransporte
 from flowpool.transporte.falso import TransporteFalso
 
 
@@ -2850,7 +3227,46 @@ async def test_pedido_leva_proporcao_e_quantidade_ao_transporte(repo, tmp_path):
 
     assert vistos[0].proporcao == "1:1"
     assert vistos[0].quantidade == 3
+
+
+async def test_proxy_morto_nao_marca_a_conta_expirada_nem_seca(repo, tmp_path):
+    # proxy fora do ar e falha de INFRAESTRUTURA, nao da conta. Marcar `expirada`
+    # pediria um login manual que ninguem precisa fazer; marcar seca tiraria do pool
+    # uma conta que esta boa e cheia de credito. Nos dois casos o pool encolheria por
+    # um problema que se conserta trocando de IP, nao mexendo na conta.
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid)
+    c.saldo = 50
+    c.proxy = "http://1.2.3.4:8080"
+    repo.salvar_conta(c)
+    jid = repo.criar_job(job_fast())
+
+    t = TransporteFalso(saldos={cid: 50})
+
+    async def proxy_fora_do_ar(conta):
+        raise ErroTransporte("net::ERR_PROXY_CONNECTION_FAILED em http://1.2.3.4:8080")
+
+    t.abrir_sessao = proxy_fora_do_ar
+    await Orquestrador(repo, t, raiz=tmp_path).passo()
+
+    conta = repo.conta(cid)
+    assert conta.saude is SaudeSessao.VIVA
+    assert conta.seca_ate is None
+    assert conta.saldo == 50          # a reserva voltou: o Flow nunca chegou a cobrar
+
+    j = repo.job(jid)
+    assert j.estado is EstadoJob.PENDENTE
+    assert j.tentativas == 1          # gasta tentativa, como toda falha de rede
+    assert "PROXY" in j.erro
 ```
+
+O último teste não pede código novo — o ramo genérico de `_executar` já faz a coisa
+certa. Ele existe para **prender** esse comportamento, e a diferença entre ter e não ter
+o teste aparece no dia em que alguém, caçando outro bug, acrescentar um
+`conta.saude = EXPIRADA` ali. Proxy fora do ar é falha de infraestrutura: gasta
+tentativa, como toda falha de rede, mas a conta continua boa. Marcá-la `expirada` pediria
+um login manual que ninguém precisa fazer; marcá-la seca tiraria do pool uma conta cheia
+de crédito. Ver *Fila e execução* no spec.
 
 - [ ] **Step 2: Rodar e ver falhar**
 
@@ -3239,12 +3655,12 @@ class Orquestrador:
 - [ ] **Step 4: Rodar e ver passar**
 
 Run: `.venv/Scripts/pytest tests/test_orquestrador.py -q`
-Expected: `27 passed`
+Expected: `28 passed`
 
 - [ ] **Step 5: Rodar a suíte inteira**
 
 Run: `.venv/Scripts/pytest -q`
-Expected: `146 passed` (14 tipos + 23 custos + 20 escolha + 18 credito + 3 pool + 24 repo + 17 transporte + 27 orquestrador)
+Expected: `172 passed` (15 tipos + 23 proxy + 23 custos + 20 escolha + 18 credito + 3 pool + 25 repo + 17 transporte + 28 orquestrador)
 
 - [ ] **Step 6: Commit**
 
@@ -3279,6 +3695,14 @@ O `DELETE` diz isso na docstring da rota **e na resposta** (`aviso`), porque a l
 `PedidoJob.proporcao` tem padrão `"9:16"` e é validada contra `PROPORCOES`: valor fora da lista é **422**, porque o painel do Flow tem cinco botões e um sexto valor não teria onde clicar. O padrão vertical é do canal do Davi (TikTok) — gerar já em vertical evita o recorte manual —, e continua sobrescrevível por pedido.
 
 `PedidoJob.quantidade` tem padrão `1`, mínimo `1`, e teto que depende do modo (`quantidade_maxima`, Task 1): **vídeo aceita só 1, imagem aceita até 4.** Pedido de vídeo com `quantidade > 1` é 422. O motivo é do usuário: take de vídeo é escolha dele, não sorteio, e cada take extra custa cheio; variação de imagem é barata e serve justamente para escolher entre elas. Recusar aqui é melhor do que gerar quatro vídeos que ninguém pediu — e é a mesma quantidade que multiplica o custo em `escolher` e `reservar` (Tasks 3 e 4).
+
+`NovaConta` e `PatchConta` ganham `proxy: str | None = None`, validado por `nucleo.proxy.analisar` — URL que não dá para usar é **422**, não 500. A tradução é explícita porque `ProxyInvalido` não herda de `ValueError`, e só `ValueError` o Pydantic converte em 422: sem ela, um campo mal digitado viraria "erro interno" no painel.
+
+No `PATCH`, `proxy` distingue dois sentidos que os outros campos não precisam distinguir: **campo ausente é "não mexe"; string vazia é "tira o proxy"**. Por isso o teste é `"proxy" in p.model_fields_set`, e não `p.proxy is not None` como em `ativa` e `tier` — com o teste de `None` não haveria como devolver uma conta ao estado sem proxy, que é justamente o estado em que todas nascem.
+
+`RespostaConta.proxy` sai **mascarado** (`http://usuario:***@host:porta`), por `nucleo.proxy.mascarar`. A resposta vai para o painel e para log, e credencial de proxy não precisa passear por ali. A construção da resposta de conta vira uma função única (`_resposta_conta`) pelo mesmo motivo: repetida em cada rota, bastava uma delas esquecer o `mascarar` para a senha sair inteira no JSON — e ninguém notaria até ela aparecer num log.
+
+O que a API **não** faz é recusar proxy com credencial. Ele é perfeitamente usável pelo Playwright, que é quem opera; quem não o aceita é o `chrome.exe` cru do cadastro, e é lá que a recusa acontece (Task 10), com a reserva ainda intacta e uma mensagem que diz o que fazer.
 
 O lifespan chama `orq.recuperar()` **antes** de `rodar()`. É o único ponto do sistema que roda uma vez por boot, e é onde um job deixado em `rodando` por um crash anterior — com crédito reservado que nunca voltou — precisa ser resolvido antes de o motor puxar qualquer coisa nova.
 
@@ -3389,6 +3813,70 @@ def test_patch_conta_desativa(cliente):
     r = c.patch(f"/contas/{cid}", json={"ativa": False})
     assert r.status_code == 200
     assert repo.conta(cid).ativa is False
+
+
+def test_patch_grava_o_proxy_da_conta(cliente):
+    # cada conta sai por um IP proprio: e o que impede o Google de correlacionar as
+    # contas entre si
+    c, repo = cliente
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    r = c.patch(f"/contas/{cid}", json={"proxy": "http://1.2.3.4:8080"})
+    assert r.status_code == 200
+    assert repo.conta(cid).proxy == "http://1.2.3.4:8080"
+    assert r.json()["proxy"] == "http://1.2.3.4:8080"
+
+
+def test_patch_recusa_proxy_que_nao_da_para_usar(cliente):
+    # falhar no cadastro e melhor do que abrir um navegador que sai pelo IP errado
+    c, repo = cliente
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    r = c.patch(f"/contas/{cid}", json={"proxy": "1.2.3.4:8080"})
+    assert r.status_code == 422
+    assert repo.conta(cid).proxy is None
+
+
+def test_patch_apaga_o_proxy_com_string_vazia(cliente):
+    # sem isso nao ha como VOLTAR para "sem proxy" — `None` no PATCH significa
+    # "nao mexe", entao tirar o proxy seria impossivel pela API
+    c, repo = cliente
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    con = repo.conta(cid); con.proxy = "http://1.2.3.4:8080"; repo.salvar_conta(con)
+    r = c.patch(f"/contas/{cid}", json={"proxy": ""})
+    assert r.status_code == 200
+    assert repo.conta(cid).proxy is None
+
+
+def test_resposta_de_conta_mascara_a_senha_do_proxy(cliente):
+    # a resposta vai para o painel e para log; credencial de proxy nao precisa
+    # passear por ali
+    c, repo = cliente
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    con = repo.conta(cid)
+    con.proxy = "http://davi:segredo@1.2.3.4:8080"
+    repo.salvar_conta(con)
+
+    corpo = c.get("/contas").json()[0]
+    assert corpo["proxy"] == "http://davi:***@1.2.3.4:8080"
+    assert "segredo" not in c.get("/contas").text
+
+
+def test_conta_sem_proxy_responde_null(cliente):
+    c, repo = cliente
+    repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    assert c.get("/contas").json()[0]["proxy"] is None
+
+
+def test_nova_conta_aceita_proxy_e_recusa_url_torta():
+    # a rota `POST /contas` entra no Task 10 (precisa abrir navegador); o esquema
+    # existe antes dela para que o cadastro ja nasca no IP certo — conta que nasce no
+    # IP de casa e depois muda para proxy denuncia exatamente o que o proxy evita
+    from flowpool.api.esquemas import NovaConta
+
+    assert NovaConta(email="a@b.com").proxy is None
+    assert NovaConta(email="a@b.com", proxy="http://1.2.3.4:8080").proxy == \
+        "http://1.2.3.4:8080"
+    with pytest.raises(ValueError):
+        NovaConta(email="a@b.com", proxy="ftp://1.2.3.4:8080")
 
 
 def test_saude_resume_o_pool(cliente):
@@ -3537,10 +4025,32 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from flowpool.nucleo.erros import ProxyInvalido
+from flowpool.nucleo.proxy import analisar
 from flowpool.nucleo.tipos import (
     PROPORCAO_PADRAO, PROPORCOES, EstadoJob, Modelo, Modo, SaudeSessao, Tier,
     quantidade_maxima,
 )
+
+
+def _proxy_usavel(v: str | None) -> str | None:
+    """Recusa no cadastro a URL de proxy que nao da para usar.
+
+    `analisar` levanta `ProxyInvalido`, que nao e `ValueError` — o Pydantic so
+    converte `ValueError` em 422, entao sem esta traducao a URL torta subiria como 500
+    e o painel diria "erro interno" para um campo mal digitado. Vazio continua valendo
+    e significa "sem proxy": e assim que se VOLTA para o IP de casa (ou para a VPN de
+    sistema, que o app nem enxerga).
+    """
+    if v is None:
+        return None
+    if not v.strip():
+        return None
+    try:
+        analisar(v)
+    except ProxyInvalido as e:
+        raise ValueError(str(e)) from e
+    return v.strip()
 
 # O que cada modo usa quando o pedido nao diz o modelo. Video vai em Omni Flash porque
 # e nele que o dropdown do Flow ja abre — assumir Veo seria escolher por conta propria
@@ -3657,16 +4167,37 @@ class RespostaConta(BaseModel):
     saude: SaudeSessao
     ativa: bool
     falhas: int
+    # SEMPRE mascarado por `nucleo.proxy.mascarar` antes de chegar aqui. A resposta vai
+    # para o painel e para log, e credencial de proxy nao precisa passear por ali.
+    proxy: str | None = None
 
 
 class PatchConta(BaseModel):
     ativa: bool | None = None
     tier: Tier | None = None
+    # `None` significa "nao mexe"; string vazia significa "tira o proxy". Sem os dois
+    # sentidos separados nao haveria como voltar uma conta para "sem proxy".
+    proxy: str | None = None
+
+    @field_validator("proxy")
+    @classmethod
+    def proxy_da_para_usar(cls, v: str | None) -> str | None:
+        return _proxy_usavel(v)
 
 
 class NovaConta(BaseModel):
     email: str
     tier: Tier = Tier.FREE
+    # O cadastro ja nasce com o proxy porque o LOGIN tem que sair do mesmo IP do
+    # trabalho: conta que nasce no IP de casa e depois passa a operar por proxy mostra
+    # ao Google exatamente a mudanca que o proxy existe para evitar. Quem consome e o
+    # `POST /contas` da Task 10, que abre o chrome.exe do cadastro.
+    proxy: str | None = None
+
+    @field_validator("proxy")
+    @classmethod
+    def proxy_da_para_usar(cls, v: str | None) -> str | None:
+        return _proxy_usavel(v)
 
 
 class Saude(BaseModel):
@@ -3695,7 +4226,8 @@ from flowpool.api.esquemas import (
 )
 from flowpool.dados.repo import Repo
 from flowpool.motor.orquestrador import Orquestrador
-from flowpool.nucleo.tipos import EstadoJob, Job, SaudeSessao
+from flowpool.nucleo.proxy import mascarar
+from flowpool.nucleo.tipos import Conta, EstadoJob, Job, SaudeSessao
 from flowpool.transporte.base import FlowTransport
 
 
@@ -3714,6 +4246,18 @@ def _resposta(j: Job) -> RespostaJob:
                        nome=j.nome, produto=j.produto, proporcao=j.proporcao,
                        quantidade=j.quantidade, conta_id=j.conta_id,
                        arquivo=j.arquivo, tentativas=j.tentativas, erro=j.erro)
+
+
+def _resposta_conta(c: Conta) -> RespostaConta:
+    """Conta como a API a mostra — com a senha do proxy fora.
+
+    Existe como funcao unica de proposito: com a construcao repetida em cada rota,
+    bastava uma delas esquecer o `mascarar` para a credencial sair inteira no JSON, e
+    ninguem notaria ate ela aparecer num log.
+    """
+    return RespostaConta(id=c.id, email=c.email, tier=c.tier, saldo=c.saldo,
+                         saldo_confiavel=c.saldo_confiavel, saude=c.saude,
+                         ativa=c.ativa, falhas=c.falhas, proxy=mascarar(c.proxy))
 
 
 def criar_app(repo: Repo, transporte: FlowTransport, raiz: Path | str,
@@ -3797,9 +4341,7 @@ def criar_app(repo: Repo, transporte: FlowTransport, raiz: Path | str,
 
     @app.get("/contas", response_model=list[RespostaConta])
     def listar_contas() -> list[RespostaConta]:
-        return [RespostaConta(id=c.id, email=c.email, tier=c.tier, saldo=c.saldo,
-                              saldo_confiavel=c.saldo_confiavel, saude=c.saude,
-                              ativa=c.ativa, falhas=c.falhas) for c in repo.contas()]
+        return [_resposta_conta(c) for c in repo.contas()]
 
     @app.patch("/contas/{id_}", response_model=RespostaConta)
     def alterar_conta(id_: int, p: PatchConta) -> RespostaConta:
@@ -3810,10 +4352,14 @@ def criar_app(repo: Repo, transporte: FlowTransport, raiz: Path | str,
             c.ativa = p.ativa
         if p.tier is not None:
             c.tier = p.tier
+        if "proxy" in p.model_fields_set:
+            # aqui o teste e pelo campo TER VINDO no corpo, nao por ele ser `None`
+            # como nos outros dois. O validador transforma "" em None, e string vazia
+            # e justamente como se TIRA o proxy de uma conta — com o teste de `None`
+            # nao haveria como voltar uma conta para "sem proxy".
+            c.proxy = p.proxy
         repo.salvar_conta(c)
-        return RespostaConta(id=c.id, email=c.email, tier=c.tier, saldo=c.saldo,
-                             saldo_confiavel=c.saldo_confiavel, saude=c.saude,
-                             ativa=c.ativa, falhas=c.falhas)
+        return _resposta_conta(c)
 
     @app.get("/saude", response_model=Saude)
     def saude() -> Saude:
@@ -3834,7 +4380,7 @@ A rota `POST /contas` fica de fora deste task porque ela precisa abrir navegador
 - [ ] **Step 5: Rodar e ver passar**
 
 Run: `.venv/Scripts/pytest tests/test_api.py -q`
-Expected: `26 passed`
+Expected: `32 passed`
 
 - [ ] **Step 6: Commit**
 
@@ -4351,6 +4897,10 @@ O fluxo validado em 2026-08-20 tem quatro partes, e cada uma existe por um motiv
 
 **Medido: a sessão expira em ~48 h** (`expires` dois dias à frente). A revalidação é exatamente o mesmo fluxo do cadastro, então `revalidar` reusa `cadastrar` e a rota da API é a mesma função com outro nome.
 
+**O Chrome de login sai pelo proxy da conta, e isso não é opcional.** Se a conta nasce no IP de casa e só depois passa a operar por proxy, o Google vê a mudança de IP entre o login e o uso — que é exatamente o sinal que o proxy existe para evitar. O login tem que sair do **mesmo IP do trabalho**. Por isso `argumentos_chrome` recebe o proxy e `argumento_chrome` (de `nucleo/proxy.py`, Task 1) entra na linha de comando.
+
+E há uma incompatibilidade que **precisa ser erro, não silêncio**: o `chrome.exe` cru aceita `--proxy-server=` mas **não** aceita credencial embutida — ele abre um diálogo pedindo usuário e senha. Num cadastro dirigido por `subprocess`, esse diálogo é uma janela parada que ninguém preenche, e o `proc.wait()` fica pendurado até o teto de 15 minutos, sem erro, sem log e sem pista. `argumento_chrome` recusa antes de abrir a janela, com uma mensagem que diz as duas saídas reais: proxy autorizado por IP, ou um retransmissor local sem senha. A recusa acontece **antes** do `Popen`, para não deixar Chrome órfão nem perfil ocupado.
+
 Testável sem rede: o caminho do perfil, a recusa quando o Chrome não existe, a montagem dos argumentos, a detecção de perfil ocupado e a interpretação da resposta de sessão. O que sobra — Chrome subindo, humano logando — não se testa, se roda.
 
 - [ ] **Step 1: Escrever o teste que falha**
@@ -4362,6 +4912,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from flowpool.nucleo.erros import ProxyInvalido
 from flowpool.transporte.base import SessaoMorta
 from flowpool.transporte.pw.sessao import (
     ChromeAusente, argumentos_chrome, caminho_perfil, checar_chrome,
@@ -4405,6 +4956,31 @@ def test_argumentos_do_chrome_nao_pedem_porta_de_depuracao(tmp_path):
     # evitar, e o sintoma seria "o Google nao deixa logar", nao "flag errada".
     args = argumentos_chrome(tmp_path / "chrome.exe", tmp_path / "perfil", "https://x")
     assert not any("remote-debugging" in a or "--headless" in a for a in args)
+
+
+def test_sem_proxy_a_linha_de_comando_nao_ganha_flag_nenhuma(tmp_path):
+    # o caso comum hoje: campo vazio, e o Chrome sai pelo IP da maquina (ou pela VPN
+    # de sistema, que ele nem enxerga)
+    args = argumentos_chrome(tmp_path / "chrome.exe", tmp_path / "perfil", "https://x")
+    assert not any("proxy" in a for a in args)
+
+
+def test_o_chrome_de_login_sai_pelo_proxy_da_conta(tmp_path):
+    # o login tem que sair do MESMO IP do trabalho: conta que nasce no IP de casa e
+    # depois opera por proxy mostra ao Google a mudanca que o proxy evita
+    args = argumentos_chrome(tmp_path / "chrome.exe", tmp_path / "perfil", "https://x",
+                             proxy="http://1.2.3.4:8080")
+    assert "--proxy-server=http://1.2.3.4:8080" in args
+    assert args[-1] == "https://x"      # a URL continua sendo o ultimo argumento
+
+
+def test_o_chrome_de_login_recusa_proxy_com_credencial(tmp_path):
+    # o Chrome cru abre um dialogo de usuario e senha, e o `proc.wait()` fica
+    # pendurado ate o teto de 15 minutos sem erro nenhum. Recusar antes do Popen e o
+    # que transforma isso numa mensagem em vez de numa janela parada.
+    with pytest.raises(ProxyInvalido, match="retransmissor"):
+        argumentos_chrome(tmp_path / "chrome.exe", tmp_path / "perfil", "https://x",
+                          proxy="http://davi:segredo@1.2.3.4:8080")
 
 
 def test_perfil_livre_quando_nenhum_chrome_usa_a_pasta(tmp_path, monkeypatch):
@@ -4480,6 +5056,7 @@ from pathlib import Path
 
 from playwright.async_api import async_playwright
 
+from flowpool.nucleo.proxy import analisar, argumento_chrome
 from flowpool.transporte.base import SessaoMorta
 from flowpool.transporte.pw import seletores as sel
 
@@ -4535,20 +5112,32 @@ def caminho_perfil(raiz: Path, email: str) -> Path:
     return Path(raiz) / f"{slug}-{digest}"
 
 
-def argumentos_chrome(exe: Path, perfil: Path, url: str) -> list[str]:
+def argumentos_chrome(exe: Path, perfil: Path, url: str,
+                      proxy: str | None = None) -> list[str]:
     """A linha de comando do Chrome de LOGIN.
 
     Nenhuma flag de automacao entra aqui. `--remote-debugging-port` e o que faz o
     Google recusar; `--headless` mata o IntersectionObserver que libera o aviso de
     privacidade. As tres que ficam sao so para o perfil novo nao abrir assistente.
+
+    O proxy entra porque o LOGIN tem que sair do mesmo IP do trabalho: conta que nasce
+    no IP de casa e depois passa a operar por proxy mostra ao Google exatamente a
+    mudanca que o proxy existe para evitar. `argumento_chrome` levanta `ProxyInvalido`
+    quando a URL traz credencial — o Chrome cru abriria um dialogo de autenticacao, e
+    a janela ficaria parada ate o teto de login sem erro nenhum.
     """
-    return [
+    args = [
         str(exe),
         f"--user-data-dir={Path(perfil).resolve()}",
         "--no-first-run",
         "--no-default-browser-check",
-        url,
     ]
+    flag = argumento_chrome(proxy)
+    if flag:
+        args.append(flag)
+    # a URL fica sempre por ultimo: e assim que o Chrome a distingue de uma flag
+    args.append(url)
+    return args
 
 
 def _linhas_de_comando() -> list[str]:
@@ -4606,12 +5195,18 @@ def interpretar_sessao(dados: dict) -> datetime:
     return datetime.fromisoformat(bruto.replace("Z", "+00:00"))
 
 
-async def abrir_contexto(perfil: Path, headless: bool = False):
+async def abrir_contexto(perfil: Path, proxy: str | None = None,
+                         headless: bool = False):
     """Devolve (playwright, contexto). Quem chama fecha os dois.
 
     `headless` existe so na assinatura, e o default e o unico valor sensato: sem
     janela visivel o IntersectionObserver nao dispara, a lista de projetos nao termina
     de renderizar e nada disso da erro — so nao aparece.
+
+    `proxy` e a URL da conta. `analisar` devolve None quando nao ha proxy (o caso
+    comum hoje), e `launch_persistent_context` com `proxy=None` e o mesmo que nao
+    passar nada. Diferente do Chrome de login, aqui credencial e aceita: o Playwright
+    autentica sozinho, sem dialogo.
     """
     checar_chrome()
     Path(perfil).mkdir(parents=True, exist_ok=True)
@@ -4623,13 +5218,18 @@ async def abrir_contexto(perfil: Path, headless: bool = False):
         no_viewport=True,
         args=["--start-maximized"],
         accept_downloads=True,
+        proxy=analisar(proxy),
     )
     return pw, ctx
 
 
-async def validar_perfil(perfil: Path) -> datetime:
-    """Abre o perfil com Playwright e prova que a sessao esta viva."""
-    pw, ctx = await abrir_contexto(perfil)
+async def validar_perfil(perfil: Path, proxy: str | None = None) -> datetime:
+    """Abre o perfil com Playwright e prova que a sessao esta viva.
+
+    Valida pelo MESMO proxy por que a conta vai operar. Validar pelo IP de casa e
+    depois gerar por outro IP e a divergencia que este campo existe para nao criar.
+    """
+    pw, ctx = await abrir_contexto(perfil, proxy)
     try:
         pagina = ctx.pages[0] if ctx.pages else await ctx.new_page()
         await pagina.goto(sel.URL_FLOW, wait_until="domcontentloaded")
@@ -4640,19 +5240,27 @@ async def validar_perfil(perfil: Path) -> datetime:
         await pw.stop()
 
 
-async def cadastrar(raiz_perfis: Path, email: str) -> tuple[Path, datetime]:
+async def cadastrar(raiz_perfis: Path, email: str,
+                    proxy: str | None = None) -> tuple[Path, datetime]:
     """Sobe o Chrome de login, espera a pessoa, e valida. Devolve (perfil, expira_em).
 
     Revalidar sessao caida e a MESMA coisa: mesmo perfil, mesmo fluxo. Por isso nao ha
     duas funcoes.
+
+    O login sai pelo proxy da conta, e a montagem dos argumentos vem ANTES do `Popen`:
+    proxy com credencial levanta `ProxyInvalido` ali, com o Chrome ainda nao aberto e
+    o perfil ainda livre. Levantar depois deixaria uma janela orfa segurando o perfil,
+    e a proxima tentativa morreria em `PerfilOcupado` — um erro que aponta para o lugar
+    errado.
     """
     perfil = caminho_perfil(raiz_perfis, email)
     perfil.mkdir(parents=True, exist_ok=True)
     exe = checar_chrome()
+    args = argumentos_chrome(exe, perfil, sel.URL_FLOW, proxy)
     if perfil_em_uso(perfil):
         raise PerfilOcupado(f"{perfil} ja esta aberto em outro Chrome — feche antes")
 
-    proc = subprocess.Popen(argumentos_chrome(exe, perfil, sel.URL_FLOW))
+    proc = subprocess.Popen(args)
     print(INSTRUCOES)
 
     # `to_thread` nao e detalhe: `cadastrar` e aguardado dentro de uma rota do FastAPI,
@@ -4666,13 +5274,13 @@ async def cadastrar(raiz_perfis: Path, email: str) -> tuple[Path, datetime]:
             f"{perfil} continua em uso depois de o Chrome de login sair — "
             "outro Chrome pegou a janela. Feche tudo e repita.")
     await asyncio.to_thread(esperar_perfil_livre, perfil)
-    return perfil, await validar_perfil(perfil)
+    return perfil, await validar_perfil(perfil, proxy)
 ```
 
 - [ ] **Step 4: Rodar e ver passar**
 
 Run: `.venv/Scripts/pytest tests/test_sessao.py -q`
-Expected: `12 passed`
+Expected: `15 passed`
 
 - [ ] **Step 5: Adicionar as rotas de conta na API**
 
@@ -4681,6 +5289,7 @@ Em `flowpool/api/app.py`, os imports (o `json` ainda não existe lá) e as duas 
 ```python
 import json
 
+from flowpool.nucleo.erros import ProxyInvalido
 from flowpool.transporte.base import SessaoMorta
 from flowpool.transporte.pw.sessao import ChromeAusente, PerfilOcupado, cadastrar
 ```
@@ -4690,7 +5299,14 @@ from flowpool.transporte.pw.sessao import ChromeAusente, PerfilOcupado, cadastra
     async def nova_conta(p: NovaConta) -> RespostaConta:
         raiz_perfis = Path(raiz) / "flowpool" / "perfis"
         try:
-            perfil, expira_em = await cadastrar(raiz_perfis, p.email)
+            # o proxy entra JA no cadastro: o login tem que sair do mesmo IP por onde
+            # a conta vai operar, senao o Google ve a mudanca de IP entre o login e o
+            # uso — que e o sinal que o proxy existe para evitar
+            perfil, expira_em = await cadastrar(raiz_perfis, p.email, p.proxy)
+        except ProxyInvalido as e:
+            # 409, nao 500: proxy com credencial no chrome.exe do cadastro e uma
+            # combinacao que nao existe, e a mensagem ja diz as duas saidas reais
+            raise HTTPException(409, str(e)) from e
         except (ChromeAusente, PerfilOcupado) as e:
             raise HTTPException(409, str(e)) from e
         except SessaoMorta as e:
@@ -4702,14 +5318,17 @@ from flowpool.transporte.pw.sessao import ChromeAusente, PerfilOcupado, cadastra
         except ValueError as e:
             raise HTTPException(409, str(e)) from e
         c = repo.conta(id_)
+        # `criar_conta` nao recebe proxy — a coluna e so onde o valor descansa entre
+        # uma sessao e outra. Sem esta gravacao, o cadastro sairia pelo proxy e todas
+        # as geracoes seguintes pelo IP de casa, que e o pior dos dois mundos.
+        c.proxy = p.proxy
+        repo.salvar_conta(c)
         # a expiracao vai para evento, nao para coluna: a sessao vive ~48h e quem
         # descobre que caiu e a propria geracao, marcando `expirada`. Guardar a data
         # numa coluna exigiria migracao para uma informacao que ninguem consulta.
         repo.registrar_evento(None, c.id, "sessao_validada",
                               json.dumps({"expira_em": expira_em.isoformat()}))
-        return RespostaConta(id=c.id, email=c.email, tier=c.tier, saldo=c.saldo,
-                             saldo_confiavel=c.saldo_confiavel, saude=c.saude,
-                             ativa=c.ativa, falhas=c.falhas)
+        return _resposta_conta(c)
 
     @app.post("/contas/{id_}/revalidar", response_model=RespostaConta)
     async def revalidar(id_: int) -> RespostaConta:
@@ -4717,16 +5336,16 @@ from flowpool.transporte.pw.sessao import ChromeAusente, PerfilOcupado, cadastra
         if c is None:
             raise HTTPException(404, "conta nao existe")
         # revalidar E cadastrar: mesmo perfil, mesmo Chrome, mesmas duas telas. A
-        # sessao expira em ~48h medidas, entao isto vira rotina, nao excecao.
-        _, expira_em = await cadastrar(Path(c.perfil).parent, c.email)
+        # sessao expira em ~48h medidas, entao isto vira rotina, nao excecao. E pelo
+        # MESMO proxy: revalidar por outro IP e o unico jeito de a conta trocar de IP
+        # sem ninguem pedir.
+        _, expira_em = await cadastrar(Path(c.perfil).parent, c.email, c.proxy)
         c.saude = SaudeSessao.VIVA
         c.falhas = 0
         repo.salvar_conta(c)
         repo.registrar_evento(None, c.id, "sessao_revalidada",
                               json.dumps({"expira_em": expira_em.isoformat()}))
-        return RespostaConta(id=c.id, email=c.email, tier=c.tier, saldo=c.saldo,
-                             saldo_confiavel=c.saldo_confiavel, saude=c.saude,
-                             ativa=c.ativa, falhas=c.falhas)
+        return _resposta_conta(c)
 ```
 
 - [ ] **Step 6: Cadastrar o perfil de mapeamento à mão, uma vez**
@@ -4748,12 +5367,17 @@ Logue numa conta **grátis** (não a principal), passe as duas telas de boas-vin
 .venv/Scripts/python -c "import asyncio,pathlib;from flowpool.transporte.pw.sessao import validar_perfil;print(asyncio.run(validar_perfil(pathlib.Path('flowpool/perfis/mapeamento'))))"
 ```
 
+(Sem proxy de propósito: o perfil de mapeamento é ferramenta de desenvolvimento, não
+conta de produção. Para provar um proxy contratado, acrescente-o como segundo argumento
+de `validar_perfil` e confira o IP de saída em `https://ifconfig.me` antes de cadastrar
+a conta de verdade — um proxy que só falha na primeira geração custa um login manual.)
+
 Expected: uma data ~48 h à frente, por exemplo `2026-08-22 15:04:05+00:00`. Se sair `SessaoMorta`, o login não completou — refaça o Step 6 e confirme que a lista de projetos apareceu antes de fechar.
 
 - [ ] **Step 8: Rodar a suíte**
 
 Run: `.venv/Scripts/pytest -q`
-Expected: `184 passed` (172 das Tasks 0–8 + 12 da sessão)
+Expected: `219 passed` (204 das Tasks 0–8 + 15 da sessão)
 
 - [ ] **Step 9: Commit**
 
@@ -4792,6 +5416,32 @@ O preço disso é ser **cego ao preço**: o modo direto não anuncia quanto vai 
 Isso não é zelo abstrato. A versão anterior de `fumaca.py` tinha um `ajustar()` tolerante — `except Exception: print("sem efeito — seguindo")` — pensado para o caso benigno de "essa opção já estava assim". O que ele fez de verdade foi engolir um clique que não pegou: uma geração pedida em **4s saiu em 8s**, com saldo debitado, arquivo na pasta e ninguém percebendo. Passo tolerante em configuração de geração é o pior padrão possível neste app, porque a saída existe e parece certa.
 
 O modelo **não aparece no texto do chip** (`Vídeo · 720p · 8s crop_9_16 x1`), então a verificação acontece em dois momentos: o modelo é conferido com o painel ainda aberto, lendo o rótulo do dropdown; modo, proporção, duração e quantidade são conferidos no chip depois de fechar.
+
+#### Proxy: o erro que NÃO é da conta
+
+`abrir_sessao` passa `conta.proxy` para `abrir_contexto`, e é o que faz cada conta sair
+por um IP próprio. O que precisa ficar registrado aqui é o que acontece quando o proxy
+**cai**.
+
+Proxy fora do ar aparece como `net::ERR_PROXY_CONNECTION_FAILED` — uma exceção comum do
+Playwright, que chega ao orquestrador pelo ramo genérico de `_executar`. E é exatamente
+onde ela deve chegar: **falha de proxy é falha de rede.** Gasta tentativa, estorna a
+reserva e devolve o job à fila, mas **não** marca a conta `expirada` nem seca. Marcar
+seria errado duas vezes — a conta está boa e cheia de crédito, e ela sumiria do pool por
+um problema de infraestrutura que se conserta trocando de IP, não mexendo na conta. Com
+vinte contas atrás de proxies do mesmo fornecedor, uma queda do fornecedor marcaria o
+pool inteiro `expirado` e cobraria vinte logins manuais por nada.
+
+Não há código novo para isso: o ramo genérico já se comporta assim. O que existe é o
+teste que o prende (`test_proxy_morto_nao_marca_a_conta_expirada_nem_seca`, Task 7), e
+ele foi conferido mordendo — acrescentar um `conta.saude = EXPIRADA` naquele ramo o faz
+falhar.
+
+Uma consequência de operação que vale dizer em voz alta: **o proxy tem que estar de pé
+antes do cadastro**, e o mesmo daí em diante. Conta que loga por um IP e opera por outro
+mostra ao Google a mudança que o proxy existe para evitar, e trocar o proxy de uma conta
+já cadastrada é uma mudança de IP como qualquer outra — não é erro do app, mas também
+não é de graça.
 
 #### Pendências declaradas
 
@@ -4849,7 +5499,10 @@ class TransportePlaywright:
 
     # ------------------------------------------------------------------ sessao
     async def abrir_sessao(self, conta: Conta) -> Sessao:
-        pw, ctx = await abrir_contexto(Path(conta.perfil))
+        # o proxy e DA CONTA, nao do processo: e assim que cada conta sai por um IP
+        # proprio e o Google nao consegue correlacionar as vinte entre si. Vazio e o
+        # normal hoje, e `abrir_contexto` trata None como "sem proxy".
+        pw, ctx = await abrir_contexto(Path(conta.perfil), conta.proxy)
         pagina = ctx.pages[0] if ctx.pages else await ctx.new_page()
         await pagina.goto(sel.URL_FLOW, wait_until="domcontentloaded")
         try:
@@ -5336,7 +5989,7 @@ E em `tests/test_custos.py`, os mesmos números — **a contagem de casos não m
 - [ ] **Step 7: Rodar a suíte**
 
 Run: `.venv/Scripts/pytest -q`
-Expected: `184 passed` — o mesmo total do Task 10. Valores mudaram, casos não.
+Expected: `219 passed` — o mesmo total do Task 10. Valores mudaram, casos não.
 
 - [ ] **Step 8: Commit**
 
@@ -5661,7 +6314,7 @@ Expected: `4 passed`
 - [ ] **Step 6: Rodar a suíte inteira**
 
 Run: `.venv/Scripts/pytest -q`
-Expected: `188 passed` (184 + 4 do cliente)
+Expected: `223 passed` (219 + 4 do cliente)
 
 - [ ] **Step 7: Commit**
 
