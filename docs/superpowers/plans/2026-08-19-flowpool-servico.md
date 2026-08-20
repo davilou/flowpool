@@ -2912,6 +2912,8 @@ git commit -m "feat: interface de transporte e implementacao falsa"
 
 ### Task 7: Orquestrador
 
+> **Nota de revisão (Task 16) — semeadura de saldo.** `passo()` ganhou um segundo caminho: quando `_conta_para` devolve `None`, o motor tenta ler o saldo de uma conta viva sem `saldo_confiavel` (`_semear_uma_conta` → `semear_saldo`) e **reescolhe** antes de adiar o job. Sem isso o pool nascia morto — ver a Task 16 para o impasse inteiro. Os listings de código abaixo são anteriores a essa mudança nesse ponto; tudo o mais continua valendo.
+
 > **Nota de revisão (Task 15) — duração.** `_conta_para` passa `job.duracao` a `apta` e `escolher`, `_executar` a passa a `reservar`, e `_pedido` a leva ao transporte. É o mesmo trio de pontos por onde `quantidade` já passava. Os listings de código abaixo já estão na forma final; `tests/test_orquestrador.py` ganhou 4 casos e teve o helper `job_fast()` fixado em `8s`, pelo mesmo motivo do task anterior.
 
 **Files:**
@@ -3900,6 +3902,8 @@ git commit -m "feat: orquestrador de fila com troca de conta e retry"
 ---
 
 ### Task 8: API HTTP
+
+> **Nota de revisão (Task 16) — o saldo nasce lido.** `POST /contas` e `POST /contas/{id}/revalidar` passaram a **ler o saldo** depois de validar a sessão, e a resposta traz o número real. Entrou também `POST /contas/{id}/saldo`, para reler sob demanda. Os listings abaixo são anteriores a isso.
 
 **Files:**
 - Create: `flowpool/api/esquemas.py`, `flowpool/api/app.py`
@@ -6853,6 +6857,8 @@ A recusa em imagem olha `model_fields_set`, e não o valor — o padrão do dom�
 Run: `.venv/Scripts/pytest -q`
 Expected: `290 passed` (257 → 290; +33 casos).
 
+> **Correção de total (Task 16).** O painel web (o "plano 2" citado no fim deste arquivo) foi implementado sem entrar aqui como task, e trouxe **3 casos** de `tests/test_api.py`. A partir daí a suíte estava em **293**, e é desse número que a Task 16 parte.
+
 Os que provam a mudança, e não só a acompanham:
 
 - `test_conta_que_paga_um_clipe_de_4s_nao_e_escolhida_para_o_de_8s` — com saldo 10, a conta paga o de 4s (7) e não paga o de 8s (12). É o teste que prova que a duração atravessou **`escolher`**, e não só `reservar`.
@@ -6879,6 +6885,134 @@ Os 7 créditos do clipe de 4s são **anunciados**, não medidos. Vale fechar a m
 ```
 
 Expected: `custo real: 7`. Se sair diferente, o número da tabela muda e a escala inteira se move junto — é ela que sustenta 6s, 10s e os três Veo. **Não rodar sem decidir gastar o crédito**: a geração é real.
+
+---
+
+### Task 16: O pool nascia morto — o saldo passa a nascer lido
+
+**Files:**
+- Modify: `flowpool/motor/orquestrador.py`, `flowpool/api/app.py`, `flowpool/api/painel.js`, `flowpool/transporte/falso.py`
+- Test: `tests/test_orquestrador.py`, `tests/test_api.py`
+
+**O defeito.** `Conta.saldo` nasce em `0`. `POST /contas` validava a sessão e **não lia o saldo**. O saldo só era escrito na reconciliação, que roda no `finally` de `_executar` — ou seja, **depois** de um job. Mas `escolher` exige `custo <= conta.saldo`, então com saldo `0` nenhuma conta é apta.
+
+O ciclo fechava sobre si mesmo: **o saldo só atualiza rodando job, e o job só roda se houver saldo.**
+
+Reproduzido com uma conta de 50 créditos reais no Flow e um transporte falso sabendo disso:
+
+```
+conta recem-cadastrada -> saldo=0  confiavel=False
+  volta 1: job=pendente tentativas=0 conta=None reavaliar=sim
+  volta 2: job=pendente tentativas=0 conta=None reavaliar=sim
+  volta 3: job=pendente tentativas=0 conta=None reavaliar=sim
+saldo real no Flow: 50   |   saldo no banco: 0
+VEREDITO: IMPASSE — o job nunca roda
+```
+
+**A gravidade está no silêncio.** Nada quebrava e nada aparecia: sem exceção, sem evento útil, sem alerta no painel. O job ficava `pendente` para sempre. O usuário cadastrava a primeira conta, enfileirava um job, e o app simplesmente não fazia nada — que é o pior modo de falha possível para quem está começando a usar o serviço.
+
+- [ ] **Step 1: Escrever o teste do impasse, e vê-lo falhar**
+
+Este vem primeiro, e é o mais importante da task. Em `tests/test_orquestrador.py`:
+
+```python
+async def test_conta_recem_cadastrada_com_saldo_zero_nao_trava_a_fila(repo, tmp_path):
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")   # saldo 0, confiavel False
+    jid = repo.criar_job(job_fast())
+
+    orq = Orquestrador(repo, TransporteFalso(saldos={cid: 50}), raiz=tmp_path)
+    for _ in range(3):
+        await orq.passo()
+        if repo.job(jid).estado is EstadoJob.PRONTO:
+            break
+
+    j = repo.job(jid)
+    assert j.estado is EstadoJob.PRONTO, "o job ficou pendente para sempre"
+    assert j.conta_id == cid
+    assert repo.conta(cid).saldo_confiavel is True
+```
+
+Antes da correção ele falha exatamente como o defeito se manifesta: `AssertionError: o job ficou pendente para sempre`.
+
+A asserção tem que ser **sobre o job ter andado**, não sobre o saldo ter mudado. Um teste que só conferisse o saldo passaria com a correção pela metade — o saldo lido e o job continuando parado.
+
+O job é de **vídeo**, e isso não é escolha à toa: imagem custa **zero** desde a medição de 20/08, e com custo zero qualquer conta com saldo zero já é apta. O impasse não existe em imagem, e um teste em modo imagem passaria antes e depois da correção sem provar nada.
+
+- [ ] **Step 2: `semear_saldo` no orquestrador**
+
+Um método público, porque a API também o usa:
+
+```python
+async def semear_saldo(self, conta: Conta) -> bool:
+    """Abre sessao SO para ler o saldo e reconciliar. Devolve True se leu."""
+```
+
+Abre sessão, lê o saldo, `reconciliar`, salva a conta, registra `saldo_semeado` com `{"antes", "lido"}`, fecha a sessão no `finally`. `SessaoMorta` marca a conta `expirada` **campo a campo** (`marcar_sessao`, como no resto do motor) e registra `saldo_nao_semeado`; qualquer outra falha só registra `saldo_nao_semeado`. **Nunca propaga**: quem chama está no meio de um passo do motor ou de uma rota de cadastro, e nos dois lugares travar seria pior do que ficar sem o número.
+
+O evento não é enfeite. É uma abertura de navegador **sem job associado** — sem registro, quem auditasse o banco depois procuraria a geração que a pagou e não acharia. E vale dizer o que ele significa: ler saldo **não gasta crédito**, é abrir o menu do avatar.
+
+- [ ] **Step 3: o motor se cura sozinho — a correção que importa**
+
+Em `passo()`, quando `_conta_para` devolve `None`, o motor semeia **uma** conta e reescolhe:
+
+```python
+conta = self._conta_para(job, agora)
+if conta is None and await self._semear_uma_conta(agora):
+    conta = self._conta_para(job, agora)
+```
+
+Ler o saldo no cadastro (Step 4) sozinho **não basta**. Qualquer caminho que deixe uma conta com saldo desatualizado reintroduz o impasse numa variante: um `flowpool.db` recriado, uma conta inserida direto no banco, um reset diário que ninguém observou. Só a cura no motor cobre o conjunto.
+
+`_proxima_a_semear` decide a candidata, e cada regra dela evita um estrago:
+
+- **Só conta ativa, com sessão viva e `saldo_confiavel` falso.** O corte por `saldo_confiavel` é o contrapeso obrigatório: sem ele, um pool **legitimamente seco** viraria um laço de abrir e fechar navegador a cada volta do motor.
+- **Fora a conta seca com prazo em aberto** (`seca_ate > agora`). O Flow já recusou gerar nela apesar do saldo; reler o número não muda isso até o reset, e relê-lo a cada volta é o mesmo laço quente que `seca_ate` existe para evitar.
+- **Uma por passo**, a de **leitura mais antiga** primeiro (nunca lida antes de todas). Abrir navegador é caro e o motor roda em laço; semear o pool inteiro abriria vinte janelas para despachar um job.
+
+E a propriedade que fecha o desenho: isso **não vira laço quente por construção**, porque a semeadura só acontece com um job **já reivindicado**, e o job que não acha conta sai da fila por `ESPERA_RESET`.
+
+A semeadura fica **dentro** do `try` que já existia, mas não pode disparar o ramo `escolha_falhou`: falha de leitura de saldo não é erro de configuração e não pode gastar tentativa do job. É por isso que `semear_saldo` engole as próprias exceções em vez de deixá-las subir.
+
+- [ ] **Step 4: a conta nasce com o saldo lido**
+
+`POST /contas` e `POST /contas/{id}/revalidar` chamam `await orq.semear_saldo(c)` **depois** de validar a sessão e antes de responder. A resposta passa a trazer o saldo real, que é o que o painel mostra.
+
+O ponto delicado: **se a leitura falhar e a sessão estiver viva, a conta é cadastrada mesmo assim**, com `saldo_confiavel = False`. Recusar o cadastro por causa do saldo seria pior — a sessão é a parte cara (login manual, pessoa na frente do Chrome, até 900s de espera) e o saldo é recuperável por três caminhos diferentes: o motor, o botão do painel e a próxima revalidação.
+
+Na revalidação há um agravante que justifica a leitura ainda mais: a sessão caiu horas ou dias atrás, e o saldo guardado envelheceu junto — conta gratuita reseta todo dia.
+
+- [ ] **Step 5: `POST /contas/{id}/saldo` e o botão do painel**
+
+A mesma leitura, avulsa, para quem quer conferir sem esperar a fila andar. `404` para conta que não existe.
+
+Diferente das duas rotas do Step 4, esta **recusa** quando não consegue ler: `409` com o e-mail da conta e a sugestão de revalidar. O botão existe justamente para conferir, e devolver `200` com o número velho como se fosse fresco seria pior do que não ter botão.
+
+No `painel.js`: botão **"Ler saldo"** na linha da conta, ao lado de "Revalidar", com o teto de sessão (`TETO_SESSAO_MS`) porque abre navegador do lado do servidor. A mensagem de sucesso do cadastro passa a olhar `saldo_confiavel` — sem isso, uma leitura falha faria a tela dizer "entrou no pool com 0 créditos", e o usuário concluiria que a conta está seca quando o que faltou foi só a leitura.
+
+- [ ] **Step 6: o contador que prova que o navegador não abriu**
+
+`TransporteFalso` ganha `self.aberturas`, incrementado em `abrir_sessao`. É o mesmo raciocínio do `criacoes_projeto` da Task 7: o estado final do banco **não distingue** "não abriu navegador" de "abriu e não adiantou", e é exatamente essa diferença que o teste do pool seco precisa afirmar.
+
+- [ ] **Step 7: Rodar a suíte**
+
+Run: `.venv/Scripts/python.exe -m pytest -q`
+Expected: `308 passed` (293 → 308; +15 casos — 8 em `test_orquestrador.py`, 7 em `test_api.py`).
+
+Os que provam a mudança, e não só a acompanham:
+
+- `test_conta_recem_cadastrada_com_saldo_zero_nao_trava_a_fila` — **o teste do impasse**. Falhava antes da correção.
+- `test_pool_seco_de_verdade_nao_abre_navegador` — o contrapeso. Conta com saldo `5`, confiável, e um job que custa 20: `t.aberturas == 0`. Sem ele, a correção do impasse trocaria um pool parado por um laço de abrir e fechar Chrome.
+- `test_conta_seca_nao_e_relida_antes_do_prazo` — o mesmo, pela outra porta (`seca_ate` no futuro).
+- `test_motor_semeia_uma_conta_por_passo` e `test_semeadura_prefere_a_conta_de_leitura_mais_antiga` — as duas regras de custo da semeadura.
+- `test_semeadura_com_sessao_morta_expira_a_conta_e_nao_trava_o_laco` — falha de leitura não pode gastar tentativa do job nem parar o passo.
+- `test_semear_saldo_sozinho_nao_gera_nada` — ler saldo não gasta crédito, e é isso que torna aceitável abrir um navegador só para isso.
+- `test_cadastro_devolve_o_saldo_lido_do_flow` e `test_conta_cadastrada_ja_pode_rodar_job` — o impasse visto da porta de entrada.
+- `test_cadastro_sobrevive_a_leitura_de_saldo_quebrada` — a conta entra mesmo sem o número.
+- `test_rota_de_saldo_que_nao_conseguiu_ler_avisa_em_vez_de_mentir` — o `409`.
+
+- [ ] **Step 8: Commit**
+
+Três commits separados: código+testes, painel, docs.
 
 ---
 

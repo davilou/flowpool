@@ -23,9 +23,15 @@ Serviço local, um usuário, uma máquina: **não há login, e a porta escuta s�
 
 ## O que o painel faz
 
-**Contas** — o centro. Cadastrar uma conta nova, revalidar sessão caída, ativar e
-desativar, e trocar tier e proxy. Cada linha mostra e-mail, tier, saldo, saúde da sessão
-e o proxy (sempre mascarado: a senha nunca sai do servidor).
+**Contas** — o centro. Cadastrar uma conta nova, revalidar sessão caída, ler o saldo,
+ativar e desativar, e trocar tier e proxy. Cada linha mostra e-mail, tier, saldo, saúde
+da sessão e o proxy (sempre mascarado: a senha nunca sai do servidor).
+
+**O saldo é lido no cadastro**, e não fica em zero esperando o primeiro job. Tem que ser
+assim: `escolher` só manda job para conta cujo saldo cobre o custo, então conta com saldo
+zero nunca rodaria nada — e sem rodar nada o saldo nunca seria lido. O botão **Ler saldo**
+refaz a leitura quando você quiser conferir; o motor também refaz sozinho quando precisa
+despachar e não acha conta apta. Ler saldo abre uma janela e **não gasta crédito**.
 
 **Cadastrar conta abre um Chrome comum e espera você.** A chamada bloqueia até o login
 terminar — pode levar minutos, e é normal. O painel desabilita o formulário, mostra os
@@ -73,6 +79,7 @@ retransmissor local sem senha.
 Documentação interativa em **http://127.0.0.1:8777/docs**.
 
 `GET /saude`, `GET|POST /contas`, `PATCH /contas/{id}`, `POST /contas/{id}/revalidar`,
+`POST /contas/{id}/saldo`,
 `GET|POST /jobs`, `POST /jobs/lote`, `GET|DELETE /jobs/{id}`, `GET /projetos`,
 `DELETE /projetos/{id}`.
 

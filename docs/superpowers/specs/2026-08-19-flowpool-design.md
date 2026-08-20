@@ -165,6 +165,18 @@ A chave é o **par**, nunca o produto sozinho: projeto do Flow pertence a uma co
 
 ## Contabilidade de crédito
 
+**O saldo nasce lido.** Não é detalhe de conveniência: sem isso o pool nasce morto, e nasceu. `Conta.saldo` começa em `0`, `escolher` exige `custo <= saldo`, e o saldo só era escrito na reconciliação — que roda no fim de um job. O ciclo fechava sobre si mesmo: **o saldo só atualiza rodando job, e o job só roda se houver saldo.** Cadastrar a primeira conta e enfileirar um job deixava o job `pendente` para sempre.
+
+A gravidade estava no silêncio. Não havia exceção, não havia evento útil, não havia alerta no painel — só um job parado e um usuário sem nada para olhar. Um defeito que grita é barato; este não gritava.
+
+Por isso o saldo é lido em **três** momentos, e os três existem por razões diferentes:
+
+1. **No cadastro e na revalidação**, logo depois de a sessão ser validada. É uma abertura de navegador a mais, uma vez por conta, num momento em que a sessão *acabou* de ser provada boa. Se a leitura falhar, **a conta é cadastrada mesmo assim**, com `saldo_confiavel = false`: a sessão é a parte cara (login manual, pessoa na frente do Chrome) e o saldo é recuperável; recusar o cadastro por causa do saldo jogaria fora o único trabalho que não dá para refazer sozinho.
+2. **No motor, quando a escolha não acha conta.** Ver *Fila e execução* — é a correção que realmente fecha o buraco, porque o passo 1 sozinho não cobre banco recriado, conta inserida por fora nem reset diário que ninguém observou.
+3. **Sob demanda**, pelo botão do painel (`POST /contas/{id}/saldo`), para quem quer conferir sem esperar a fila andar.
+
+Ler saldo **não gasta crédito**: é abrir o menu do avatar, não gerar nada. É o que torna aceitável abrir um navegador só para isso.
+
 O saldo é **lido do Flow e reconciliado** com o débito previsto, não apenas descontado localmente. Motivo: geração que falha depois de debitar, custo que o Google muda, imagem que às vezes sai a zero — qualquer um desses acumula erro. Descontando só localmente, em uma semana o app manda job para conta seca e a fila trava sem explicação.
 
 Regra: descontar o custo previsto na hora de despachar (para não estourar o saldo com jobs simultâneos) e reconciliar com a leitura real ao término. Divergência acima de um limiar vira evento e derruba a confiança no valor até a próxima leitura.
@@ -263,6 +275,19 @@ Um worker por conta viva, com teto global de simultâneos (configurável; começ
 
 **Há recuperação no boot.** Antes de o motor puxar qualquer coisa nova, todo job deixado em `rodando` por um crash anterior é resolvido — a fila só olha para `pendente`, então sem isso ele nunca seria retomado nem falharia, e o crédito que ele reservou nunca voltaria. A diferença é o `id_remoto`: vazio significa que o Flow nunca aceitou o pedido, então a reserva é estornada e o job volta para `pendente` sem gastar tentativa (não foi ele que falhou, foi a máquina); preenchido significa que existe geração lá fora, já paga, e aí o job volta preservando `id_remoto` e conta, sem estorno. Cada caso vira evento (`recuperado_sem_gerar`, `recuperado_com_geracao`).
 
+**O motor se cura sozinho quando nenhuma conta serve.** Quando `escolher` devolve `None` e existe pelo menos uma conta ativa, com sessão viva, cujo `saldo_confiavel` é falso, o motor **abre sessão nessa conta, lê o saldo, reconcilia e escolhe de novo** — antes de adiar o job. Sem isso, qualquer caminho que deixe uma conta com saldo desatualizado reintroduz o impasse de *Contabilidade de crédito* numa variante nova: um `flowpool.db` recriado, uma conta inserida direto no banco, um reset diário que ninguém observou. Ler o saldo no cadastro cobre o caso comum; só a cura no motor cobre o resto.
+
+Quatro regras a cercam, e cada uma evita um estrago diferente:
+
+- **Uma conta por passo, não todas.** Abrir navegador é caro e o motor roda em laço; semear o pool inteiro abriria vinte janelas para despachar um job.
+- **A de leitura mais antiga primeiro** (nunca lida antes de todas). É a que tem mais chance de ter crédito que o banco não enxerga.
+- **Conta com `saldo_confiavel` verdadeiro NÃO é relida.** É o contrapeso obrigatório: sem ele, um pool legitimamente seco viraria um laço de abrir e fechar navegador a cada volta. Pelo mesmo motivo fica de fora a conta **seca com prazo em aberto** — o Flow já recusou gerar nela apesar do saldo, e reler o número não muda isso até o reset.
+- **Falha na leitura não trava o laço.** Sessão morta marca a conta `expirada` (campo a campo, como todo o resto); qualquer outra falha só vira evento. Nos dois casos o passo termina e o job é adiado normalmente, sem gastar tentativa — não foi o job que falhou.
+
+Isso **não** vira laço quente por construção: a semeadura só acontece com um job já reivindicado, e o job que não acha conta sai da fila por `ESPERA_RESET`.
+
+Cada leitura vira evento — `saldo_semeado` com o valor lido e o anterior, `saldo_nao_semeado` com o erro. Sem eles, uma abertura de navegador **sem job associado** ficaria sem explicação no banco, e quem auditasse depois procuraria a geração que a pagou sem nunca achar.
+
 **Falha por saldo não é erro:** marca a conta seca até o reset estimado — gravando `seca_ate` e adiando o `reavaliar_em` do job para o mesmo horário — e devolve o job para a fila, que ele reaparece em outra conta sozinho. Marcar sem prazo, ou adiar sem marcar, reproduz o laço quente.
 
 **Falha por sessão morta** marca a conta `expirada` e emite alerta no painel — essa exige a pessoa. A sessão não morre só ao abrir: no transporte real ela cai no meio de gerar, consultar ou baixar, então esse caminho também estorna a reserva. E a marcação de sessão é escrita **campo a campo**, não regravando a linha inteira da conta: com dois workers na mesma conta, a gravação de linha cheia a partir de uma cópia carregada antes ressuscita para `viva` a sessão que o outro acabou de expirar, e o pool volta a despachar para uma conta que exige login manual.
@@ -305,11 +330,16 @@ caçando outro bug, acrescentar uma marcação de saúde àquele ramo.
 | `DELETE` | `/jobs/{id}` | cancela um job que ainda não rodou |
 | `GET` | `/contas` | saldo, tier e saúde de sessão de cada conta |
 | `POST` | `/contas` | abre o navegador para o login manual de uma conta nova |
-| `POST` | `/contas/{id}/revalidar` | reabre o navegador para renovar sessão caída |
+| `POST` | `/contas/{id}/revalidar` | reabre o navegador para renovar sessão caída; relê o saldo |
+| `POST` | `/contas/{id}/saldo` | relê o saldo daquela conta no Flow, agora |
 | `PATCH` | `/contas/{id}` | ativa/desativa, corrige tier |
 | `GET` | `/projetos` | vínculos (conta, produto) → projeto do Flow; filtra por `conta_id` e `produto` |
 | `DELETE` | `/projetos/{id}` | esquece o vínculo **local**; não apaga nada no Flow |
 | `GET` | `/saude` | resumo: contas vivas, crédito total, fila |
+
+`POST /contas` e `POST /contas/{id}/revalidar` **leem o saldo antes de responder**, e a resposta traz o número real — é ele que o painel mostra. As duas continuam devolvendo `201`/`200` quando a leitura falha e a sessão está viva: a conta entra (ou volta) com `saldo_confiavel = false`. O porquê está em *Contabilidade de crédito*.
+
+`POST /contas/{id}/saldo` é a mesma leitura, avulsa, com um botão correspondente na linha da conta no painel. Ela é a única das três que **recusa** quando não consegue ler: `409`, porque o botão existe justamente para conferir, e devolver `200` com o número velho como se fosse fresco seria pior do que não ter botão.
 
 Corpo de `POST /jobs`:
 
@@ -518,6 +548,10 @@ A gestão de projetos é testada pelo **contador de criações** do transporte f
 O caso de lote ganha teste próprio na escolha de conta, e ele afirma a coisa certa: **conta com saldo para uma imagem não pode ser escolhida para um job de quatro.** Afirmar só sobre a reserva deixaria passar exatamente o defeito que interessa — o app escolhendo uma conta que não paga o pedido e culpando a conta (marcando-a seca) por um erro de cálculo.
 
 A **duração** ganha o teste gêmeo, e pelo mesmo raciocínio: **conta com saldo 10 é escolhida para um clipe de 4s (7 créditos) e não é escolhida para o de 8s (12).** É esse par de asserções que prova que a duração atravessou `escolher`, e não só `reservar` — e ele existe em duas alturas, na função pura e ponta a ponta pelo orquestrador. Do outro lado da fronteira, o transporte falso cobra por duração igual ao Flow: se ele cobrasse um número fixo, o motor passaria no teste com uma contabilidade que o real desmente.
+
+**O impasse do pool que nasce morto tem teste próprio, e ele é o mais importante da suíte de motor:** conta com saldo `0` no banco, 50 no transporte, um job na fila — depois de N passos, o job **rodou**. Escrito antes da correção, ele falhava exatamente como o defeito se manifestava em produção: job `pendente`, zero tentativas, nenhum erro. Um teste que só afirmasse sobre o saldo passaria sem provar nada; a asserção tem que ser sobre o job ter andado.
+
+Ele vem acompanhado do teste que o equilibra: **conta com `saldo_confiavel` verdadeiro e saldo insuficiente não é relida.** Sem essa segunda asserção, a correção do impasse transformaria um pool legitimamente seco num laço de abrir e fechar navegador — e a prova é a contagem de sessões abertas no transporte falso, não o estado final do banco, porque o estado final não distingue "não abriu" de "abriu e não adiantou".
 
 O transporte real é verificado à mão contra o Flow, não em CI. Três coisas do chip só se provam ali:
 
