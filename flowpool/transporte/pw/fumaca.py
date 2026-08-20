@@ -6,9 +6,18 @@ A versao anterior deste arquivo falava com o Flow direto — foi assim que o chi
 descoberto, e cumpriu o papel. A partir daqui ela exercita o TRANSPORTE, senao sao
 dois codigos concorrentes e so um e o que roda em producao.
 
+Os arquivos posicionais mudam de papel com o MODO, igual ao transporte: em `frames2v`
+sao o frame inicial e o final; em `ingredients2v` e em `imagem`, ate tres referencias.
+
 Uso:
     python -m flowpool.transporte.pw.fumaca <perfil> <modo> <modelo> "<prompt>" \
         [arquivos...] [--proporcao 9:16] [--quantidade 1] [--duracao 4s]
+
+    # imagem com referencia — o comeco do pipeline: foto da roupa -> modelo vestida.
+    # Nao gasta credito (imagem e gratuita) e exercita as DUAS correcoes de hoje: a
+    # troca de modo vindo de video e o anexo em modo imagem.
+    python -m flowpool.transporte.pw.fumaca perfis/g1 imagem nano-banana \
+        "a modelo vestindo a roupa da referencia" "Moda/roupa.png"
 """
 
 from __future__ import annotations
@@ -17,7 +26,10 @@ import argparse
 import asyncio
 from pathlib import Path
 
-from flowpool.nucleo.tipos import DURACAO_PADRAO, DURACOES, Conta, Modelo, Modo, Tier
+from flowpool.nucleo.tipos import (
+    DURACAO_PADRAO, DURACOES, Conta, Modelo, Modo, Tier, aceita_referencia,
+    max_referencias,
+)
 from flowpool.transporte.base import Estado, Pedido, Sessao
 from flowpool.transporte.pw.transporte import TransportePlaywright
 
@@ -43,7 +55,10 @@ async def main(a: argparse.Namespace) -> None:
     modo = Modo(a.modo)
     pedido = Pedido(
         modo=modo, modelo=Modelo(a.modelo), prompt=a.prompt,
-        referencias=a.arquivos if modo is Modo.INGREDIENTS2V else [],
+        # IMAGEM TAMBEM: o Flow gera imagem a partir de uma foto, e e por ai que o
+        # pipeline do usuario comeca. Quem aceita sai do dominio, nao de um `if` daqui.
+        referencias=(a.arquivos[:max_referencias(modo)]
+                     if aceita_referencia(modo) else []),
         frame_inicial=a.arquivos[0] if modo is Modo.FRAMES2V and a.arquivos else None,
         frame_final=a.arquivos[1] if modo is Modo.FRAMES2V and len(a.arquivos) > 1 else None,
         proporcao=a.proporcao, quantidade=a.quantidade, duracao=a.duracao,

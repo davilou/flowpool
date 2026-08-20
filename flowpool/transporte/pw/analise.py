@@ -145,21 +145,69 @@ def faltando_no_chip(chip: str, modo: str, proporcao: str, quantidade: int,
         sel.LIGADURA_PROPORCAO[proporcao],
         f"x{quantidade}",
     ]
-    rotulo_modo = sel.ROTULO_MODO_NO_CHIP[modo]
-    if rotulo_modo:
-        alvos.insert(0, rotulo_modo)
-    else:
-        # Imagem nao se anuncia no chip — o lugar do nome do modo fica com o do modelo.
-        # Mas NAO verificar seria abrir o buraco que esta funcao existe para fechar: um
-        # chip que continuou em video passaria como imagem. Confirma-se por AUSENCIA:
-        # nenhum marcador dos outros modos pode estar la.
-        intrusos = [r for m, r in sel.ROTULO_MODO_NO_CHIP.items()
-                    if r and m != modo and r in chip]
-        if intrusos:
-            return [f"modo {modo} (o chip ainda diz {intrusos[0]!r})"]
     if duracao:
         alvos.append(duracao)
-    return [a for a in alvos if a not in chip]
+    faltou = [a for a in alvos if a not in chip]
+
+    aceitos = sel.ROTULO_MODO_NO_CHIP[modo]
+    if aceitos:
+        # QUALQUER um dos marcadores confirma. Nos submodos de video o mais fraco e o
+        # rotulo do pai ("video"), porque nao esta medido se o chip nomeia "Frames" e
+        # "Elementos" — ver a nota em `seletores.ROTULO_MODO_NO_CHIP`.
+        if not any(r in chip for r in aceitos):
+            faltou.insert(0, aceitos[0])
+        return faltou
+    # Imagem nao se anuncia no chip — o lugar do nome do modo fica com o do modelo. Mas
+    # NAO verificar seria abrir o buraco que esta funcao existe para fechar: um chip que
+    # continuou em video passaria como imagem. Confirma-se por AUSENCIA: nenhum marcador
+    # dos outros modos pode estar la.
+    intrusos = [rs[0] for m, rs in sel.ROTULO_MODO_NO_CHIP.items()
+                if rs and m != modo and any(r in chip for r in rs)]
+    if intrusos:
+        return [f"modo {modo} (o chip ainda diz {intrusos[0]!r})"]
+    return faltou
+
+
+def confirmacao_fraca(chip: str, modo: str) -> str | None:
+    """Aviso quando o chip so confirmou o modo pelo rotulo do PAI.
+
+    Existe para a tolerancia dos submodos nao ser calada. Quando `frames2v` passa
+    porque o chip diz "video" — e nao "frames" —, a corrida imprime esta linha, e ela e
+    justamente a medicao que falta: se ela nunca aparecer, o chip nomeia os submodos e
+    a tolerancia pode sair de `seletores.py`; se aparecer sempre, o chip nao os nomeia e
+    a tolerancia e a unica verificacao possivel.
+    """
+    aceitos = sel.ROTULO_MODO_NO_CHIP[modo]
+    if len(aceitos) < 2 or aceitos[0] in chip:
+        return None
+    fraco = next((r for r in aceitos[1:] if r in chip), None)
+    if not fraco:
+        return None
+    return (f"modo {modo}: o chip nao diz {aceitos[0]!r}, so {fraco!r} — a troca vale, "
+            f"mas o rotulo do submodo continua POR MEDIR (seletores.ROTULO_MODO_NO_CHIP)")
+
+
+def etapas_ate_o_modo(modo: str, visivel: bool) -> list[str]:
+    """Em quais botoes de modo clicar, na ordem, para chegar em `modo`.
+
+    MEDIDO 2026-08-20: a lista de modos do painel depende do modo atual. Com o chip em
+    imagem so existem `image` e `videocam`; `crop_free` e `chrome_extension` aparecem
+    depois que o painel esta em video. Clicar direto no submodo vindo de imagem e
+    clicar no vazio — foi o que fez um job real falhar tres vezes com
+    "esperava 1 candidato para 'button:has-text(\"chrome_extension\")', achei 0".
+
+    `visivel` e o que o transporte contou no painel ABERTO. Quando o alvo ja esta la,
+    um clique basta e nao se forca dois: cada clique extra e mais uma animacao e mais
+    uma chance de o painel redesenhar no meio.
+    """
+    if visivel:
+        return [modo]
+    pai = sel.MODO_PAI.get(modo)
+    if not pai:
+        raise GeracaoFalhou(
+            f"modo {modo} nao esta no painel e nao e submodo de nenhum outro — se o "
+            f"botao sumiu de vez, o conserto e em seletores.MODO_ICONE")
+    return [pai, modo]
 
 
 def indice_por_sufixo(rotulos, alvo: str) -> int:

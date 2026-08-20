@@ -87,6 +87,9 @@ BOTAO_MAIS_OPCOES = 'button:has-text("Mais opções")'
 BOTAO_NOVA_SESSAO = 'button:has-text("edit_square")'   # limpa a conversa do agente
 
 # Um unico input de arquivo serve referencias E frames: multiple=True, accept=image/*.
+# MEDIDO 2026-08-20: o input existe TAMBEM em modo imagem — um `input[type=file]` e um
+# botao de anexar, com o chip em imagem. O Flow aceita imagem com referencia (e o Nano
+# Banana gerando a partir de uma foto), e por isso `_anexar` anexa em imagem tambem.
 UPLOAD = 'input[type=file]'
 
 # --- criar projeto: sao DUAS etapas -------------------------------------
@@ -143,6 +146,25 @@ MODO_ICONE = {
 }
 BOTAO_MODO = {k: f'button:has-text("{lig}")' for k, lig in MODO_ICONE.items()}
 
+# FRAMES E ELEMENTOS SAO SUBMODOS DE VIDEO — nao irmaos dos outros dois.
+#
+# MEDIDO 2026-08-20, ao vivo, depois de um job falhar tres vezes com
+#   modo: esperava 1 candidato para 'button:has-text("chrome_extension")', achei 0
+# A lista de modos do painel DEPENDE do modo em que o chip esta:
+#   chip em VIDEO  -> image Imagem | videocam Video | crop_free Frames | chrome_extension Elementos
+#   chip em IMAGEM -> image Imagem | videocam Video
+# Ou seja: vindo de imagem, o botao do submodo simplesmente NAO EXISTE, e clicar nele
+# direto e clicar no vazio. Chega-se la em duas etapas — primeiro `videocam`, depois o
+# submodo.
+#
+# A hierarquia mora aqui, e nao numa condicao escondida na sequencia do transporte,
+# porque ela e um FATO DA INTERFACE: no dia em que o Google promover Frames a modo de
+# topo, ou criar um terceiro submodo, o conserto e uma linha deste dicionario.
+MODO_PAI = {
+    "frames2v": "t2v",
+    "ingredients2v": "t2v",
+}
+
 # O rotulo que o CHIP mostra para cada modo, ja normalizado (dom.sem_acento). E o que
 # a verificacao procura no texto do chip depois de configurar.
 # MEDIDO 2026-08-20 — o chip NAO nomeia o modo quando ele e imagem:
@@ -152,9 +174,22 @@ BOTAO_MODO = {k: f'button:has-text("{lig}")' for k, lig in MODO_ICONE.items()}
 # "imagem" ali faz a verificacao recusar uma configuracao que estava correta — foi o
 # que aconteceu na primeira fumaca. `None` significa "este modo nao se anuncia no chip,
 # confira o resto"; o modelo ja e conferido a parte, no painel aberto.
+#
+# NAO MEDIDO nos dois submodos: nao se sabe se o chip escreve "Frames"/"Elementos" ou
+# se continua dizendo so "Video" neles. Por isso o valor e uma TUPLA de marcadores
+# aceitos, do mais especifico para o mais fraco, e QUALQUER um deles confirma. Exigir
+# so o especifico daria falso negativo — bloquearia o modo inteiro por uma palavra que
+# talvez nunca apareca, depois de o modo ter trocado certinho. Aceitar o rotulo do pai
+# nao afrouxa o que importa: o chip que continuou em IMAGEM (o defeito real) segue
+# reprovando, porque nenhum dos dois marcadores esta la.
+#
+# COMO FECHAR A MEDICAO, sem gastar credito:
+#     python -m flowpool.transporte.pw.conferir <perfil> <uuid>
+# ele percorre os quatro modos e imprime o texto do chip em cada um. Se aparecer
+# "frames"/"elementos", apague a tolerancia e deixe so o marcador proprio.
 ROTULO_MODO_NO_CHIP = {
-    "imagem": None, "t2v": "video",
-    "frames2v": "frames", "ingredients2v": "elementos",
+    "imagem": (), "t2v": ("video",),
+    "frames2v": ("frames", "video"), "ingredients2v": ("elementos", "video"),
 }
 
 # Proporcao. MEDIDO 2026-08-20: `:text-is` NAO serve aqui, ao contrario do que a

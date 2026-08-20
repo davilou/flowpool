@@ -9,11 +9,13 @@ from pathlib import Path
 
 import pytest
 
-from flowpool.transporte.base import GeracaoFalhou
+from flowpool.nucleo.tipos import Modelo, Modo
+from flowpool.transporte.base import GeracaoFalhou, Pedido
 from flowpool.transporte.pw import seletores as sel
 from flowpool.transporte.pw.analise import (
-    caminho_final, escolher_opcao, exigir_proporcao_do_modo, exigir_unico,
-    faltando_no_chip, id_do_href, saldo_do_texto,
+    caminho_final, confirmacao_fraca, escolher_opcao, etapas_ate_o_modo,
+    exigir_proporcao_do_modo, exigir_unico, faltando_no_chip, id_do_href,
+    saldo_do_texto,
 )
 from flowpool.transporte.pw.transporte import TransportePlaywright
 
@@ -252,3 +254,164 @@ def test_imagem_aceita_as_cinco():
 
 def test_video_vertical_passa():
     exigir_proporcao_do_modo("t2v", "9:16")
+
+
+# --- Frames e Elementos sao SUBMODOS de Video ---------------------------
+#
+# MEDIDO 2026-08-20, ao vivo, num job que falhou tres vezes com
+#   "modo: esperava 1 candidato para 'button:has-text(\"chrome_extension\")', achei 0"
+# A lista de modos do painel DEPENDE do modo atual:
+#   chip em VIDEO  -> image Imagem | videocam Video | crop_free Frames | chrome_extension Elementos
+#   chip em IMAGEM -> image Imagem | videocam Video
+# Frames e Elementos nao existem enquanto o chip estiver em imagem.
+
+
+def test_frames_e_elementos_sao_submodos_de_video():
+    # a hierarquia e um FATO DA INTERFACE, e por isso mora em seletores.py — nao numa
+    # esperteza escondida na sequencia do transporte
+    assert sel.MODO_PAI["frames2v"] == "t2v"
+    assert sel.MODO_PAI["ingredients2v"] == "t2v"
+
+
+def test_os_dois_modos_de_topo_nao_tem_pai():
+    assert "t2v" not in sel.MODO_PAI
+    assert "imagem" not in sel.MODO_PAI
+
+
+def test_modo_visivel_no_painel_e_um_clique_so():
+    # nao forcar dois passos quando um basta: cada clique extra e uma animacao a mais
+    # e uma chance a mais de o painel redesenhar no meio
+    assert etapas_ate_o_modo("imagem", True) == ["imagem"]
+    assert etapas_ate_o_modo("frames2v", True) == ["frames2v"]
+
+
+def test_submodo_ausente_passa_pelo_video_primeiro():
+    # e a correcao do defeito: vindo de imagem, `chrome_extension` nao existe no painel
+    assert etapas_ate_o_modo("ingredients2v", False) == ["t2v", "ingredients2v"]
+    assert etapas_ate_o_modo("frames2v", False) == ["t2v", "frames2v"]
+
+
+def test_modo_de_topo_ausente_e_erro_e_nao_caminho_inventado():
+    # `imagem` e `videocam` existem nos dois estados do painel; um deles sumir e deploy
+    # do Google, e o conserto e em seletores.py — nao um clique adivinhado aqui
+    for modo in ("imagem", "t2v"):
+        with pytest.raises(GeracaoFalhou, match="painel"):
+            etapas_ate_o_modo(modo, False)
+
+
+# --- o rotulo do submodo no chip: tolerancia declarada ------------------
+
+
+CHIP_FRAMES = "frames - 720p - 4s crop_9_16 x1"
+CHIP_SO_VIDEO = "video - 720p - 4s crop_9_16 x1"
+CHIP_IMAGEM = "nano banana 2 lite crop_9_16 x1"
+
+
+def test_chip_que_nomeia_o_submodo_confirma():
+    assert faltando_no_chip(CHIP_FRAMES, "frames2v", "9:16", 1, "4s") == []
+
+
+def test_chip_que_so_diz_video_ainda_confirma_o_submodo():
+    # NAO MEDIDO: nao se sabe se o chip nomeia "Frames"/"Elementos" ou se mostra so
+    # "Video" nos submodos. Recusar aqui seria falso negativo — bloquearia o modo
+    # inteiro por causa de uma palavra que talvez nunca apareca.
+    assert faltando_no_chip(CHIP_SO_VIDEO, "frames2v", "9:16", 1, "4s") == []
+    assert faltando_no_chip(CHIP_SO_VIDEO, "ingredients2v", "9:16", 1, "4s") == []
+
+
+def test_chip_que_continuou_em_imagem_reprova_o_submodo():
+    # ESTE e o caso que o defeito produzia: o clique no submodo nao acontecia e a
+    # geracao seguia em imagem. Tolerar o rotulo do pai nao pode tolerar isto.
+    faltou = faltando_no_chip(CHIP_IMAGEM, "ingredients2v", "9:16", 1, "4s")
+    assert "elementos" in faltou
+
+
+def test_chip_de_video_puro_nao_e_confundido_com_frames():
+    # o contrario tambem: t2v so aceita "video", e um chip que diz "frames" reprova
+    assert faltando_no_chip(CHIP_FRAMES, "t2v", "9:16", 1, "4s") == ["video"]
+
+
+def test_confirmacao_pelo_rotulo_do_pai_e_declarada():
+    # a tolerancia nao pode ser calada: a corrida imprime a medicao que falta, e a
+    # linha vira o valor definitivo de ROTULO_MODO_NO_CHIP
+    aviso = confirmacao_fraca(CHIP_SO_VIDEO, "frames2v")
+    assert aviso and "frames2v" in aviso and "video" in aviso
+
+
+def test_confirmacao_pelo_rotulo_proprio_nao_avisa_nada():
+    assert confirmacao_fraca(CHIP_FRAMES, "frames2v") is None
+    assert confirmacao_fraca(CHIP_VIDEO, "t2v") is None
+    assert confirmacao_fraca(CHIP_IMAGEM, "imagem") is None
+
+
+# --- imagem com referencia: o Flow aceita, o transporte descartava ------
+
+
+class _InputFalso:
+    def __init__(self):
+        self.arquivos = None
+
+    async def set_input_files(self, arquivos):
+        self.arquivos = arquivos
+
+
+class _PaginaFalsa:
+    """So o que `_anexar` toca: um `input[type=file]` e a espera."""
+
+    def __init__(self):
+        self.upload = _InputFalso()
+
+    def locator(self, seletor):
+        alvo = self.upload
+        return type("L", (), {"first": alvo})()
+
+    async def wait_for_timeout(self, ms):
+        pass
+
+
+def _pedido(modo, **extra):
+    return Pedido(modo=modo, modelo=Modelo.NANO_BANANA, prompt="p", **extra)
+
+
+async def _anexado(pedido):
+    pagina = _PaginaFalsa()
+    await TransportePlaywright()._anexar(pagina, pedido)
+    return pagina.upload.arquivos
+
+
+async def test_imagem_com_referencia_anexa_em_vez_de_descartar():
+    # O BUG: `_anexar` retornava cedo em imagem e a referencia era jogada fora sem
+    # aviso. O pipeline do usuario COMECA aqui — foto da roupa -> modelo vestida.
+    assert await _anexado(_pedido(Modo.IMAGEM, referencias=["a.png"])) == \
+        [str(Path("a.png"))]
+
+
+async def test_imagem_sem_referencia_continua_sendo_texto_puro():
+    # imagem sem referencia e o caso comum e NAO pode virar erro
+    assert await _anexado(_pedido(Modo.IMAGEM)) is None
+
+
+async def test_imagem_respeita_o_mesmo_teto_de_tres():
+    anexados = await _anexado(
+        _pedido(Modo.IMAGEM, referencias=["a.png", "b.png", "c.png", "d.png"]))
+    assert len(anexados) == 3
+
+
+async def test_imagem_nao_anexa_frame_nenhum():
+    # frame inicial e final continuam exclusivos de frames2v
+    assert await _anexado(_pedido(Modo.IMAGEM, frame_inicial="a.png")) is None
+
+
+async def test_t2v_nao_anexa_nada():
+    assert await _anexado(_pedido(Modo.T2V, referencias=["a.png"])) is None
+
+
+async def test_ingredients2v_sem_referencia_continua_sendo_erro():
+    with pytest.raises(GeracaoFalhou, match="sem arquivo"):
+        await _anexado(_pedido(Modo.INGREDIENTS2V))
+
+
+async def test_frames2v_anexa_inicial_e_final_nessa_ordem():
+    anexados = await _anexado(
+        _pedido(Modo.FRAMES2V, frame_inicial="i.png", frame_final="f.png"))
+    assert anexados == [str(Path("i.png")), str(Path("f.png"))]

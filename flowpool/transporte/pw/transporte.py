@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from flowpool.nucleo import tipos
 from flowpool.nucleo.tipos import Conta, Modo
 from flowpool.transporte.base import (
     Estado, GeracaoFalhou, Pedido, ProjetoRemoto, SaldoInsuficiente, Sessao, SessaoMorta,
@@ -224,6 +225,30 @@ class TransportePlaywright:
         analise.exigir_unico(await loc.count(), seletor, o_que)
         await loc.click(timeout=15_000)
 
+    async def _escolher_modo(self, pagina, painel, modo: str) -> None:
+        """Frames e Elementos so existem no painel DEPOIS de ele estar em video.
+
+        MEDIDO 2026-08-20: a lista de modos depende do modo atual — com o chip em
+        imagem so ha `image` e `videocam`. Clicar direto em `chrome_extension` vindo de
+        imagem e clicar no vazio, e foi assim que um job real falhou tres vezes.
+
+        A espera pelo `videocam` antes de contar nao e zelo: ele existe nos DOIS
+        estados do painel, entao serve de ancora — contar o alvo antes de o painel
+        renderizar daria "nao esta visivel" e forcaria dois cliques onde um bastava.
+        """
+        try:
+            await painel.locator(sel.BOTAO_MODO["t2v"]).first.wait_for(timeout=15_000)
+        except Exception:
+            pass   # segue: quem da a mensagem boa e o `_clicar_unico`
+        visivel = await painel.locator(sel.BOTAO_MODO[modo]).count() > 0
+        etapas = analise.etapas_ate_o_modo(modo, visivel)
+        for passo in etapas:
+            o_que = "modo" if passo == modo else f"modo {passo} (pai de {modo})"
+            await self._clicar_unico(painel, sel.BOTAO_MODO[passo], o_que)
+            # o painel REDESENHA a cada troca de modo: sem esperar, o clique seguinte
+            # cai no layout velho
+            await pagina.wait_for_timeout(1200)
+
     async def _configurar(self, pagina, p: Pedido) -> str:
         """Abre o chip, ajusta tudo e CONFERE. Devolve o texto final do chip.
 
@@ -239,9 +264,9 @@ class TransportePlaywright:
         painel = self._painel(pagina)
         await painel.wait_for(timeout=15_000)
 
-        # ordem importa: o modo redefine as listas de proporcao, duracao e modelo
-        await self._clicar_unico(painel, sel.BOTAO_MODO[modo], "modo")
-        await pagina.wait_for_timeout(1200)
+        # ordem importa: o modo redefine as listas de proporcao, duracao e modelo — e
+        # tambem a propria lista de MODOS, o que faz dos submodos duas etapas
+        await self._escolher_modo(pagina, painel, modo)
 
         await self._clicar_unico(painel, sel.DROPDOWN_MODELO, "dropdown de modelo")
         # A escolha do modelo NAO sai por seletor CSS. Medido: o rotulo tem prefixo que
@@ -281,6 +306,11 @@ class TransportePlaywright:
         if faltando:
             raise GeracaoFalhou(
                 f"chip nao confirma a configuracao: diz {chip!r}, faltou {faltando}")
+        # a tolerancia do rotulo de submodo nao pode ser calada: esta linha e a medicao
+        # que falta sobre o que o chip escreve em `frames2v` e `ingredients2v`
+        aviso = analise.confirmacao_fraca(chip, modo)
+        if aviso:
+            print("chip:", aviso)
         return chip
 
     # ------------------------------------------------------------------- gerar
@@ -348,15 +378,30 @@ class TransportePlaywright:
 
         Quem decide o que cada arquivo significa e o MODO ja escolhido no chip, nao o
         seletor: em `crop_free` os arquivos viram frame inicial e final, em
-        `chrome_extension` viram referencias. Por isso `_configurar` roda ANTES daqui.
+        `chrome_extension` e em imagem viram referencias. Por isso `_configurar` roda
+        ANTES daqui.
+
+        IMAGEM TAMBEM ANEXA. MEDIDO 2026-08-20: com o chip em imagem a pagina tem um
+        `input[type=file]` e um botao de anexar — o Flow gera imagem A PARTIR de uma
+        foto, e e o Nano Banana fazendo isso. Enquanto este metodo retornava cedo em
+        imagem, a referencia anexada era jogada fora SEM AVISO, e a primeira etapa do
+        pipeline do usuario (foto da roupa -> modelo vestida) simplesmente nao existia.
+
+        A diferenca entre imagem e `chrome_extension` e a EXIGENCIA, nao o teto: os
+        dois aceitam ate tres, mas imagem sem referencia continua sendo geracao por
+        texto puro, que e o caso comum.
         """
-        if p.modo is Modo.INGREDIENTS2V:
-            arquivos = [str(Path(r)) for r in p.referencias[:3]]
-        elif p.modo is Modo.FRAMES2V:
+        if p.modo is Modo.FRAMES2V:
+            # frame inicial e final continuam exclusivos deste modo
             arquivos = [str(Path(x)) for x in (p.frame_inicial, p.frame_final) if x]
+        elif tipos.aceita_referencia(p.modo):
+            arquivos = [str(Path(r)) for r in
+                        p.referencias[:tipos.max_referencias(p.modo)]]
         else:
             return
         if not arquivos:
+            if not tipos.exige_arquivo(p.modo):
+                return
             raise GeracaoFalhou(f"modo {p.modo.value} sem arquivo para anexar")
         await pagina.locator(sel.UPLOAD).first.set_input_files(arquivos)
         await pagina.wait_for_timeout(3000)

@@ -5,7 +5,10 @@ de um deploy do Google e um job que falha tres vezes, troca de conta, falha de n
 morre com "TimeoutError" — que nao diz qual seletor morreu. Com ele, o diagnostico e
 uma linha.
 
-Nao gera nada e nao gasta credito: so navega, abre paineis e conta.
+Nao gera nada e nao gasta credito: so navega, abre paineis, TROCA DE MODO e conta.
+Trocar de modo entrou no roteiro porque a lista de modos do painel depende do modo
+atual (`seletores.MODO_PAI`), e porque e a unica forma de medir o que o chip escreve em
+`frames2v` e `ingredients2v` sem mandar uma geracao — ver `_medir_modos`.
 
 Uso:
     python -m flowpool.transporte.pw.conferir <perfil> [<uuid-do-projeto>]
@@ -107,6 +110,95 @@ async def _medir_grade(pagina) -> None:
             print(f"    {nivel}: {sig}")
 
 
+async def _abrir_painel(pagina):
+    """Abre o painel do chip e devolve o localizador dele."""
+    await pagina.locator(sel.CHIP_CONFIG).first.click()
+    await pagina.wait_for_timeout(2000)
+    return pagina.locator(sel.PAINEL_CHIP).first
+
+
+async def _clicar_modo(pagina, painel, modo: str) -> bool:
+    """Clica no botao do modo, se houver exatamente um. Ambiguidade e nao, nao talvez."""
+    loc = painel.locator(sel.BOTAO_MODO[modo])
+    if await loc.count() != 1:
+        return False
+    await loc.first.click()
+    await pagina.wait_for_timeout(1500)
+    return True
+
+
+async def _medir_modos(pagina, p: Placar):
+    """Percorre os quatro modos e imprime o texto do chip em cada um.
+
+    NAO GERA NADA E NAO GASTA CREDITO: so troca o modo e le o chip. E o instrumento das
+    duas medicoes que o mapa ainda deve:
+
+    1. A HIERARQUIA. A lista de modos do painel depende do modo atual — com o chip em
+       imagem so existem `image` e `videocam`. Cada linha diz por onde se chegou:
+       "direto" quando o botao ja estava la, "via t2v" quando foi preciso passar pelo
+       video primeiro (`seletores.MODO_PAI`).
+    2. O ROTULO NO CHIP. Nao se sabe se o chip escreve "Frames"/"Elementos" nos
+       submodos ou se continua dizendo so "Video". O veredito sai impresso: enquanto o
+       marcador proprio nao aparecer, a tolerancia de `ROTULO_MODO_NO_CHIP` fica.
+
+    Termina com o painel de volta em VIDEO, que e o modo com mais grupos para conferir.
+    """
+    print("\nmodos do chip (troca de modo nao gasta credito):")
+    for modo in sel.BOTAO_MODO:
+        visivel = await _modo_no_painel(pagina, modo)
+        painel = pagina.locator(sel.PAINEL_CHIP).first
+        via = "direto"
+        if not visivel:
+            pai = sel.MODO_PAI.get(modo)
+            if not pai or not await _clicar_modo(pagina, painel, pai):
+                p.faltando.append(f"chip.MODO[{modo}]")
+                print(f"[{'chip':9}] {('MODO[' + modo + ']'):24} FALTA "
+                      f"(nao esta no painel e nao ha por onde chegar)")
+                painel = await _abrir_painel(pagina)
+                continue
+            via = f"via {pai}"
+        if not await _clicar_modo(pagina, painel, modo):
+            p.faltando.append(f"chip.MODO[{modo}]")
+            print(f"[{'chip':9}] {('MODO[' + modo + ']'):24} FALTA ({via})")
+            painel = await _abrir_painel(pagina)
+            continue
+        p.ok += 1
+        await pagina.keyboard.press("Escape")
+        await pagina.wait_for_timeout(800)
+        chip = await _texto_do_chip(pagina)
+        print(f"[{'chip':9}] {('MODO[' + modo + ']'):24} OK ({via})  chip: {chip!r}")
+        _veredito_do_rotulo(modo, chip)
+        painel = await _abrir_painel(pagina)
+
+    # deixa o painel em video: e la que existem duracao e o dropdown de video
+    painel = pagina.locator(sel.PAINEL_CHIP).first
+    await _clicar_modo(pagina, painel, "t2v")
+    return pagina.locator(sel.PAINEL_CHIP).first
+
+
+async def _modo_no_painel(pagina, modo: str) -> bool:
+    """Se o botao daquele modo esta no painel ABERTO, agora."""
+    painel = pagina.locator(sel.PAINEL_CHIP).first
+    return await painel.locator(sel.BOTAO_MODO[modo]).count() > 0
+
+
+def _veredito_do_rotulo(modo: str, chip: str) -> None:
+    """Diz, em uma linha, se `ROTULO_MODO_NO_CHIP` pode largar a tolerancia."""
+    aceitos = sel.ROTULO_MODO_NO_CHIP[modo]
+    if len(aceitos) < 2:
+        return
+    proprio, pai = aceitos[0], aceitos[1]
+    if proprio in chip:
+        print(f"    -> ROTULO_MODO_NO_CHIP[{modo}]: o chip DIZ {proprio!r} — da para "
+              f"deixar so ele em seletores.py")
+    elif pai in chip:
+        print(f"    -> ROTULO_MODO_NO_CHIP[{modo}]: o chip NAO diz {proprio!r}, so "
+              f"{pai!r} — a tolerancia e a unica verificacao possivel, mantenha")
+    else:
+        print(f"    -> ROTULO_MODO_NO_CHIP[{modo}]: o chip nao diz nem {proprio!r} nem "
+              f"{pai!r} — o modo pode nao ter trocado")
+
+
 async def main(perfil: str, uuid: str | None = None) -> int:
     p = Placar()
     async with async_playwright() as pw:
@@ -146,14 +238,20 @@ async def main(perfil: str, uuid: str | None = None) -> int:
             await p.checar(pagina, "projeto", "CHIP_CONFIG", sel.CHIP_CONFIG)
             await p.checar(pagina, "projeto", "CARD_GRADE", sel.CARD_GRADE, minimo=0)
 
-            await pagina.locator(sel.CHIP_CONFIG).first.click()
-            await pagina.wait_for_timeout(2000)
-            painel = pagina.locator(sel.PAINEL_CHIP).first
+            painel = await _abrir_painel(pagina)
             await p.checar(pagina, "chip", "PAINEL_CHIP", sel.PAINEL_CHIP)
-            for modo, seletor in sel.BOTAO_MODO.items():
-                await p.checar(painel, "chip", f"MODO[{modo}]", seletor)
+            # A lista de MODOS depende do modo atual, e conferir os quatro de uma vez
+            # num painel so era o proprio engano: com o chip em imagem, `crop_free` e
+            # `chrome_extension` acusavam FALTA sem nada estar quebrado. `_medir_modos`
+            # percorre a hierarquia e devolve o painel ja de volta em VIDEO.
+            painel = await _medir_modos(pagina, p)
+            # daqui para baixo o painel esta em video: e o modo que tem grupo de
+            # duracao, e o que oferece so duas proporcoes
+            do_video = sel.PROPORCOES_POR_MODO["t2v"]
             for razao, seletor in sel.PROPORCAO.items():
-                await p.checar(painel, "chip", f"PROPORCAO[{razao}]", seletor)
+                # as outras tres faltarem AQUI e o esperado: elas so existem em imagem
+                await p.checar(painel, "chip", f"PROPORCAO[{razao}]", seletor,
+                               minimo=1 if razao in do_video else 0)
             for d, seletor in sel.DURACAO.items():
                 await p.checar(painel, "chip", f"DURACAO[{d}]", seletor)
             for n, seletor in sel.QUANTIDADE.items():
