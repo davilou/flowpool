@@ -7,6 +7,12 @@ Playwright, visibilidade de janela, deep link, varredura de DOM, locale na URL, 
 por texto). Propagadas nas seções *Restrições assumidas*, *Projetos*, *Transporte* e *Erro
 e observabilidade*. Referência primária: `flowpool/transporte/pw/seletores.py`.
 
+**Segunda revisão de campo:** 2026-08-20 — o mapeamento do **painel de configuração da
+geração** (`tune Configurações`) mostrou quatro grupos: confirmação, proporção,
+quantidade e **dois** dropdowns de modelo (um de imagem, um de vídeo). Daí três decisões
+novas, registradas em *Decisões de geração* e propagadas em *Modelo de dados*, *Escolha
+de conta*, *Contabilidade de crédito*, *Modos suportados* e *API HTTP*.
+
 ## O que é
 
 Um serviço local que gera vídeos e imagens no Google Flow usando um pool de contas Google cadastradas, escolhendo sozinho qual conta usar conforme o crédito disponível. Expõe uma API HTTP; o painel web e os scripts do pipeline (`prompt_h3.py`, `frames.py`) são clientes dela.
@@ -23,7 +29,9 @@ A aritmética que justifica o esforço: conta sem assinatura recebe 50 créditos
 
 **Login não se automatiza — e não é só por captcha e 2FA.** Medido em campo (20/08): o Google recusa o login com "Esse navegador ou app pode não ser seguro" sempre que o Chrome é dirigido por CDP — é a marca de automação que o próprio Playwright deixa, não falta de captcha resolvido. Por isso cadastrar conta **não abre o Chrome pelo Playwright**: sobe um `chrome.exe` comum via `subprocess.Popen`, com `--user-data-dir=<perfil>`, `--no-first-run`, `--no-default-browser-check` e a URL do Flow — sem CDP, sem flag de automação. A pessoa loga, passa as telas de boas-vindas nessa janela comum e **fecha**. Só então o app abre o mesmo perfil com Playwright para validar: `GET /fx/api/auth/session` precisa devolver `access_token`. A checagem antibot é exclusiva do fluxo de login — uma vez autenticado, o Playwright reaproveita o perfil sem reclamação nenhuma (foi medido: token válido, sem tela de login, sem aviso de boas-vindas, lista de projetos carregando). Consequência prática que o modelo precisa saber: **um perfil não pode ser aberto por dois Chromes ao mesmo tempo** — o segundo apenas entrega a URL para o primeiro ("Abrindo em uma sessão de navegador existente") e fecha, e o Playwright que tentar essa mesma sessão falha com `TargetClosedError`. O app precisa esperar o Chrome de cadastro terminar (ou confirmar que nenhum `chrome.exe` ainda usa aquele `--user-data-dir`) antes de validar com Playwright. Vinte contas = vinte logins manuais, uma vez, mais revalidação esporádica — pelo mesmo caminho.
 
-**Conta grátis nunca roda Veo Quality.** São 100 créditos por geração contra teto de 50/dia. Quality é exclusivo das contas pagas. Grátis roda Lite, Fast e imagem.
+**Conta grátis nunca roda Veo Quality.** São 100 créditos por geração contra teto de 50/dia. Quality é exclusivo das contas pagas. Grátis roda Omni Flash, Lite, Fast e imagem.
+
+O custo do **Omni Flash** ainda não foi medido. Entra como estimativa declarada na faixa do Veo Fast (20 grátis/Pro, 10 Ultra) — errar por alto só reserva crédito a mais, e a reconciliação de saldo corrige na primeira execução real, do mesmo jeito que vai desempatar a nota sobre custo de imagem.
 
 **Pool misto:** 1–2 contas pagas (Pro = 1.000 créditos/mês; Ultra = 10.000 ou 25.000/mês) mais o resto grátis.
 
@@ -46,17 +54,31 @@ Python 3.13 (mesmo do pipeline), FastAPI + uvicorn, SQLite, Playwright async, ht
 
 `Tiktok Shop/flowpool/`, com `perfis/` (um diretório de perfil de navegador por conta) e `flowpool.db`.
 
+## Decisões de geração
+
+Três decisões tomadas pelo Davi depois do mapeamento do painel de configuração (20/08), com o porquê de cada uma. Elas mudam o domínio, não só a interface.
+
+**O modelo padrão de vídeo é Omni Flash, não Veo.** O dropdown de vídeo do Flow **já abre em Omni Flash** — é o que a interface faz quando ninguém escolhe nada. Um transporte que não troque o modelo explicitamente gera nele, e o job sairia "Veo" no banco e Omni Flash na realidade, sem erro nenhum para denunciar. Duas consequências: `Modelo` ganha `OMNI_FLASH`, e é ele o padrão da API quando o pedido não diz o modelo (imagem herda `nano-banana`). O custo entra como **estimativa declarada** — 20/20/10, a faixa do Veo Fast — porque ninguém mediu ainda; errar por alto só reserva crédito a mais, e a reconciliação de saldo corrige na primeira execução real. Ficar sem custo cadastrado seria pior: levantaria `ModeloSemCusto` no caminho mais usado do app.
+
+**A proporção padrão é 9:16, sobrescrevível por pedido.** O canal do Davi é TikTok. Hoje ele gera em horizontal e recorta à mão depois; gerar já em vertical elimina esse passo e o recorte que ele custa. Os valores aceitos são exatamente os cinco botões do painel — `16:9`, `4:3`, `1:1`, `3:4`, `9:16` — porque um sexto valor não teria onde clicar. Continua por pedido: o padrão serve ao caso comum, não impede o resto.
+
+**Vídeo sai sempre em uma geração; imagem em lote só quando pedido explicitamente.** Razão do usuário: **take de vídeo é escolha dele, não sorteio.** Quatro variações de um vídeo não é escolher entre quatro takes — é gastar quatro vezes o crédito para receber três descartes. Variação de imagem é o oposto: barata, e serve justamente para escolher. Por isso `quantidade` aceita 1 a 4 em `modo=imagem` e **só 1** nos três modos de vídeo; um pedido de vídeo com mais é recusado com 422, e recusar é melhor do que gerar três vídeos que ninguém pediu.
+
 ## Modelo de dados
 
 **conta** — id, email, tier (`free` | `pro` | `ultra`), caminho do perfil, saldo conhecido, timestamp da última leitura de saldo, timestamp do último reset observado, `seca_ate`, estado da sessão (`viva` | `expirada` | `bloqueada`), falhas consecutivas, ativa (bool).
 
 `seca_ate` é até quando a conta está fora do pool. O Flow às vezes mostra saldo e mesmo assim recusa gerar — cota diária, throttle, rate limit. Sem um prazo gravado, o job recusado volta para a fila no mesmo instante, é despachado para a mesma conta e o motor gira em laço quente: CPU a 100%, um Chrome aberto e fechado por iteração, tabela de eventos crescendo sem parar, nenhuma tentativa consumida e nada nunca desistindo. É a materialização do que a seção *Fila e execução* já pedia com "marca a conta seca até o reset estimado".
 
-**job** — id, modo, prompt, referências (caminhos), modelo, prioridade, estado (`pending` | `running` | `done` | `failed` | `cancelled`), conta usada, id remoto da geração, caminho do arquivo final, tentativas, `custo_estimado`, erro, `produto`, timestamps.
+**job** — id, modo, prompt, referências (caminhos), modelo, `proporcao`, `quantidade`, prioridade, estado (`pending` | `running` | `done` | `failed` | `cancelled`), conta usada, id remoto da geração, caminho do arquivo final, tentativas, `custo_estimado`, erro, `produto`, timestamps.
 
 `produto` é o nome da pasta do produto na pasta do usuário (`Video Roupa`, `Panelas Monaco`, `Furadeira Pnoeoce`) e, ao mesmo tempo, o nome do projeto no Flow. É dele que `destino` deriva quando o pedido não traz caminho: `{produto}/clipes`. Ter os dois campos, e não só o caminho, é o que permite ao motor saber **em qual projeto do Flow** a geração acontece — ver *Projetos*.
 
-`custo_estimado` é quanto o job reservou da conta ao ser despachado, e fica gravado no banco. É o que permite estornar a reserva de um job que morreu antes de gerar — inclusive depois de um restart do serviço, quando não há mais nada em memória dizendo quanto aquele job tinha travado. Quem consome esse campo depois do restart é a **recuperação no boot**, descrita em *Fila e execução*; sem ela o campo seria persistido e nunca lido por ninguém.
+`proporcao` e `quantidade` são os dois grupos do painel de configuração da geração que o job carrega até o transporte. `proporcao` nasce `9:16` e `quantidade` nasce `1` — os defaults vivem na dataclass **e** na coluna, de propósito: job criado direto pelo repositório, sem passar pela API, também precisa nascer vertical e com uma geração só. Um `NULL` em `quantidade` viraria `None` multiplicando o custo, e o erro apareceria como `TypeError` dentro de `reservar`, longe da causa.
+
+Nenhum dos dois é atualizado depois da criação: são do pedido, como `prompt` e `modo`. Só muda ao longo da vida do job o que a execução decide — estado, conta, id remoto, arquivo, tentativas, custo, erro, reavaliação.
+
+`custo_estimado` é quanto o job reservou da conta ao ser despachado — o **total**, já multiplicado pela `quantidade` —, e fica gravado no banco. É o que permite estornar a reserva de um job que morreu antes de gerar — inclusive depois de um restart do serviço, quando não há mais nada em memória dizendo quanto aquele job tinha travado. Quem consome esse campo depois do restart é a **recuperação no boot**, descrita em *Fila e execução*; sem ela o campo seria persistido e nunca lido por ninguém.
 
 Timestamps de datetime são gravados **sempre normalizados em UTC**. A fila compara `reavaliar_em` em SQL, e essa comparação é lexicográfica sobre texto: dois offsets diferentes na mesma coluna quebrariam a ordem em silêncio — um horário com `-03:00` ordenaria antes de um `+00:00` que é anterior de verdade.
 
@@ -72,6 +94,10 @@ O saldo é **lido do Flow e reconciliado** com o débito previsto, não apenas d
 
 Regra: descontar o custo previsto na hora de despachar (para não estourar o saldo com jobs simultâneos) e reconciliar com a leitura real ao término. Divergência acima de um limiar vira evento e derruba a confiança no valor até a próxima leitura.
 
+**O custo previsto é `custo_de(modelo, tier) × quantidade`.** O Flow cobra por geração: um lote de quatro imagens custa quatro vezes uma. `reservar(conta, modelo, quantidade)` desconta o total, e é esse total que fica em `custo_estimado` — o estorno continua correto sem mudança nenhuma. Reservar só uma geração quando o pedido tem quatro deixaria o saldo local acreditando em crédito que o Flow já cobrou, e a escolha seguinte mandaria job para uma conta mais magra do que o app pensa.
+
+O par obrigatório disso está em *Escolha de conta*: a mesma multiplicação precisa acontecer **antes** da reserva, na hora de escolher. Só na reserva não basta.
+
 Três detalhes que a regra acima esconde e sem os quais o pool se estraga sozinho:
 
 **Toda reserva que não vira geração é estornada** (`liberar`). Falha de rede, sessão que caiu, timeout — o Flow nunca chegou a cobrar, então o crédito volta. Sem estorno, três timeouts numa conta grátis de 50 créditos zeram o saldo local com os 50 créditos intactos no Flow, e a conta some do pool para sempre: ninguém despacha job para conta que parece seca. Pelo mesmo motivo, reservar sem saldo **recusa** (`SaldoInsuficiente`) em vez de zerar o saldo — zerar apagaria crédito real que ainda daria outra geração mais barata.
@@ -84,19 +110,21 @@ Acima do limiar, o delta com sinal e o valor lido viram um evento `divergencia`.
 
 ## Escolha de conta
 
-Função pura: `escolher(contas, modelo, agora) -> Conta | None`.
+Função pura: `escolher(contas, modelo, agora, quantidade=1) -> Conta | None`.
 
 O parâmetro é o **modelo**, não um custo: o custo depende do tier (Ultra paga 10 por um Fast que custa 20 na grátis), então um número único não descreveria um pool misto — e é o modelo, não o custo, que diz se o job é Quality e portanto proibido em conta grátis.
 
 O **relógio entra por parâmetro**, nunca por `datetime.now()` dentro da função. É a única forma de manter pura a peça central do desenho, aquela que o spec promete ser testável sem navegador nenhum: com o `agora` injetado, a tabela de testes cobre prazo vencido e prazo futuro sem congelar o relógio do processo.
 
+A **quantidade** entra pelo mesmo motivo do relógio — pureza — e resolve um defeito que só aparece com lote: ela multiplica o custo. Se apenas a reserva multiplicasse, `escolher` aprovaria uma conta que comporta *uma* geração para um job de quatro; o Flow recusaria na hora de gerar, o job voltaria para a fila e a conta seria marcada **seca** — por um problema que era de cálculo, não de crédito. O filtro de saldo é portanto sobre o total, e a regra do teto diário da conta grátis também: quatro imagens ainda cabem em 50 créditos, mas isso precisa ser conta feita, não sorte.
+
 (`prioridade` no job é outra coisa: ordena a **fila**, não influencia a conta. Inteiro, maior primeiro, empate resolvido por ordem de chegada.)
 
 Política, com o porquê:
 
-1. Descarta conta sem sessão viva, inativa, ou com saldo abaixo do custo.
+1. Descarta conta sem sessão viva, inativa, ou com saldo abaixo do custo **total** do pedido (custo de uma geração × `quantidade`).
 2. Descarta conta com `seca_ate` no futuro — o Flow já recusou gerar nela apesar do saldo aparente, e insistir antes do prazo é o laço quente descrito em *Modelo de dados*.
-3. Descarta conta grátis quando o job é Quality (não cabe no teto diário).
+3. Descarta conta grátis quando o pedido não cabe no teto diário — sempre o caso de Quality (100 contra 50), e também de qualquer lote cujo total estoure o teto.
 4. **Prefere crédito que expira antes.** Crédito de conta grátis morre em 24h; o de conta paga acumula até o fim do mês. Gastar grátis primeiro não é preferência, é aritmética.
 5. Entre contas do mesmo tier, a de maior saldo — espalha o uso e evita deixar sobras inúteis de 5 créditos espalhadas pelo pool.
 6. Nenhuma serve: o job volta para a fila com um horário de reavaliação (o próximo reset conhecido), em vez de falhar.
@@ -185,10 +213,12 @@ Corpo de `POST /jobs`:
 {
   "modo": "t2v | frames2v | ingredients2v | imagem",
   "prompt": "...",
-  "modelo": "veo-lite | veo-fast | veo-quality | nano-banana",
+  "modelo": "omni-flash | veo-lite | veo-fast | veo-quality | nano-banana",
   "referencias": ["caminho/1.png", "caminho/2.png"],
   "frame_inicial": "caminho.png",
   "frame_final": null,
+  "proporcao": "9:16",
+  "quantidade": 1,
   "produto": "Video Roupa",
   "destino": "Video Roupa/clipes",
   "nome": "c3-take1",
@@ -198,6 +228,12 @@ Corpo de `POST /jobs`:
 
 `produto` é **obrigatório**; `destino` é opcional e, quando ausente, vira `{produto}/clipes`. Na pasta do usuário cada produto já é uma pasta, então mandar `produto: "Panelas Monaco"` basta e repetir o caminho é ruído. `destino` explícito continua aceito para quando o arquivo deve cair em outro lugar.
 
+`modelo` também é opcional, com padrão **por modo**: os três modos de vídeo herdam `omni-flash`, `imagem` herda `nano-banana`. Assumir `veo-fast` seria o app escolhendo por conta própria um modelo que custa diferente e sai diferente do que a própria interface faria — ver *Decisões de geração*.
+
+`proporcao` é opcional e vale `9:16` quando ausente. Valor fora de `16:9 | 4:3 | 1:1 | 3:4 | 9:16` é **422**: o painel tem cinco botões, e um sexto valor não teria onde clicar.
+
+`quantidade` é opcional, vale `1`, e o teto depende do modo: **imagem aceita 1 a 4; os três modos de vídeo aceitam somente 1.** Vídeo com `quantidade > 1` é **422**. Recusar na entrada é melhor do que gerar três vídeos que ninguém pediu — e a mesma quantidade multiplica o crédito reservado, ver *Contabilidade de crédito*.
+
 ## Modos suportados
 
 Os quatro do Flow: **text-to-video**, **frames-to-video** (1º e opcionalmente último frame), **ingredients-to-video** (até 3 referências — é o R2V que segura a identidade da Clara e do Rafa) e **imagem** (Nano Banana / Imagen). Mudam quase só o corpo do payload.
@@ -206,7 +242,16 @@ Os quatro rodam **dentro de um projeto**, e do mesmo projeto: o projeto é escol
 
 Observação de campo (20/08): a UI tem **um único** `input[type=file]` (`multiple=True`, `accept="image/*"`), não três campos separados para referência/frame inicial/frame final. A distinção entre "isto é uma referência" e "isto é o frame inicial" acontece por outro caminho da interface, ainda não mapeado — o transporte manda os arquivos certos para o mesmo input; quem decide o que cada um significa é a UI, não o seletor.
 
-Observação de campo (19/08): o Flow passou a expor um modelo **Gemini Omni** — vídeo a partir de qualquer referência, com edição conversacional. Não entra no escopo inicial, mas o desenho do modo `ingredients2v` deve deixar o campo `modelo` aberto para acomodá-lo sem migração.
+Observação de campo (19/08, confirmada em 20/08): o Flow passou a expor um modelo **Gemini Omni** — vídeo a partir de qualquer referência, com edição conversacional. O mapeamento do painel mostrou que ele não é só mais uma opção: **`Omni Flash` é o padrão do dropdown de vídeo**. Entrou no escopo como `Modelo.OMNI_FLASH` e como padrão de vídeo da API. A previsão de deixar o campo `modelo` aberto se pagou — acomodou o modelo novo sem migração nenhuma.
+
+O painel de configuração da geração (`tune Configurações`) tem quatro grupos: confirmação do agente, **proporção**, **quantidade** e **dois** dropdowns de modelo — um de imagem, um de vídeo. Não é um seletor único: o transporte mexe no dropdown que corresponde ao modo do job.
+
+Dois deles atravessam o domínio inteiro, e por isso viram campo do job (`proporcao`, `quantidade`) e do `Pedido` que cruza a fronteira do transporte. Sem atravessar, o Flow geraria sempre no default da UI e o pedido do usuário seria ignorado **em silêncio** — o pior modo de falha deste app, porque a saída existe e parece certa. As decisões e o porquê estão em *Decisões de geração*.
+
+Duas armadilhas medidas, que o transporte precisa respeitar:
+
+- **`tune Configurações` não existe numa sessão nova.** Só aparece depois que o primeiro prompt foi enviado ao agente; abrir antes dá timeout. A sequência é: escrever o prompt → enviar → esperar a resposta → abrir `tune` → configurar → salvar.
+- **A confirmação do agente vem em "Sempre"**, o que faz ele pedir autorização antes de gastar crédito. Nessa configuração o robô não falha com erro: fica pendurado até o timeout, queima as três tentativas e marca o job como falho sem dizer o porquê. Ou o cadastro da conta deixa em "Nunca", ou o transporte aprende a clicar na confirmação.
 
 ## Transporte — DECIDIDO: Playwright com Chrome real
 
@@ -248,9 +293,11 @@ Consequências diretas para a implementação:
 - **Seletores são por texto/role, nunca por classe CSS.** As classes são styled-components com hash (`button.sc-e8425ea6-0.hOBPaw`) e mudam a cada deploy do Google; os textos vêm de um dicionário i18n versionado, e é por eles que a navegação se mantém estável entre deploys. Ver `flowpool/transporte/pw/seletores.py`.
 - **C (híbrido) fica como otimização futura**, restrita ao que não é vídeo: leitura de saldo e possivelmente geração de imagem. Vale medir depois que o A estiver de pé, nunca antes.
 
-### Nota de custo a confirmar por medição
+### Notas de custo a confirmar por medição
 
 O `gflow-cli` afirma que **crédito só é gasto em vídeo — imagem e operações de composição saem de graça**. Isso conflita com a outra fonte, que diz 1–2 créditos por imagem. Não se desempata por leitura: a reconciliação de saldo já prevista resolve isso na primeira execução real. Se a imagem for mesmo gratuita, o custo de imagem do pipeline no Flow é zero e a política de escolha de conta pode ignorar jobs de imagem no cálculo de saldo.
+
+O custo do **Omni Flash** está no mesmo estado, e por um motivo mais simples: ninguém mediu. Como ele é o padrão de vídeo do Flow, é o modelo que mais vai rodar — a estimativa de 20/20/10 vale até a primeira reconciliação real, e o número medido substitui a tabela. A medição é a mesma: gerar, ler o saldo antes e depois, e olhar o evento `divergencia`.
 
 ## Erro e observabilidade
 
@@ -264,7 +311,9 @@ O motor inteiro — escolha de conta, contabilidade, transições da fila — é
 
 A gestão de projetos é testada pelo **contador de criações** do transporte falso, não pelo estado final do banco: o estado final não distingue "reusou o projeto" de "criou outro e regravou o vínculo por cima", que é exatamente o defeito que interessa. Três cenários: mesmo produto duas vezes na mesma conta (uma criação só), mesmo produto em duas contas (duas criações, ids distintos) e projeto que existe no remoto mas não no banco (zero criações — é adoção).
 
-O transporte real é verificado à mão contra o Flow, não em CI.
+O caso de lote ganha teste próprio na escolha de conta, e ele afirma a coisa certa: **conta com saldo para uma imagem não pode ser escolhida para um job de quatro.** Afirmar só sobre a reserva deixaria passar exatamente o defeito que interessa — o app escolhendo uma conta que não paga o pedido e culpando a conta (marcando-a seca) por um erro de cálculo.
+
+O transporte real é verificado à mão contra o Flow, não em CI. Duas coisas do painel só se provam ali, e por medição de saldo: que o vídeo sai **vertical** (e não no 16:9 da UI) e que um lote de quatro derruba o saldo em **quatro vezes** o custo de uma. Diferença de uma só significa que o clique na quantidade não pegou — e é isso que faria o app reservar um número e gastar outro sem ninguém notar.
 
 ## Fora de escopo
 
