@@ -30,6 +30,13 @@ const MODELOS_IMAGEM = ["nano-banana"];
 const DURACOES = ["4s", "6s", "8s", "10s"];
 const MAX_REFERENCIAS = 3;
 
+// Teto da colagem, o MESMO do servidor (`colar.TETO_BYTES`). Repetido aqui de proposito:
+// recusar 40 MB antes de subir e melhor do que subir para tomar 413 no fim.
+const TETO_COLAGEM = 20 * 1024 * 1024;
+// A colagem sobe bytes e a busca por URL sai para a internet — os dois demoram mais do
+// que uma leitura, e nenhum dos dois chega perto do teto de sessao.
+const TETO_COLAGEM_MS = 60000;
+
 // O nome curto do chip. Precisa SEPARAR os tres modos de video — um chip que diz so
 // "Vídeo" nos tres deixaria a pessoa enviar em `frames2v` achando que estava em texto
 // puro, e o transporte anexaria arquivo nenhum. O nome por extenso de cada modo esta
@@ -60,8 +67,14 @@ const cfg = {
   modo: "t2v", modelo: "omni-flash", proporcao: "9:16", duracao: "4s", quantidade: 1,
 };
 
-// Caminhos escolhidos no `+`. O papel de cada um sai do modo, nao da ordem de escolha.
+// Caminhos escolhidos no `+` ou colados. O papel de cada um sai do modo, nao da ordem
+// de escolha.
 let anexos = [];
+
+// Colagens em voo. Nao sao caminhos ainda — viram tira "carregando" na barra ate o
+// servidor devolver o caminho, e contam no teto para dois Ctrl+V seguidos nao passarem
+// de tres.
+let subindo = 0;
 
 let produto = null;
 let jobAberto = null;
@@ -90,11 +103,16 @@ function mensagemDoErro(status, corpo) {
 async function api(caminho, opcoes = {}, teto = TETO_PADRAO_MS) {
   const ctrl = new AbortController();
   const relogio = setTimeout(() => ctrl.abort(), teto);
+  // `bruto` e o corpo binario de `/colar`: os bytes da imagem colada viajam crus, sem
+  // multipart e sem base64 — o servidor le a assinatura deles direto.
+  const bruto = opcoes.bruto !== undefined && opcoes.bruto !== null;
   try {
     const r = await fetch(caminho, {
-      headers: opcoes.corpo ? { "Content-Type": "application/json" } : undefined,
+      headers: opcoes.corpo ? { "Content-Type": "application/json" }
+             : bruto ? { "Content-Type": "application/octet-stream" } : undefined,
       method: opcoes.metodo || "GET",
-      body: opcoes.corpo ? JSON.stringify(opcoes.corpo) : undefined,
+      body: opcoes.corpo ? JSON.stringify(opcoes.corpo)
+          : bruto ? opcoes.bruto : undefined,
       signal: ctrl.signal,
     });
     const texto = await r.text();
@@ -424,15 +442,15 @@ function ajustarChip() {
 
   $("chip-texto").textContent = textoDoChip();
 
-  // O `+` so faz sentido nos dois modos em que o transporte ANEXA alguma coisa. Em t2v
-  // ele continua clicavel e troca o modo para "referências" — que e o que a pessoa quis
-  // dizer ao anexar. Em imagem fica travado: o transporte nao anexa nada ali, e um
-  // arquivo escolhido seria ignorado em silencio.
-  const mais = $("botao-mais");
-  mais.disabled = cfg.modo === "imagem";
-  mais.title = cfg.modo === "imagem"
-    ? "em modo imagem o Flow não recebe anexo por aqui"
-    : "anexar imagens do disco";
+  // O `+` fica clicavel em TODOS os modos, e nos que nao anexam nada (t2v, imagem) ele
+  // troca o modo para "referências" — que e o que a pessoa quis dizer ao anexar. A
+  // alternativa, travar o botao, ficou insustentavel quando Ctrl+V passou a existir:
+  // colar em modo imagem troca o modo (e o que faz o arquivo chegar ao Flow em vez de
+  // ser ignorado em silencio), e um `+` travado ao lado de um Ctrl+V que funciona sao
+  // duas regras discordando na mesma barra.
+  $("botao-mais").title = PAPEIS[cfg.modo]
+    ? "anexar imagens do disco (ou cole com Ctrl+V, ou arraste para cá)"
+    : "anexar referências — o tipo passa para “vídeo — referências”";
 
   ajustarAnexos();
 }
@@ -447,7 +465,7 @@ function ajustarAnexos() {
 
 function pintarAnexos() {
   const papeis = PAPEIS[cfg.modo] || [];
-  $("tira-anexos").innerHTML = anexos.map((c, i) => {
+  const prontas = anexos.map((c, i) => {
     const nome = c.split("/").pop();
     return `<span class="tira" title="${esc(c)}">
       <img src="${esc(urlMiniatura(c))}" alt="" loading="lazy">
@@ -456,6 +474,16 @@ function pintarAnexos() {
       <button type="button" class="tira-x" data-caminho="${esc(c)}"
               title="tirar">&times;</button></span>`;
   }).join("");
+
+  // No lugar da miniatura, enquanto a imagem colada sobe. Sem isto o Ctrl+V nao teria
+  // resposta nenhuma por um ou dois segundos, e a pessoa colaria de novo.
+  const emVoo = Array.from({ length: subindo }, (_, i) => `
+    <span class="tira subindo"><span class="girando"></span>
+      <span><span class="tira-nome">anexando…</span>
+        <span class="tira-papel">${esc(papeis[anexos.length + i] || "")}</span></span>
+    </span>`).join("");
+
+  $("tira-anexos").innerHTML = prontas + emVoo;
 }
 
 function posicionar(pop, botao) {
@@ -557,6 +585,12 @@ async function enviar(ev) {
   // Mesma regra do servidor, dita antes: `frames2v` exige o frame inicial e
   // `ingredients2v` exige ao menos uma referencia. Tomar 422 depois de escrever o
   // prompt inteiro seria o pior lugar para descobrir isso.
+  if (subindo) {
+    // enviar com uma colagem no meio do caminho mandaria o job SEM aquela referencia,
+    // e o card sairia diferente do que a barra estava mostrando na hora do Enter
+    mostrar($("erro-job"), "Espere a imagem terminar de anexar — falta um instante.");
+    return;
+  }
   if (!anexos.length && PAPEIS[cfg.modo]) {
     mostrar($("erro-job"), cfg.modo === "frames2v"
       ? "Este modo gera a partir de frames: use o + para escolher ao menos o frame inicial."
@@ -808,9 +842,10 @@ let seletor = { caminho: "", pai: null, arquivos: [] };
 function tetoAnexos() { return (PAPEIS[cfg.modo] || []).length; }
 
 async function abrirSeletor() {
-  // anexar em t2v so pode querer dizer uma coisa: virar geracao por referencias. Trocar
-  // o modo aqui e melhor do que aceitar o arquivo e o transporte ignora-lo depois.
-  if (cfg.modo === "t2v") { cfg.modo = "ingredients2v"; ajustarChip(); }
+  // anexar num modo que nao anexa so pode querer dizer uma coisa: virar geracao por
+  // referencias. Trocar o modo aqui e melhor do que aceitar o arquivo e o transporte
+  // ignora-lo depois. Mesma regra do Ctrl+V e do arrastar-soltar, uma funcao so.
+  garantirModoQueAceitaArquivo();
   if (!tetoAnexos()) return;
 
   seletor = { caminho: "", pai: null, arquivos: [] };
@@ -917,6 +952,162 @@ function usarTresDaPasta() {
   pintarAnexos();
   repintarMarcas();
 }
+
+/* ---------------- colar e soltar ----------------
+
+   O seletor cobre a imagem que JA esta no disco. Isto cobre a que nao esta em lugar
+   nenhum: um "copiar imagem" em qualquer site, um print de tela do Win+Shift+S, um
+   arquivo arrastado de uma pasta. Como o transporte anexa com `set_input_files`, que
+   abre um arquivo em disco, o servidor GRAVA os bytes (`POST /colar`) e devolve o
+   caminho — que e a mesma moeda que o seletor ja usa. */
+
+// Extensao no caminho da URL, e nao "qualquer coisa que comece com http": sem este
+// filtro, colar um link comum no prompt viraria uma busca na internet em vez de texto.
+const RE_EXTENSAO_IMAGEM = /\.(png|jpe?g|webp|gif)$/i;
+
+function urlDeImagem(texto) {
+  const t = (texto || "").trim();
+  if (!/^https?:\/\//i.test(t) || /\s/.test(t)) return null;
+  try {
+    return RE_EXTENSAO_IMAGEM.test(new URL(t).pathname) ? t : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/* Anexar uma referencia E dizer que se quer gerar com referencia. Em `t2v` e em `imagem`
+   o transporte nao anexa nada, entao aceitar o arquivo e nao trocar o modo seria aceitar
+   e ignorar em silencio. */
+function garantirModoQueAceitaArquivo() {
+  if (PAPEIS[cfg.modo]) return;
+  cfg.modo = "ingredients2v";
+  ajustarChip();
+}
+
+/* Uma colagem, seja ela bytes (`{blob}`) ou endereco (`{url}`). As duas terminam igual:
+   um caminho em disco entrando na lista de anexos. */
+async function anexarColada(pedido) {
+  esconder($("erro-job"));
+  garantirModoQueAceitaArquivo();
+
+  const teto = tetoAnexos();
+  if (anexos.length + subindo >= teto) {
+    mostrar($("erro-job"),
+      `Já são ${teto} neste modo. Tire uma (no × da tira) antes de colar outra.`);
+    return;
+  }
+  if (pedido.blob && pedido.blob.size > TETO_COLAGEM) {
+    // recusado aqui e recusado antes de subir 40 MB pelo loopback para tomar 413
+    mostrar($("erro-job"),
+      `Essa imagem tem ${tamanhoLegivel(pedido.blob.size)} e o limite é 20 MB.`);
+    return;
+  }
+
+  subindo += 1;
+  pintarAnexos();
+  try {
+    const r = pedido.url
+      ? await api("/colar-url", { metodo: "POST", corpo: { url: pedido.url } },
+                  TETO_COLAGEM_MS)
+      : await api("/colar", { metodo: "POST", bruto: pedido.blob }, TETO_COLAGEM_MS);
+    // o nome do arquivo e o hash do conteudo, entao colar a mesma imagem duas vezes
+    // devolve o MESMO caminho — anexar duas vezes viraria referencia repetida
+    if (!anexos.includes(r.caminho) && anexos.length < tetoAnexos()) {
+      anexos.push(r.caminho);
+    }
+  } catch (e) {
+    mostrar($("erro-job"), `Não deu para anexar a imagem: ${e.message}`);
+  } finally {
+    subindo -= 1;
+    pintarAnexos();
+  }
+}
+
+/* Ctrl+V em qualquer lugar do painel. Print de tela e "copiar imagem" do navegador
+   chegam os dois como arquivo aqui; "copiar endereço da imagem" chega como texto, e e o
+   vizinho de menu que se clica sem querer — por isso os dois casos sao tratados. */
+document.addEventListener("paste", (ev) => {
+  const dados = ev.clipboardData;
+  if (!dados) return;
+
+  const imagem = [...(dados.items || [])]
+    .filter((i) => i.kind === "file" && i.type.startsWith("image/"))
+    .map((i) => i.getAsFile())
+    .find(Boolean);
+  if (imagem) {
+    ev.preventDefault();
+    anexarColada({ blob: imagem });
+    return;
+  }
+
+  const url = urlDeImagem(dados.getData("text/plain"));
+  if (!url) return;   // texto comum segue para o campo, como sempre
+  ev.preventDefault();
+  anexarColada({ url });
+});
+
+/* Arrastar e soltar. `dragenter`/`dragleave` disparam a cada FILHO que o ponteiro
+   atravessa, entao o destaque pisca se for ligado e desligado por evento; o contador e o
+   que o mantem estavel do primeiro enter ao ultimo leave. */
+let arrastando = 0;
+
+function arrasteAceito(ev) {
+  const tipos = [...((ev.dataTransfer && ev.dataTransfer.types) || [])];
+  // "Files" e o arquivo vindo de uma pasta; "text/uri-list" e a imagem arrastada de
+  // dentro de uma pagina, que e justamente o caso que motivou tudo isto
+  if (tipos.includes("Files")) return "arquivo";
+  if (tipos.includes("text/uri-list") || tipos.includes("text/plain")) return "url";
+  return null;
+}
+
+function esconderSolta() {
+  arrastando = 0;
+  esconder($("solta"));
+}
+
+document.addEventListener("dragenter", (ev) => {
+  if (!arrasteAceito(ev)) return;
+  ev.preventDefault();
+  arrastando += 1;
+  $("solta").classList.remove("oculto");
+});
+
+document.addEventListener("dragover", (ev) => {
+  // sem este preventDefault o navegador recusa a soltura e ABRE o arquivo, trocando o
+  // painel por uma aba com a imagem
+  if (arrasteAceito(ev)) ev.preventDefault();
+});
+
+document.addEventListener("dragleave", (ev) => {
+  if (!arrasteAceito(ev)) return;
+  arrastando = Math.max(0, arrastando - 1);
+  if (!arrastando) esconder($("solta"));
+});
+
+document.addEventListener("drop", (ev) => {
+  const tipo = arrasteAceito(ev);
+  if (!tipo) return;
+  ev.preventDefault();
+  esconderSolta();
+
+  const arquivos = [...((ev.dataTransfer && ev.dataTransfer.files) || [])]
+    .filter((f) => f.type.startsWith("image/"));
+  if (arquivos.length) {
+    arquivos.slice(0, MAX_REFERENCIAS).forEach((f) => anexarColada({ blob: f }));
+    return;
+  }
+  // imagem arrastada de dentro de uma pagina nao vem com arquivo: vem o endereco
+  const url = urlDeImagem(ev.dataTransfer.getData("text/uri-list"))
+           || urlDeImagem(ev.dataTransfer.getData("text/plain"));
+  if (url) { anexarColada({ url }); return; }
+  mostrar($("erro-job"), "O que você soltou não é imagem — arraste um PNG, JPEG, WEBP "
+    + "ou GIF, ou copie a imagem e cole com Ctrl+V.");
+});
+
+// o navegador nao manda `dragleave` quando o arrasto sai pela borda da janela nem quando
+// e cancelado com Esc; sem isto o destaque ficaria na tela sem nada acontecendo
+window.addEventListener("dragend", esconderSolta);
+window.addEventListener("blur", esconderSolta);
 
 /* ---------------- ligacao ---------------- */
 

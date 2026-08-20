@@ -272,6 +272,17 @@
   </div>
 </div>
 
+<!-- Área de soltura. Cobre a tela inteira enquanto algo está sendo arrastado por cima do
+     painel: o alvo é o painel todo, e não um retângulo que a pessoa precise acertar.
+     `pointer-events: none` no CSS — a camada é só o aviso, quem recebe o `drop` é o
+     documento. -->
+<div class="solta oculto" id="solta" aria-hidden="true">
+  <div class="solta-alvo">
+    <strong>Solte para anexar como referência</strong>
+    <span>PNG, JPEG, WEBP ou GIF · até 20 MB · no máximo 3</span>
+  </div>
+</div>
+
 <script src="/painel.js"></script>
 </body>
 </html>

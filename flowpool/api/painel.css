@@ -472,6 +472,47 @@ button, .mini, .primario-link { font-family: inherit; }
 }
 .tira-x:hover { color: var(--erro); }
 
+/* A tira que ainda esta subindo. Ocupa o MESMO espaco da tira pronta, para a barra nao
+   pular de altura quando a miniatura chegar. */
+.tira.subindo {
+  border-style: dashed;
+  border-color: var(--borda-forte);
+  color: var(--texto-fraco);
+  padding-left: 9px;
+}
+.tira.subindo .girando { margin-right: 3px; }
+
+/* ---------- arrastar e soltar ---------- */
+
+/* O alvo e a tela inteira, e nao um retangulo a acertar: a pessoa esta arrastando com o
+   mouse cheio e mirar custa. `pointer-events: none` porque esta camada e so o aviso —
+   quem escuta o `drop` e o documento, e uma camada clicavel comeria o evento. */
+.solta {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  background: rgba(10, 13, 15, 0.72);
+  pointer-events: none;
+}
+.solta-alvo {
+  display: grid;
+  gap: 4px;
+  justify-items: center;
+  /* nunca encostado na borda: numa janela estreita o padding sozinho faria o retangulo
+     tracejado sair pelos dois lados e deixar de parecer um alvo */
+  max-width: calc(100vw - 28px);
+  padding: 26px 40px;
+  border: 2px dashed var(--primaria);
+  border-radius: 16px;
+  background: var(--primaria-fraca);
+  color: var(--primaria);
+  text-align: center;
+}
+.solta-alvo strong { font-family: var(--titulo); font-size: 15px; }
+.solta-alvo span { color: var(--texto-fraco); font-size: 11.5px; }
+
 /* ---------- popovers ---------- */
 
 .popover {
