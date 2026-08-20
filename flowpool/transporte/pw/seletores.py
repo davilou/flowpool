@@ -65,9 +65,32 @@ BOTAO_MAIS_OPCOES = 'button:has-text("Mais opções")'
 # Um unico input de arquivo serve referencias E frames: multiple=True, accept=image/*.
 UPLOAD = 'input[type=file]'
 
+# --- menu da conta ------------------------------------------------------
+# O saldo NAO fica na tela do projeto. Esta no menu do avatar, que rende
+# "50 Créditos do Google Flow". Ler saldo custa dois cliques (abrir e fechar o menu)
+# por geracao — considerar isso ao ajustar a frequencia de reconciliacao.
+AVATAR_CONTA = 'img[src*="googleusercontent"]'
+PADRAO_CREDITOS = r"(\d[\d.,]*)\s+Créditos"   # aplicar no innerText do menu aberto
+
+# --- menu do projeto (via BOTAO_MAIS_OPCOES) ----------------------------
+MENU_RENOMEAR = '[role=menuitem]:has-text("Renomear")'
+MENU_LIXEIRA = '[role=menuitem]:has-text("Ver lixeira")'
+MENU_EXCLUIR = '[role=menuitem]:has-text("Excluir")'
+
+# --- confirmacao do agente (ARMADILHA) ----------------------------------
+# Em `tune Configurações` ha um radio de duas opcoes:
+#   "Sempre" — o agente pede confirmacao antes de gerar midia e gastar creditos
+#   "Nunca"  — o agente gera e gasta sem perguntar
+# O padrao e "Sempre". Um robo nessa configuracao NAO falha com erro: ele fica
+# pendurado ate o timeout, queima as tres tentativas e marca o job como falho sem
+# dizer o porque. O cadastro de conta precisa tratar isso — ou ajustando para
+# "Nunca", ou ensinando o transporte a clicar na confirmacao.
+CONFIG_AGENTE = 'button:has-text("tune Configurações")'
+AGENTE_SEMPRE = '[role=radio]:has-text("Sempre")'
+AGENTE_NUNCA = '[role=radio]:has-text("Nunca")'
+
 # --- A PREENCHER --------------------------------------------------------
-# Nao mapeados ainda; precisam de uma segunda passada com a janela aberta.
-CREDITOS = "..."            # nao esta na tela do projeto; procurar em Mais opcoes/Config
+# Nao mapeados ainda; precisam de uma passada gerando de verdade.
 SELETOR_MODELO = "..."
 OPCAO_MODELO = {
     "veo-lite": "...",
