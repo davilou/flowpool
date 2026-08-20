@@ -18,7 +18,7 @@
 |---|---|
 | `flowpool/nucleo/tipos.py` | enums e dataclasses do domínio. Sem I/O, sem dependências. |
 | `flowpool/nucleo/custos.py` | tabela de custo por (modelo, tier) e o teto diário do free |
-| `flowpool/nucleo/escolha.py` | `escolher(contas, modelo, agora) -> Conta | None`. Função pura. |
+| `flowpool/nucleo/escolha.py` | `escolher(contas, modelo, agora, quantidade) -> Conta | None`. Função pura. |
 | `flowpool/nucleo/credito.py` | debitar previsto, reconciliar com o lido, decidir confiança |
 | `flowpool/dados/esquema.sql` | DDL das três tabelas |
 | `flowpool/dados/repo.py` | leitura/escrita SQLite. Única parte que conhece SQL. |
@@ -145,7 +145,8 @@ Mora em `nucleo/` porque as camadas de cima dependem de `nucleo`, nunca o contr�
 from datetime import datetime, timezone
 
 from flowpool.nucleo.tipos import (
-    Conta, EstadoJob, Job, Modelo, Modo, Projeto, SaudeSessao, Tier,
+    PROPORCOES, Conta, EstadoJob, Job, Modelo, Modo, Projeto, SaudeSessao, Tier,
+    quantidade_maxima,
 )
 
 
@@ -213,6 +214,40 @@ def test_job_nasce_sem_produto():
     outro = Job(id=2, modo=Modo.T2V, modelo=Modelo.VEO_FAST, prompt="p", destino="x",
                 nome="c1", produto="Panelas Monaco")
     assert outro.produto == "Panelas Monaco"
+
+
+def test_omni_flash_e_o_modelo_de_video_padrao_do_flow():
+    # medido em campo: o dropdown de video do Flow abre em "Omni Flash", nao em Veo
+    assert Modelo.OMNI_FLASH.value == "omni-flash"
+
+
+def test_job_nasce_vertical():
+    # o canal e TikTok: gerar ja em 9:16 evita o recorte manual depois
+    j = Job(id=1, modo=Modo.T2V, modelo=Modelo.OMNI_FLASH, prompt="p", destino="x", nome="c1")
+    assert j.proporcao == "9:16"
+
+
+def test_proporcao_explicita_sobrescreve_o_padrao():
+    j = Job(id=1, modo=Modo.T2V, modelo=Modelo.OMNI_FLASH, prompt="p", destino="x",
+            nome="c1", proporcao="16:9")
+    assert j.proporcao == "16:9"
+
+
+def test_proporcoes_aceitas_sao_as_cinco_do_painel():
+    assert PROPORCOES == ("16:9", "4:3", "1:1", "3:4", "9:16")
+
+
+def test_job_nasce_com_uma_geracao_so():
+    # quantidade multiplica o custo; o default nunca pode gastar mais do que o pedido
+    j = Job(id=1, modo=Modo.T2V, modelo=Modelo.OMNI_FLASH, prompt="p", destino="x", nome="c1")
+    assert j.quantidade == 1
+
+
+def test_imagem_aceita_lote_e_video_nao():
+    # take de video e escolha do usuario, nao sorteio; variacao de imagem e barata
+    assert quantidade_maxima(Modo.IMAGEM) == 4
+    for modo in (Modo.T2V, Modo.FRAMES2V, Modo.INGREDIENTS2V):
+        assert quantidade_maxima(modo) == 1
 ```
 
 - [ ] **Step 2: Rodar e ver falhar**
@@ -254,10 +289,31 @@ class Modo(str, Enum):
 
 
 class Modelo(str, Enum):
+    # Omni Flash e o que o dropdown de video do Flow ja mostra por padrao. Nao e Veo:
+    # transporte que nao trocar explicitamente gera nele.
+    OMNI_FLASH = "omni-flash"
     VEO_LITE = "veo-lite"
     VEO_FAST = "veo-fast"
     VEO_QUALITY = "veo-quality"
     NANO_BANANA = "nano-banana"
+
+
+# As cinco do painel de configuracao do Flow, nesta ordem. Valor fora da lista nao
+# teria botao onde clicar.
+PROPORCOES = ("16:9", "4:3", "1:1", "3:4", "9:16")
+
+# Padrao vertical: o canal do Davi e TikTok, e gerar ja em 9:16 evita o recorte manual.
+PROPORCAO_PADRAO = "9:16"
+
+# Quantidade de saidas por geracao. O Flow oferece x1..x4, mas video e diferente de
+# imagem: take de video e escolha do usuario, nao sorteio, e cada take extra custa
+# cheio. Variacao de imagem e barata e serve justamente para escolher.
+MAX_QUANTIDADE_IMAGEM = 4
+
+
+def quantidade_maxima(modo: Modo) -> int:
+    """Quantas saidas um job daquele modo pode pedir de uma vez."""
+    return MAX_QUANTIDADE_IMAGEM if modo is Modo.IMAGEM else 1
 
 
 class EstadoJob(str, Enum):
@@ -301,6 +357,11 @@ class Job:
     referencias: list[str] = field(default_factory=list)
     frame_inicial: str | None = None
     frame_final: str | None = None
+    # Formato da saida, um dos `PROPORCOES`. Vertical por padrao — ver a constante.
+    proporcao: str = PROPORCAO_PADRAO
+    # Saidas por geracao. MULTIPLICA O CUSTO: quatro imagens custam quatro vezes uma,
+    # e por isso a quantidade atravessa `escolher` e `reservar`, nao so a reserva.
+    quantidade: int = 1
     prioridade: int = 0
     estado: EstadoJob = EstadoJob.PENDENTE
     conta_id: int | None = None
@@ -351,6 +412,27 @@ nem abre projeto da `g1`. Como o app roda entre vinte contas, não existe "o pro
 Vestido Vermelho" — existe um projeto do Vestido Vermelho *em cada conta que gerou algo
 dele*. Por isso a chave é o par `(conta_id, produto)`, nunca o produto sozinho.
 
+`Modelo.OMNI_FLASH` existe porque o mapeamento de campo (20/08) mostrou que o dropdown
+de vídeo do Flow **já vem em Omni Flash**, não em Veo. Um transporte que não troque o
+modelo explicitamente gera nele — então ou o app o conhece, ou todo job "Veo" sairia no
+modelo errado sem ninguém perceber. Por isso ele também virou o padrão de vídeo da API
+(Task 8).
+
+`Job.proporcao` e `Job.quantidade` são os outros dois grupos do painel de configuração
+da geração (`tune Configurações`), ao lado dos dropdowns de modelo. O padrão de
+proporção é **9:16** porque o canal do Davi é TikTok: gerar já em vertical evita o
+recorte que ele faz hoje à mão. Continua sobrescrevível por pedido — os cinco valores
+são exatamente os cinco botões do painel, e um valor fora da lista não teria onde
+clicar.
+
+`quantidade_maxima` mora aqui, e não no validador da API, porque é regra de domínio:
+**vídeo sai sempre 1, imagem aceita até 4.** O motivo é do usuário — take de vídeo é
+escolha dele, não sorteio, e cada take extra custa cheio; variação de imagem é barata e
+serve justamente para escolher entre elas. A API só traduz isso em 422 (Task 8).
+
+A consequência mais cara de `quantidade` está nas Tasks 3 e 4: ela **multiplica o
+custo**, e por isso precisa atravessar `escolher` e `reservar`, não só a reserva.
+
 `Job.produto` é o nome da pasta do produto e, ao mesmo tempo, o nome do projeto no
 Flow. Tem default `""` só para não quebrar a ordem dos campos da dataclass — os campos
 com default precisam vir depois dos sem default, e `produto` entra logo após `nome`. Na
@@ -359,7 +441,7 @@ prática a API exige (Task 8), e é dele que `destino` passa a derivar.
 - [ ] **Step 4: Rodar e ver passar**
 
 Run: `.venv/Scripts/pytest tests/test_tipos.py -q`
-Expected: `8 passed`
+Expected: `14 passed`
 
 - [ ] **Step 5: Commit**
 
@@ -427,9 +509,27 @@ def test_quality_nao_cabe_em_conta_gratis():
     assert cabe_no_free(Modelo.VEO_QUALITY) is False
 
 
-@pytest.mark.parametrize("modelo", [Modelo.VEO_LITE, Modelo.VEO_FAST, Modelo.NANO_BANANA])
+@pytest.mark.parametrize(
+    "modelo", [Modelo.VEO_LITE, Modelo.VEO_FAST, Modelo.NANO_BANANA, Modelo.OMNI_FLASH]
+)
 def test_o_resto_cabe_em_conta_gratis(modelo):
     assert cabe_no_free(modelo) is True
+
+
+@pytest.mark.parametrize("tier,esperado", [(Tier.FREE, 20), (Tier.PRO, 20), (Tier.ULTRA, 10)])
+def test_omni_flash_tem_custo_nos_tres_tiers(tier, esperado):
+    # estimativa na faixa do Veo Fast; o numero real sai da reconciliacao
+    assert custo_de(Modelo.OMNI_FLASH, tier) == esperado
+
+
+def test_quatro_imagens_ainda_cabem_no_teto_do_free():
+    # 4 x 2 = 8 contra teto de 50 — cabe, mas o calculo tem que ser explicito
+    assert cabe_no_free(Modelo.NANO_BANANA, quantidade=4) is True
+
+
+def test_lote_que_estoura_o_teto_diario_nao_cabe_no_free():
+    # 3 x 20 = 60 contra teto de 50
+    assert cabe_no_free(Modelo.VEO_FAST, quantidade=3) is False
 ```
 
 - [ ] **Step 2: Rodar e ver falhar**
@@ -458,6 +558,13 @@ from flowpool.nucleo.tipos import Modelo, Tier
 TETO_DIARIO_FREE = 50
 
 _CUSTO: dict[tuple[Modelo, Tier], int] = {
+    # ESTIMATIVA, a confirmar pela reconciliacao: o Omni Flash e o padrao de video do
+    # Flow e ninguem mediu o custo dele ainda. Usa a faixa do Veo Fast enquanto isso —
+    # errar por alto so reserva credito a mais, e o valor lido corrige na primeira
+    # execucao real.
+    (Modelo.OMNI_FLASH, Tier.FREE): 20,
+    (Modelo.OMNI_FLASH, Tier.PRO): 20,
+    (Modelo.OMNI_FLASH, Tier.ULTRA): 10,
     (Modelo.VEO_LITE, Tier.FREE): 10,
     (Modelo.VEO_LITE, Tier.PRO): 10,
     (Modelo.VEO_LITE, Tier.ULTRA): 5,
@@ -481,15 +588,31 @@ def custo_de(modelo: Modelo, tier: Tier) -> int:
         raise ModeloSemCusto(f"sem custo cadastrado para {modelo.value} em {tier.value}") from None
 
 
-def cabe_no_free(modelo: Modelo) -> bool:
-    """Se uma conta gratuita consegue, no melhor dia possivel, rodar este modelo."""
-    return custo_de(modelo, Tier.FREE) <= TETO_DIARIO_FREE
+def cabe_no_free(modelo: Modelo, quantidade: int = 1) -> bool:
+    """Se uma conta gratuita consegue, no melhor dia possivel, rodar este pedido.
+
+    A quantidade entra no calculo porque ela multiplica o custo. Quatro imagens ainda
+    cabem em 50 creditos, mas isso precisa ser conta feita, nao sorte: um lote que
+    estoura o teto diario nunca vai caber em conta gratuita, e descobrir isso so na
+    hora de gerar custaria uma geracao recusada.
+    """
+    return custo_de(modelo, Tier.FREE) * quantidade <= TETO_DIARIO_FREE
 ```
+
+O custo do **Omni Flash** entra como estimativa declarada, do mesmo jeito que o da
+imagem: ninguém mediu ainda, e ele é o padrão de vídeo do Flow — ficar sem custo
+cadastrado levantaria `ModeloSemCusto` no caminho mais usado do app. 20/20/10 é a faixa
+do Veo Fast; errar por alto só reserva crédito a mais, e a reconciliação de saldo
+(Task 4) corrige na primeira execução real. `test_tabela_cobre_todos_os_pares` já
+garante que nenhum modelo novo escape sem custo.
+
+`cabe_no_free` recebe `quantidade` porque o teto diário é sobre o **total**: quatro
+imagens ainda cabem em 50 créditos, mas isso precisa ser conta feita, não sorte.
 
 - [ ] **Step 4: Rodar e ver passar**
 
 Run: `.venv/Scripts/pytest tests/test_custos.py -q`
-Expected: `17 passed`
+Expected: `23 passed`
 
 - [ ] **Step 5: Commit**
 
@@ -510,9 +633,11 @@ Esta é a peça central e é função pura — merece teste de tabela cobrindo o
 
 Os enums são comparados com `==`, nunca com `is`. `Tier` e `SaudeSessao` herdam de `str, Enum`: se em qualquer caminho futuro um valor chegar como string crua vinda do SQLite, o `is` falha em silêncio — e falha nas duas direções erradas, descartando conta viva ou aprovando conta grátis para Veo Quality, que é a única regra que o spec chama de intransponível. O `==` custa zero e elimina o modo de falha.
 
-A assinatura é `escolher(contas, modelo, agora)` e `apta(c, modelo, agora)`: **o relógio entra por parâmetro.** Chamar `datetime.now()` aqui dentro tiraria a pureza justamente da peça que precisa ser testável sem navegador e sem congelar o relógio do processo — e é o núcleo inteiro que se apoia nessa garantia.
+A assinatura é `escolher(contas, modelo, agora, quantidade=1)` e `apta(c, modelo, agora, quantidade=1)`: **o relógio entra por parâmetro.** Chamar `datetime.now()` aqui dentro tiraria a pureza justamente da peça que precisa ser testável sem navegador e sem congelar o relógio do processo — e é o núcleo inteiro que se apoia nessa garantia.
 
 O `agora` serve para uma decisão só, mas é uma decisão que não dá para adiar: conta com `seca_ate` no futuro é descartada. Sem esse descarte, a conta que o Flow acabou de recusar volta a ser escolhida na iteração seguinte e o motor entra em laço quente (ver Task 1 e Task 7).
+
+A `quantidade` entra pelo mesmo motivo de pureza, e resolve um problema que só aparece com lote: **ela multiplica o custo.** Se apenas a reserva (Task 4) multiplicasse, `escolher` aprovaria uma conta que comporta *uma* geração para um job de quatro — o Flow recusaria na hora de gerar, o job voltaria para a fila e a conta seria marcada seca por um problema que era de cálculo, não de crédito. Por isso o filtro de saldo aqui é sobre o **total**, e `cabe_no_free` também recebe a quantidade.
 
 - [ ] **Step 1: Escrever o teste que falha**
 
@@ -521,7 +646,7 @@ O `agora` serve para uma decisão só, mas é uma decisão que não dá para adi
 ```python
 from datetime import datetime, timedelta, timezone
 
-from flowpool.nucleo.escolha import escolher
+from flowpool.nucleo.escolha import apta, escolher
 from flowpool.nucleo.tipos import Conta, Modelo, SaudeSessao, Tier
 
 # relogio fixo: `escolher` e pura e recebe o agora por parametro
@@ -614,6 +739,34 @@ def test_pula_conta_seca_ate_o_prazo():
 def test_conta_seca_volta_ao_pool_depois_do_prazo():
     seca = conta(1, Tier.FREE, 50, seca_ate=AGORA - timedelta(minutes=1))
     assert escolher([seca], Modelo.VEO_FAST, AGORA).id == 1
+
+
+def test_conta_que_paga_uma_imagem_nao_e_escolhida_para_um_lote_de_quatro():
+    # Se so a reserva multiplicasse, o app escolheria esta conta, tentaria gerar quatro,
+    # o Flow recusaria, o job voltaria pra fila e a conta seria marcada seca — por um
+    # problema que era de calculo, nao de credito.
+    magra = conta(1, Tier.FREE, 2)   # paga exatamente uma imagem
+    assert escolher([magra], Modelo.NANO_BANANA, AGORA) is not None
+    assert escolher([magra], Modelo.NANO_BANANA, AGORA, quantidade=4) is None
+
+
+def test_lote_grande_pula_a_free_e_cai_na_paga():
+    # com quantidade 1 a free vence pela regra do credito que expira antes;
+    # com quantidade 4 ela nao comporta o total e sai da escolha
+    free = conta(1, Tier.FREE, 6)    # paga tres imagens, nao quatro
+    pro = conta(2, Tier.PRO, 1000)
+    assert escolher([free, pro], Modelo.NANO_BANANA, AGORA).id == 1
+    assert escolher([free, pro], Modelo.NANO_BANANA, AGORA, quantidade=4).id == 2
+
+
+def test_apta_avalia_o_custo_total_do_lote():
+    c = conta(1, Tier.FREE, 6)
+    assert apta(c, Modelo.NANO_BANANA, AGORA, quantidade=3) is True
+    assert apta(c, Modelo.NANO_BANANA, AGORA, quantidade=4) is False
+
+
+def test_omni_flash_cabe_em_conta_gratis():
+    assert escolher([conta(1, Tier.FREE, 20)], Modelo.OMNI_FLASH, AGORA).id == 1
 ```
 
 - [ ] **Step 2: Rodar e ver falhar**
@@ -644,7 +797,7 @@ from flowpool.nucleo.tipos import Conta, Modelo, SaudeSessao, Tier
 _ORDEM_TIER = {Tier.FREE: 1, Tier.PRO: 0, Tier.ULTRA: 0}
 
 
-def apta(c: Conta, modelo: Modelo, agora: datetime) -> bool:
+def apta(c: Conta, modelo: Modelo, agora: datetime, quantidade: int = 1) -> bool:
     # Comparacao por valor, nao por identidade: `Tier` e `SaudeSessao` herdam de
     # `str, Enum`, e um valor cru vindo do SQLite quebraria `is` em silencio.
     if not c.ativa or c.saude != SaudeSessao.VIVA:
@@ -653,14 +806,22 @@ def apta(c: Conta, modelo: Modelo, agora: datetime) -> bool:
     # prazo devolve o job a fila na hora e o motor vira laco quente.
     if c.seca_ate is not None and c.seca_ate > agora:
         return False
-    if c.tier == Tier.FREE and not cabe_no_free(modelo):
+    if c.tier == Tier.FREE and not cabe_no_free(modelo, quantidade):
         return False
-    return custo_de(modelo, c.tier) <= c.saldo
+    # Custo TOTAL do pedido, nao de uma geracao. Se so a reserva multiplicasse, o app
+    # escolheria uma conta que comporta uma geracao e tentaria gerar quatro: o Flow
+    # recusa, o job volta pra fila e a conta e marcada seca por um problema que era de
+    # calculo.
+    return custo_de(modelo, c.tier) * quantidade <= c.saldo
 
 
-def escolher(contas: Sequence[Conta], modelo: Modelo, agora: datetime) -> Conta | None:
-    """Melhor conta para rodar `modelo` em `agora`, ou None se nenhuma serve."""
-    aptas = [c for c in contas if apta(c, modelo, agora)]
+def escolher(contas: Sequence[Conta], modelo: Modelo, agora: datetime,
+             quantidade: int = 1) -> Conta | None:
+    """Melhor conta para rodar `quantidade` geracoes de `modelo` em `agora`.
+
+    None se nenhuma serve.
+    """
+    aptas = [c for c in contas if apta(c, modelo, agora, quantidade)]
     if not aptas:
         return None
     return max(aptas, key=lambda c: (_ORDEM_TIER[c.tier], c.saldo, -c.id))
@@ -669,7 +830,7 @@ def escolher(contas: Sequence[Conta], modelo: Modelo, agora: datetime) -> Conta 
 - [ ] **Step 4: Rodar e ver passar**
 
 Run: `.venv/Scripts/pytest tests/test_escolha.py -q`
-Expected: `16 passed`
+Expected: `20 passed`
 
 - [ ] **Step 5: Commit**
 
@@ -694,6 +855,7 @@ Três coisas que o desenho ingênuo erra e esta task corrige de saída:
 1. **Reserva recusa, não zera.** Chegar em `reservar` sem saldo significa que quem chamou ignorou `escolher`; zerar silenciosamente apagaria crédito real que ainda daria outra geração mais barata.
 2. **Existe estorno (`liberar`).** Sem ele, três timeouts de rede numa conta de 50 créditos zeram o saldo local com os 50 créditos intactos no Flow — e a conta some do pool para sempre, porque ninguém despacha job para conta que parece seca.
 3. **A divergência é medida com sinal.** Sobrar crédito é notícia boa (é o que responde se a imagem custa ou sai de graça); só faltar crédito derruba a confiança. E o reset diário da conta grátis não é divergência nenhuma: é a conta voltando ao teto.
+4. **A reserva é do lote inteiro.** `reservar(conta, modelo, quantidade=1)` desconta `custo_de(...) * quantidade`. Reservar só uma geração quando o pedido tem quatro deixaria o saldo local acreditando em crédito que o Flow já cobrou — e a escolha seguinte mandaria job para uma conta mais magra do que o app pensa. O par disso está na Task 3: `escolher` avalia o mesmo total, senão o app escolhe uma conta que comporta uma geração e tenta gerar quatro.
 
 - [ ] **Step 1: Escrever o teste que falha**
 
@@ -828,6 +990,30 @@ def test_conta_paga_que_sobe_ate_50_nao_e_reset():
     reconciliar(c, lido=50, agora=AGORA)
     assert c.reset_em is None
     assert c.saldo_confiavel is True
+
+
+# --- quantidade ---
+
+def test_reservar_multiplica_pela_quantidade():
+    # quatro imagens custam quatro vezes uma; reservar so uma deixaria o Flow cobrar
+    # o que o saldo local nao previu
+    c = conta(50)
+    assert reservar(c, Modelo.NANO_BANANA, quantidade=4) == 8
+    assert c.saldo == 42
+
+
+def test_reservar_recusa_lote_que_o_saldo_nao_paga_inteiro():
+    # a conta paga UMA geracao, nao o lote. Reservar so uma faria o app despachar um
+    # pedido que o Flow recusa, e a conta seria marcada seca por erro de calculo.
+    c = conta(30)
+    with pytest.raises(SaldoInsuficiente):
+        reservar(c, Modelo.VEO_FAST, quantidade=2)
+    assert c.saldo == 30
+
+
+def test_reservar_sem_quantidade_continua_reservando_uma():
+    c = conta(50)
+    assert reservar(c, Modelo.VEO_FAST) == 20
 ```
 
 - [ ] **Step 2: Rodar e ver falhar**
@@ -861,13 +1047,18 @@ from flowpool.nucleo.tipos import Conta, Modelo, Tier
 LIMIAR_DIVERGENCIA = 5
 
 
-def reservar(conta: Conta, modelo: Modelo) -> int:
+def reservar(conta: Conta, modelo: Modelo, quantidade: int = 1) -> int:
     """Desconta o custo previsto antes de despachar. Devolve o custo reservado.
 
     Recusa em vez de zerar: chegar aqui sem saldo significa que quem chamou ignorou
     `escolher`, e silenciar isso apagaria credito real que ainda daria outra geracao.
+
+    O custo e o de UMA geracao vezes a quantidade pedida. Reservar so uma quando o
+    pedido tem quatro deixaria o saldo local acreditando em credito que o Flow ja
+    cobrou — e a escolha seguinte mandaria job para uma conta mais magra do que o app
+    pensa.
     """
-    custo = custo_de(modelo, conta.tier)
+    custo = custo_de(modelo, conta.tier) * quantidade
     if custo > conta.saldo:
         raise SaldoInsuficiente(
             f"conta {conta.email}: saldo {conta.saldo} < custo {custo}"
@@ -916,7 +1107,7 @@ def _parece_reset(conta: Conta, lido: int, delta: int) -> bool:
 - [ ] **Step 4: Rodar e ver passar**
 
 Run: `.venv/Scripts/pytest tests/test_credito.py -q`
-Expected: `15 passed`
+Expected: `18 passed`
 
 - [ ] **Step 5: Teste de integração do núcleo**
 
@@ -1017,7 +1208,7 @@ Expected: `3 passed`
 - [ ] **Step 7: Rodar o núcleo inteiro**
 
 Run: `.venv/Scripts/pytest -q`
-Expected: `59 passed` (8 tipos + 17 custos + 16 escolha + 15 credito + 3 pool)
+Expected: `78 passed` (14 tipos + 23 custos + 20 escolha + 18 credito + 3 pool)
 
 - [ ] **Step 8: Commit**
 
@@ -1047,6 +1238,10 @@ Cinco decisões desta task que não são detalhe de implementação:
 **A tabela `projeto` tem `UNIQUE (conta_id, produto)` e `registrar_projeto` é um upsert.** A chave é o par porque projeto do Flow pertence a uma conta só: a `g2` não abre o projeto da `g1`, então o mesmo produto precisa de um projeto próprio em cada conta. O upsert (`ON CONFLICT ... DO UPDATE ... RETURNING id`) existe porque dois workers podem resolver o mesmo produto na mesma conta ao mesmo tempo; com `INSERT` puro o perdedor da corrida levantaria `IntegrityError` no meio de um job que **já pagou crédito**. O `UNIQUE` continua sendo a garantia de que não existem duas linhas para o mesmo par — o upsert só decide o que fazer quando a garantia é acionada.
 
 `job.produto` entra como `TEXT NOT NULL DEFAULT ''`. O default cobre a linha antiga e o job criado direto pelo repo; quem exige de verdade é a API.
+
+`job.proporcao` e `job.quantidade` entram como `TEXT NOT NULL DEFAULT '9:16'` e `INTEGER NOT NULL DEFAULT 1`. Os defaults vivem em dois lugares de propósito — na dataclass (Task 1) e na coluna — porque o job criado direto pelo repo, sem passar pela API, também precisa nascer vertical e com uma geração só. Um `NULL` aqui viraria `quantidade=None` multiplicando o custo, e o erro apareceria como `TypeError` dentro de `reservar`, longe da causa.
+
+Nenhum dos dois entra em `salvar_job`: são do pedido, imutáveis depois da criação, como `prompt` e `modo`. `salvar_job` grava só o que muda ao longo da vida do job (estado, conta, id remoto, arquivo, tentativas, custo, erro, reavaliação).
 
 **`_txt` normaliza o datetime para UTC antes do `isoformat()`.** A comparação de `reavaliar_em` no SQL é lexicográfica sobre texto. Gravar dois offsets diferentes quebraria a ordem em silêncio: um horário com `-03:00` ordena antes de um `+00:00` que é anterior de verdade.
 
@@ -1266,6 +1461,25 @@ def test_esquecer_projeto_apaga_so_o_vinculo_local(repo):
     assert repo.projetos() == []
 
 
+def test_job_gravado_sem_proporcao_sai_vertical(repo):
+    # o default e do canal do Davi (TikTok), e precisa valer tambem para quem cria job
+    # direto pelo repo, sem passar pela API
+    id_ = repo.criar_job(Job(id=0, modo=Modo.T2V, modelo=Modelo.OMNI_FLASH,
+                             prompt="p", destino="d", nome="n"))
+    j = repo.job(id_)
+    assert j.proporcao == "9:16"
+    assert j.quantidade == 1
+
+
+def test_proporcao_e_quantidade_sobrevivem_ao_banco(repo):
+    id_ = repo.criar_job(Job(id=0, modo=Modo.IMAGEM, modelo=Modelo.NANO_BANANA,
+                             prompt="p", destino="d", nome="n",
+                             proporcao="16:9", quantidade=4))
+    j = repo.job(id_)
+    assert j.proporcao == "16:9"
+    assert j.quantidade == 4
+
+
 def test_produto_do_job_sobrevive_ao_banco(repo):
     id_ = repo.criar_job(Job(id=0, modo=Modo.T2V, modelo=Modelo.VEO_FAST, prompt="p",
                              destino="Panelas Monaco/clipes", nome="c1",
@@ -1309,6 +1523,8 @@ CREATE TABLE IF NOT EXISTS job (
     referencias    TEXT    NOT NULL DEFAULT '[]',
     frame_inicial  TEXT,
     frame_final    TEXT,
+    proporcao      TEXT    NOT NULL DEFAULT '9:16',
+    quantidade     INTEGER NOT NULL DEFAULT 1,
     prioridade     INTEGER NOT NULL DEFAULT 0,
     estado         TEXT    NOT NULL DEFAULT 'pendente',
     conta_id       INTEGER REFERENCES conta(id),
@@ -1473,12 +1689,14 @@ class Repo:
         agora = _txt(datetime.now(timezone.utc))
         cur = self.con.execute(
             """INSERT INTO job (modo, modelo, prompt, destino, nome, produto,
-                   referencias, frame_inicial, frame_final, prioridade, estado,
-                   custo_estimado, reavaliar_em, criado_em, atualizado_em)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   referencias, frame_inicial, frame_final, proporcao, quantidade,
+                   prioridade, estado, custo_estimado, reavaliar_em, criado_em,
+                   atualizado_em)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (j.modo.value, j.modelo.value, j.prompt, j.destino, j.nome, j.produto,
-             json.dumps(j.referencias), j.frame_inicial, j.frame_final, j.prioridade,
-             j.estado.value, j.custo_estimado, _txt(j.reavaliar_em), agora, agora),
+             json.dumps(j.referencias), j.frame_inicial, j.frame_final, j.proporcao,
+             j.quantidade, j.prioridade, j.estado.value, j.custo_estimado,
+             _txt(j.reavaliar_em), agora, agora),
         )
         self.con.commit()
         return int(cur.lastrowid)
@@ -1537,6 +1755,7 @@ class Repo:
             prompt=r["prompt"], destino=r["destino"], nome=r["nome"],
             produto=r["produto"], referencias=json.loads(r["referencias"]),
             frame_inicial=r["frame_inicial"], frame_final=r["frame_final"],
+            proporcao=r["proporcao"], quantidade=r["quantidade"],
             prioridade=r["prioridade"], estado=EstadoJob(r["estado"]),
             conta_id=r["conta_id"], id_remoto=r["id_remoto"], arquivo=r["arquivo"],
             tentativas=r["tentativas"], custo_estimado=r["custo_estimado"],
@@ -1628,7 +1847,7 @@ class Repo:
 - [ ] **Step 5: Rodar e ver passar**
 
 Run: `.venv/Scripts/pytest tests/test_repo.py -q`
-Expected: `22 passed`
+Expected: `24 passed`
 
 - [ ] **Step 6: Commit**
 
@@ -1663,6 +1882,10 @@ Dois interruptores novos no falso, os dois a serviço da mesma pergunta — "o a
 - `criacoes_projeto`: quantas vezes `criar_projeto` foi chamado. É o contador que denuncia duplicação quando o reuso ou a adoção param de funcionar.
 
 `abrir_projeto` do falso **levanta** para id de projeto de outra conta. Isso não é zelo: projeto pertence a uma conta só, e um falso permissivo deixaria passar no teste um motor que no Flow real tentaria abrir a URL de um projeto que a conta da vez nem consegue carregar.
+
+`Pedido` carrega **`proporcao` e `quantidade`** além do prompt e das referências. São configurações do painel de geração do Flow (`tune Configurações`), e é aqui que elas atravessam a fronteira: sem isso o transporte real geraria sempre no default da UI e o pedido do usuário seria ignorado em silêncio — o pior tipo de bug neste app, porque a saída existe e parece certa.
+
+Pelo mesmo motivo, `gerar` do falso cobra `custo_de(...) * quantidade`. O Flow cobra por geração; um falso que cobrasse sempre uma deixaria o motor passar no teste com uma contabilidade que o real desmente.
 
 - [ ] **Step 1: Escrever o teste que falha**
 
@@ -1795,6 +2018,32 @@ async def test_abrir_projeto_registra_o_aberto():
     assert t.abertos[1] == id_remoto
 
 
+async def test_lote_de_quatro_debita_quatro_vezes():
+    # o Flow cobra por geracao; o falso precisa cobrar igual, senao o motor passa no
+    # teste com uma contabilidade que o real desmente
+    t = TransporteFalso(saldos={1: 50})
+    s = await t.abrir_sessao(conta())
+    await t.gerar(s, Pedido(modo=Modo.IMAGEM, modelo=Modelo.NANO_BANANA, prompt="p",
+                            quantidade=4))
+    assert t.saldos[1] == 42
+
+
+async def test_lote_que_nao_cabe_no_saldo_e_recusado():
+    t = TransporteFalso(saldos={1: 30})
+    s = await t.abrir_sessao(conta(30))
+    with pytest.raises(SaldoInsuficiente):
+        await t.gerar(s, Pedido(modo=Modo.T2V, modelo=Modelo.VEO_FAST, prompt="p",
+                                quantidade=2))
+
+
+async def test_pedido_carrega_proporcao_e_quantidade():
+    # sao configuracoes do painel do Flow: sem atravessar a fronteira, o transporte
+    # real geraria sempre no default da UI e o pedido do usuario seria ignorado
+    p = Pedido(modo=Modo.T2V, modelo=Modelo.OMNI_FLASH, prompt="p")
+    assert p.proporcao == "9:16"
+    assert p.quantidade == 1
+
+
 async def test_abrir_projeto_de_outra_conta_levanta():
     t = TransporteFalso(saldos={1: 50, 2: 50})
     g1 = await t.abrir_sessao(conta())
@@ -1824,7 +2073,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from flowpool.nucleo.erros import SaldoInsuficiente
-from flowpool.nucleo.tipos import Conta, Modelo, Modo
+from flowpool.nucleo.tipos import PROPORCAO_PADRAO, Conta, Modelo, Modo
 
 # `SaldoInsuficiente` mora no nucleo e e so reexportada aqui, para quem importa de
 # `transporte.base` continuar funcionando. Duas classes com o mesmo nome fariam o
@@ -1849,6 +2098,12 @@ class Pedido:
     referencias: list[str] = field(default_factory=list)
     frame_inicial: str | None = None
     frame_final: str | None = None
+    # Duas configuracoes do painel de geracao do Flow. Precisam atravessar a fronteira
+    # ou o transporte real geraria sempre no default da UI e o pedido do usuario seria
+    # ignorado em silencio — que e o pior tipo de bug aqui, porque a saida existe e
+    # parece certa.
+    proporcao: str = PROPORCAO_PADRAO
+    quantidade: int = 1
 
 
 @dataclass
@@ -1989,7 +2244,8 @@ class TransporteFalso:
         # antes de debitar: sessao que cai aqui nao chegou a fazer o Flow cobrar
         if s.conta.id in self.morre_ao_gerar:
             raise SessaoMorta(f"sessao da conta {s.conta.email} caiu ao gerar")
-        custo = custo_de(p.modelo, s.conta.tier)
+        # o Flow cobra por geracao: um lote de quatro custa quatro vezes
+        custo = custo_de(p.modelo, s.conta.tier) * p.quantidade
         if self.saldos.get(s.conta.id, 0) < custo:
             raise SaldoInsuficiente(f"conta {s.conta.email} sem credito")
         self.saldos[s.conta.id] -= custo
@@ -2025,7 +2281,7 @@ class TransporteFalso:
 - [ ] **Step 5: Rodar e ver passar**
 
 Run: `.venv/Scripts/pytest tests/test_transporte_falso.py -q`
-Expected: `14 passed`
+Expected: `17 passed`
 
 - [ ] **Step 6: Commit**
 
@@ -2048,7 +2304,9 @@ A regra que não pode escapar daqui: **toda reserva que não virou geração tem
 
 Isso vale para **todos** os ramos de falha, `SessaoMorta` inclusive. A sessão não morre só em `abrir_sessao`: no transporte real ela cai durante `gerar`, `consultar` ou `baixar`. Como `SessaoMorta` é o primeiro `except`, sem estorno ali o caso nunca chega ao ramo genérico e o crédito reservado some do saldo local para sempre. `_estornar` é no-op depois que o Flow aceitou (`id_remoto is not None`), então isso não infla saldo — e devolve `True` só quando crédito voltou de fato, que é como o ramo sabe se ainda precisa persistir a conta antes de `marcar_sessao`.
 
-Oito outras decisões desta task, cada uma com um modo de falha real por trás:
+Nove outras decisões desta task, cada uma com um modo de falha real por trás:
+
+**A quantidade atravessa a escolha, não só a reserva.** `passo()` passa `job.quantidade` para `escolher`, `_conta_para` a passa para `apta`, e `_executar` a passa para `reservar`. Se só a reserva multiplicasse, o motor escolheria uma conta que comporta *uma* geração para um job de quatro: o Flow recusaria, o job voltaria para a fila e a conta seria marcada seca — por um problema que era de cálculo, não de crédito. `job.custo_estimado` guarda o **total** reservado, e por isso o estorno continua correto sem mudança nenhuma.
 
 **O projeto é resolvido antes de gerar, e a ordem tem três passos.** `_resolver_projeto` roda logo depois de `abrir_sessao`: (1) procura a dupla `(conta, produto)` no banco local e, se achou, só abre; (2) não achou — lista os projetos da conta e procura por **nome igual ao produto**; se achou, **adota**: grava no banco e abre, sem criar; (3) não achou nem remotamente — cria com o nome do produto, grava e abre. Cada caminho vira evento (`projeto_adotado`, `projeto_criado`).
 
@@ -2084,6 +2342,7 @@ import pytest
 
 from flowpool.dados.repo import Repo
 from flowpool.motor.orquestrador import MAX_TENTATIVAS, Orquestrador
+from flowpool.nucleo.custos import custo_de
 from flowpool.nucleo.escolha import escolher
 from flowpool.nucleo.erros import SaldoInsuficiente
 from flowpool.nucleo.tipos import EstadoJob, Job, Modelo, Modo, SaudeSessao, Tier
@@ -2514,6 +2773,66 @@ async def test_modelo_sem_custo_na_escolha_devolve_o_job_e_gasta_tentativa(
     assert j.tentativas == 1          # erro de configuracao nao reprocessa para sempre
     assert "escolha_falhou" in [e["tipo"] for e in repo.eventos(jid)]
     assert repo.reivindicar(datetime.now(timezone.utc)) is not None   # ja destravado
+
+
+async def test_lote_de_imagens_reserva_o_custo_multiplicado(repo, tmp_path):
+    # 4 x 2 = 8. Reservar so 2 deixaria o saldo local acreditando em credito que o
+    # Flow ja cobrou, e a proxima escolha mandaria job pra uma conta mais magra do
+    # que o app pensa.
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 50; repo.salvar_conta(c)
+    jid = repo.criar_job(Job(id=0, modo=Modo.IMAGEM, modelo=Modelo.NANO_BANANA,
+                             prompt="p", destino="imgs", nome="i1", quantidade=4))
+
+    orq = Orquestrador(repo, TransporteFalso(saldos={cid: 50}), raiz=tmp_path)
+    await orq.passo()
+
+    j = repo.job(jid)
+    assert j.estado is EstadoJob.PRONTO
+    assert j.custo_estimado == 4 * custo_de(Modelo.NANO_BANANA, Tier.FREE)
+
+
+async def test_lote_pula_a_conta_que_so_comporta_uma_geracao(repo, tmp_path):
+    # a free vence pela regra do credito que expira antes, mas nao paga o lote inteiro.
+    # Se `passo` nao passasse a quantidade para `escolher`, ela seria escolhida, o Flow
+    # recusaria e a conta seria marcada seca por erro de calculo.
+    magra = repo.criar_conta("magra@b.com", Tier.FREE, "p/1")
+    c = repo.conta(magra); c.saldo = 6; repo.salvar_conta(c)
+    gorda = repo.criar_conta("gorda@b.com", Tier.PRO, "p/2")
+    c = repo.conta(gorda); c.saldo = 1000; repo.salvar_conta(c)
+    jid = repo.criar_job(Job(id=0, modo=Modo.IMAGEM, modelo=Modelo.NANO_BANANA,
+                             prompt="p", destino="imgs", nome="i1", quantidade=4))
+
+    orq = Orquestrador(repo, TransporteFalso(saldos={magra: 6, gorda: 1000}),
+                       raiz=tmp_path)
+    await orq.passo()
+
+    j = repo.job(jid)
+    assert j.estado is EstadoJob.PRONTO
+    assert j.conta_id == gorda
+
+
+async def test_pedido_leva_proporcao_e_quantidade_ao_transporte(repo, tmp_path):
+    # sao configuracoes do painel do Flow: se nao atravessarem a fronteira, o
+    # transporte real gera no default da UI e o pedido do usuario e ignorado
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 50; repo.salvar_conta(c)
+    repo.criar_job(Job(id=0, modo=Modo.IMAGEM, modelo=Modelo.NANO_BANANA, prompt="p",
+                       destino="imgs", nome="i1", proporcao="1:1", quantidade=3))
+
+    vistos = []
+    t = TransporteFalso(saldos={cid: 50})
+    gerar_original = t.gerar
+
+    async def espiar(s, p):
+        vistos.append(p)
+        return await gerar_original(s, p)
+
+    t.gerar = espiar
+    await Orquestrador(repo, t, raiz=tmp_path).passo()
+
+    assert vistos[0].proporcao == "1:1"
+    assert vistos[0].quantidade == 3
 ```
 
 - [ ] **Step 2: Rodar e ver falhar**
@@ -2650,9 +2969,10 @@ class Orquestrador:
         contas = self.repo.contas()
         if job.id_remoto is not None and job.conta_id is not None:
             anterior = next((c for c in contas if c.id == job.conta_id), None)
-            if anterior is not None and apta(anterior, job.modelo, agora):
+            if anterior is not None and apta(anterior, job.modelo, agora,
+                                             job.quantidade):
                 return anterior
-        return escolher(contas, job.modelo, agora)
+        return escolher(contas, job.modelo, agora, job.quantidade)
 
     async def _executar(self, job: Job, conta: Conta) -> None:
         # retomada: a geracao ja existe e e da mesma conta. Gerar de novo pagaria duas
@@ -2674,7 +2994,9 @@ class Orquestrador:
                 job.id_remoto = None
                 # guardar o reservado no job e o que permite estornar depois —
                 # inclusive depois de um restart, por isso vai para o banco na hora
-                job.custo_estimado = reservar(conta, job.modelo)
+                # o total do lote, nao o de uma geracao: e este numero que o estorno
+                # devolve depois
+                job.custo_estimado = reservar(conta, job.modelo, job.quantidade)
                 self.repo.salvar_conta(conta)
                 self.repo.salvar_job(job)
 
@@ -2870,7 +3192,8 @@ class Orquestrador:
     def _pedido(job: Job) -> Pedido:
         return Pedido(modo=job.modo, modelo=job.modelo, prompt=job.prompt,
                       referencias=job.referencias, frame_inicial=job.frame_inicial,
-                      frame_final=job.frame_final)
+                      frame_final=job.frame_final, proporcao=job.proporcao,
+                      quantidade=job.quantidade)
 
     async def rodar(self, intervalo: float = 2.0) -> None:
         """Laco eterno, usado pela API. Para com `parar()`.
@@ -2899,12 +3222,12 @@ class Orquestrador:
 - [ ] **Step 4: Rodar e ver passar**
 
 Run: `.venv/Scripts/pytest tests/test_orquestrador.py -q`
-Expected: `24 passed`
+Expected: `27 passed`
 
 - [ ] **Step 5: Rodar a suíte inteira**
 
 Run: `.venv/Scripts/pytest -q`
-Expected: `119 passed` (8 tipos + 17 custos + 16 escolha + 15 credito + 3 pool + 22 repo + 14 transporte + 24 orquestrador)
+Expected: `146 passed` (14 tipos + 23 custos + 20 escolha + 18 credito + 3 pool + 24 repo + 17 transporte + 27 orquestrador)
 
 - [ ] **Step 6: Commit**
 
@@ -2934,6 +3257,12 @@ Duas rotas novas:
 
 O `DELETE` diz isso na docstring da rota **e na resposta** (`aviso`), porque a leitura natural de um DELETE é a oposta. O projeto continua no Flow com tudo que já foi gerado dentro dele, e na próxima geração daquele produto naquela conta ele volta a ser adotado pelo nome.
 
+`PedidoJob.modelo` passa a ser **opcional**, com padrão por modo: os três modos de vídeo herdam `omni-flash`, `imagem` herda `nano-banana`. O padrão de vídeo é Omni Flash porque é nele que o dropdown do Flow já abre — assumir `veo-fast` seria o app escolhendo por conta própria um modelo que custa diferente e sai diferente do que a interface faria. Modelo explícito continua valendo para tudo.
+
+`PedidoJob.proporcao` tem padrão `"9:16"` e é validada contra `PROPORCOES`: valor fora da lista é **422**, porque o painel do Flow tem cinco botões e um sexto valor não teria onde clicar. O padrão vertical é do canal do Davi (TikTok) — gerar já em vertical evita o recorte manual —, e continua sobrescrevível por pedido.
+
+`PedidoJob.quantidade` tem padrão `1`, mínimo `1`, e teto que depende do modo (`quantidade_maxima`, Task 1): **vídeo aceita só 1, imagem aceita até 4.** Pedido de vídeo com `quantidade > 1` é 422. O motivo é do usuário: take de vídeo é escolha dele, não sorteio, e cada take extra custa cheio; variação de imagem é barata e serve justamente para escolher entre elas. Recusar aqui é melhor do que gerar quatro vídeos que ninguém pediu — e é a mesma quantidade que multiplica o custo em `escolher` e `reservar` (Tasks 3 e 4).
+
 O lifespan chama `orq.recuperar()` **antes** de `rodar()`. É o único ponto do sistema que roda uma vez por boot, e é onde um job deixado em `rodando` por um crash anterior — com crédito reservado que nunca voltou — precisa ser resolvido antes de o motor puxar qualquer coisa nova.
 
 - [ ] **Step 1: Escrever o teste que falha**
@@ -2946,7 +3275,7 @@ from fastapi.testclient import TestClient
 
 from flowpool.api.app import criar_app
 from flowpool.dados.repo import Repo
-from flowpool.nucleo.tipos import Tier
+from flowpool.nucleo.tipos import Modelo, Tier
 from flowpool.transporte.falso import TransporteFalso
 
 
@@ -3085,6 +3414,96 @@ def test_esquecer_projeto_avisa_que_o_flow_nao_e_tocado(cliente):
 def test_esquecer_projeto_inexistente_da_404(cliente):
     c, _ = cliente
     assert c.delete("/projetos/999").status_code == 404
+
+
+# --- proporcao ---
+
+def test_proporcao_padrao_e_vertical(cliente):
+    # o canal do Davi e TikTok: gerar ja em 9:16 evita o recorte manual depois
+    c, repo = cliente
+    jid = c.post("/jobs", json={"modo": "t2v", "modelo": "omni-flash", "prompt": "p",
+                                "produto": "Moda", "nome": "n"}).json()["id"]
+    assert repo.job(jid).proporcao == "9:16"
+
+
+def test_proporcao_explicita_e_respeitada(cliente):
+    c, repo = cliente
+    jid = c.post("/jobs", json={"modo": "t2v", "modelo": "omni-flash", "prompt": "p",
+                                "produto": "Moda", "nome": "n",
+                                "proporcao": "16:9"}).json()["id"]
+    assert repo.job(jid).proporcao == "16:9"
+
+
+def test_proporcao_fora_da_lista_da_422(cliente):
+    # o painel do Flow so tem cinco botoes; qualquer outro valor nao teria onde clicar
+    c, _ = cliente
+    r = c.post("/jobs", json={"modo": "t2v", "modelo": "omni-flash", "prompt": "p",
+                              "produto": "Moda", "nome": "n", "proporcao": "21:9"})
+    assert r.status_code == 422
+
+
+# --- quantidade ---
+
+def test_quantidade_padrao_e_uma(cliente):
+    c, repo = cliente
+    jid = c.post("/jobs", json={"modo": "t2v", "modelo": "omni-flash", "prompt": "p",
+                                "produto": "Moda", "nome": "n"}).json()["id"]
+    assert repo.job(jid).quantidade == 1
+
+
+def test_video_com_quantidade_maior_que_um_da_422(cliente):
+    # take de video e escolha do usuario, nao sorteio — e cada take extra custa cheio
+    c, _ = cliente
+    r = c.post("/jobs", json={"modo": "t2v", "modelo": "omni-flash", "prompt": "p",
+                              "produto": "Moda", "nome": "n", "quantidade": 2})
+    assert r.status_code == 422
+
+
+def test_imagem_aceita_lote_de_quatro(cliente):
+    # variacao de imagem e barata e serve justamente para escolher
+    c, repo = cliente
+    jid = c.post("/jobs", json={"modo": "imagem", "modelo": "nano-banana", "prompt": "p",
+                                "produto": "Moda", "nome": "n",
+                                "quantidade": 4}).json()["id"]
+    assert repo.job(jid).quantidade == 4
+
+
+def test_imagem_acima_de_quatro_da_422(cliente):
+    c, _ = cliente
+    r = c.post("/jobs", json={"modo": "imagem", "modelo": "nano-banana", "prompt": "p",
+                              "produto": "Moda", "nome": "n", "quantidade": 5})
+    assert r.status_code == 422
+
+
+def test_quantidade_zero_da_422(cliente):
+    c, _ = cliente
+    r = c.post("/jobs", json={"modo": "imagem", "modelo": "nano-banana", "prompt": "p",
+                              "produto": "Moda", "nome": "n", "quantidade": 0})
+    assert r.status_code == 422
+
+
+# --- modelo padrao ---
+
+def test_job_de_video_sem_modelo_sai_com_omni_flash(cliente):
+    # e o que o dropdown de video do Flow ja mostra; pedir Veo sem dizer seria mentira
+    c, repo = cliente
+    r = c.post("/jobs", json={"modo": "t2v", "prompt": "p", "produto": "Moda", "nome": "n"})
+    assert r.status_code == 201
+    assert repo.job(r.json()["id"]).modelo is Modelo.OMNI_FLASH
+
+
+def test_job_de_imagem_sem_modelo_sai_com_nano_banana(cliente):
+    c, repo = cliente
+    r = c.post("/jobs", json={"modo": "imagem", "prompt": "p", "produto": "Moda", "nome": "n"})
+    assert r.status_code == 201
+    assert repo.job(r.json()["id"]).modelo is Modelo.NANO_BANANA
+
+
+def test_modelo_explicito_continua_valendo(cliente):
+    c, repo = cliente
+    r = c.post("/jobs", json={"modo": "t2v", "modelo": "veo-quality", "prompt": "p",
+                              "produto": "Moda", "nome": "n"})
+    assert repo.job(r.json()["id"]).modelo is Modelo.VEO_QUALITY
 ```
 
 - [ ] **Step 2: Rodar e ver falhar**
@@ -3099,14 +3518,28 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'flowpool.api.app'`
 ```python
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
-from flowpool.nucleo.tipos import EstadoJob, Modelo, Modo, SaudeSessao, Tier
+from flowpool.nucleo.tipos import (
+    PROPORCAO_PADRAO, PROPORCOES, EstadoJob, Modelo, Modo, SaudeSessao, Tier,
+    quantidade_maxima,
+)
+
+# O que cada modo usa quando o pedido nao diz o modelo. Video vai em Omni Flash porque
+# e nele que o dropdown do Flow ja abre — assumir Veo seria escolher por conta propria
+# um modelo que custa diferente e sai diferente.
+_MODELO_PADRAO = {
+    Modo.T2V: Modelo.OMNI_FLASH,
+    Modo.FRAMES2V: Modelo.OMNI_FLASH,
+    Modo.INGREDIENTS2V: Modelo.OMNI_FLASH,
+    Modo.IMAGEM: Modelo.NANO_BANANA,
+}
 
 
 class PedidoJob(BaseModel):
     modo: Modo
-    modelo: Modelo
+    # Opcional: sem ele vale o padrao do modo (`_MODELO_PADRAO`).
+    modelo: Modelo | None = None
     prompt: str
     # Nome da pasta do produto e, ao mesmo tempo, nome do projeto no Flow. Obrigatorio:
     # e ele que diz em qual projeto a geracao acontece.
@@ -3118,7 +3551,42 @@ class PedidoJob(BaseModel):
     referencias: list[str] = Field(default_factory=list, max_length=3)
     frame_inicial: str | None = None
     frame_final: str | None = None
+    # Vertical por padrao: o canal e TikTok. Sobrescrevivel por pedido.
+    proporcao: str = PROPORCAO_PADRAO
+    # Saidas por geracao. MULTIPLICA O CUSTO — o teto depende do modo, ver
+    # `quantidade_coerente_com_o_modo`.
+    quantidade: int = Field(default=1, ge=1)
     prioridade: int = 0
+
+    @field_validator("proporcao")
+    @classmethod
+    def proporcao_existe_no_painel(cls, v: str) -> str:
+        """O painel do Flow tem cinco botoes; valor fora da lista nao teria onde clicar."""
+        if v not in PROPORCOES:
+            raise ValueError(f"proporcao {v!r} nao existe; use uma de {list(PROPORCOES)}")
+        return v
+
+    @model_validator(mode="after")
+    def modelo_padrao_do_modo(self) -> PedidoJob:
+        """Pedido sem modelo herda o padrao do modo em vez de ser recusado."""
+        if self.modelo is None:
+            self.modelo = _MODELO_PADRAO[self.modo]
+        return self
+
+    @model_validator(mode="after")
+    def quantidade_coerente_com_o_modo(self) -> PedidoJob:
+        """Video sai sempre 1; imagem aceita ate 4.
+
+        Take de video e escolha do usuario, nao sorteio — e cada take extra custa
+        cheio. Variacao de imagem e barata e serve justamente para escolher entre
+        elas. Recusar aqui e melhor do que gerar quatro videos que ninguem pediu.
+        """
+        teto = quantidade_maxima(self.modo)
+        if self.quantidade > teto:
+            raise ValueError(
+                f"modo {self.modo.value} aceita no maximo {teto} por job, "
+                f"pedido {self.quantidade}")
+        return self
 
     @model_validator(mode="after")
     def destino_deriva_do_produto(self) -> PedidoJob:
@@ -3147,6 +3615,8 @@ class RespostaJob(BaseModel):
     modelo: Modelo
     nome: str
     produto: str = ""
+    proporcao: str = PROPORCAO_PADRAO
+    quantidade: int = 1
     conta_id: int | None = None
     arquivo: str | None = None
     tentativas: int = 0
@@ -3213,17 +3683,19 @@ from flowpool.transporte.base import FlowTransport
 
 
 def _job_de(p: PedidoJob) -> Job:
-    # `destino` nunca chega None aqui: o validador de `PedidoJob` ja o derivou do
-    # produto quando o pedido veio sem ele.
+    # `destino` e `modelo` nunca chegam None aqui: os validadores de `PedidoJob` ja
+    # derivaram um do produto e o outro do modo quando o pedido veio sem eles.
     return Job(id=0, modo=p.modo, modelo=p.modelo, prompt=p.prompt, destino=p.destino,
                nome=p.nome, produto=p.produto, referencias=p.referencias,
                frame_inicial=p.frame_inicial, frame_final=p.frame_final,
+               proporcao=p.proporcao, quantidade=p.quantidade,
                prioridade=p.prioridade)
 
 
 def _resposta(j: Job) -> RespostaJob:
     return RespostaJob(id=j.id, estado=j.estado, modo=j.modo, modelo=j.modelo,
-                       nome=j.nome, produto=j.produto, conta_id=j.conta_id,
+                       nome=j.nome, produto=j.produto, proporcao=j.proporcao,
+                       quantidade=j.quantidade, conta_id=j.conta_id,
                        arquivo=j.arquivo, tentativas=j.tentativas, erro=j.erro)
 
 
@@ -3345,7 +3817,7 @@ A rota `POST /contas` fica de fora deste task porque ela precisa abrir navegador
 - [ ] **Step 5: Rodar e ver passar**
 
 Run: `.venv/Scripts/pytest tests/test_api.py -q`
-Expected: `15 passed`
+Expected: `26 passed`
 
 - [ ] **Step 6: Commit**
 
@@ -3363,7 +3835,16 @@ git commit -m "feat: api http de jobs e contas"
 
 Este task é **manual e assistido** — não tem teste automatizado porque depende do site do Google. O produto dele é um arquivo de seletores preenchido com valores reais. Todos os seletores moram aqui e em nenhum outro lugar: quando o Google mexer no layout, só este arquivo muda.
 
-Observação de campo (20/08): a app vive em `labs.google/fx/tools/flow/[id]` — o `[id]` é o **projeto**, e toda geração acontece dentro de um. Por isso o mapeamento também precisa cobrir a tela de projetos: lista, botão de novo projeto e campo de nome. Sem esses três, o transporte real não consegue cumprir o `listar_projetos`/`criar_projeto`/`abrir_projeto` que o motor já chama (Tasks 6 e 7), e cada geração abriria um projeto novo.
+Observação de campo (20/08): a app vive em `labs.google/fx/pt/tools/flow/project/[id]` — o `[id]` é o **projeto**, e toda geração acontece dentro de um. Por isso o mapeamento também precisa cobrir a tela de projetos: lista, botão de novo projeto e campo de nome. Sem esses três, o transporte real não consegue cumprir o `listar_projetos`/`criar_projeto`/`abrir_projeto` que o motor já chama (Tasks 6 e 7), e cada geração abriria um projeto novo.
+
+Seis regras aprendidas na primeira passada de mapeamento (20/08), e que valem para qualquer sessão futura deste task — o cabeçalho de `flowpool/transporte/pw/seletores.py` é a referência viva delas:
+
+1. **Nada de seletor por classe.** Classes são styled-components com hash (`button.sc-e8425ea6-0.hOBPaw`) e mudam a cada deploy do Google. O texto vem de um dicionário i18n versionado — é por ele que se navega.
+2. **Nunca varrer `<script>`, `<style>` ou `<noscript>`.** O `__NEXT_DATA__` carrega o access_token OAuth em texto puro, mais nome e e-mail do usuário. Uma varredura de DOM que não exclui essas tags vaza o token — já aconteceu, para disco, nesta primeira passada.
+3. **Nunca `page.goto` direto para dentro de um projeto.** Derruba a app com "Application error: a client-side exception has occurred". Entra-se pela lista e **clica-se no card**.
+4. **A janela precisa estar visível de verdade**, não só não-headless: minimizada ou fora de tela deixa `document.visibilityState == 'hidden'`, e o `IntersectionObserver` que libera o onboarding e renderiza a lista de projetos não dispara.
+5. **Login não acontece sob Playwright.** O Google recusa com "esse navegador ou app pode não ser seguro" qualquer Chrome dirigido por CDP. O login manual acontece num `chrome.exe` comum, fora do Playwright — ver Task 10.
+6. **A URL tem locale.** `labs.google/fx/pt/tools/flow` — fixar `pt` evita que o Google escolha o idioma por conta e derrube os seletores por texto (regra 1).
 
 - [ ] **Step 1: Instalar o Chromium do Playwright e confirmar o Chrome real**
 
@@ -3381,16 +3862,16 @@ Expected: o arquivo existe. Se não existir, procure em `/c/Program Files (x86)/
 
 - [ ] **Step 2: Escrever o script de mapeamento**
 
+**O login não acontece dentro deste script.** Um Chrome dirigido pelo Playwright — mesmo `channel="chrome"`, mesmo sem nenhuma flag suspeita — é dirigido por CDP, e é o CDP que o Google detecta e recusa no login ("esse navegador ou app pode não ser seguro"). Esse script só **inspeciona** uma sessão que já está logada. A sequência é sempre: login manual num Chrome comum primeiro (Step 3), inspeção com este script depois (Step 4).
+
 `flowpool/transporte/pw/mapear.py`:
 
 ```python
-"""Abre o Flow com Chrome real e um perfil dedicado, para login manual e inspecao.
+"""Abre o Flow com Chrome real, num perfil JA LOGADO, para inspecao com o Playwright
+Inspector. Nao faz login: o Playwright e recusado no fluxo de login (ver Step 3).
 
 Uso:
     python -m flowpool.transporte.pw.mapear perfis/mapeamento
-
-Loga na mao, monta uma geracao na tela, e usa o inspector do Playwright para pegar
-os seletores. Cole os valores encontrados em `seletores.py`.
 """
 
 from __future__ import annotations
@@ -3401,7 +3882,7 @@ from pathlib import Path
 
 from playwright.async_api import async_playwright
 
-FLOW = "https://labs.google/fx/tools/flow"
+FLOW = "https://labs.google/fx/pt/tools/flow"   # locale fixo: seletores sao por texto
 
 
 async def main(perfil: str) -> None:
@@ -3416,7 +3897,8 @@ async def main(perfil: str) -> None:
         )
         pagina = ctx.pages[0] if ctx.pages else await ctx.new_page()
         await pagina.goto(FLOW)
-        print("Loge na mao. Quando terminar, deixe a janela aberta e volte aqui.")
+        print("Se isto cair na tela de login, feche e faca o login pelo Step 3 antes.")
+        print("Ja logado: use o inspector para pegar seletores (por texto, nao classe).")
         print("Para inspecionar: rode com PWDEBUG=1 para abrir o Inspector.")
         await pagina.pause()   # abre o Playwright Inspector
         await ctx.close()
@@ -3426,93 +3908,195 @@ if __name__ == "__main__":
     asyncio.run(main(sys.argv[1] if len(sys.argv) > 1 else "perfis/mapeamento"))
 ```
 
-- [ ] **Step 3: Rodar e logar**
+- [ ] **Step 3: Logar na mão, fora do Playwright**
+
+O login acontece num Chrome comum, subido por fora do Playwright — exatamente como a Task 10 faz em produção (`cadastrar()`):
+
+```bash
+"/c/Program Files/Google/Chrome/Application/chrome.exe" \
+  --user-data-dir="$(pwd)/flowpool/perfis/mapeamento" \
+  --no-first-run --no-default-browser-check \
+  "https://labs.google/fx/pt/tools/flow"
+```
+
+Faça o login manual numa conta **grátis** (não a principal), passe as telas de boas-vindas, confirme que a lista de projetos carrega, e **feche essa janela** — o perfil não pode ficar aberto em dois Chromes ao mesmo tempo (o Playwright do Step 4 falharia com `TargetClosedError`).
+
+- [ ] **Step 4: Rodar o script de inspeção**
 
 ```bash
 .venv/Scripts/python -m flowpool.transporte.pw.mapear flowpool/perfis/mapeamento
 ```
 
-Faça o login manual numa conta **grátis** (não a principal). Confirme que o Flow carrega o projeto.
+Confirme que o Flow carrega direto na lista de projetos, sem tela de login — se cair no login, o perfil não ficou autenticado ou dois Chromes disputaram o mesmo `--user-data-dir` no Step 3.
 
-- [ ] **Step 4: Coletar os seletores, um a um**
+- [ ] **Step 5: Coletar os seletores, um a um**
 
-Com o Inspector aberto, use o modo *Pick locator* e anote o localizador de cada item abaixo. Anote também o texto exato dos rótulos, porque a interface pode estar em português:
+Com o Inspector aberto, use o modo *Pick locator* e anote o localizador de cada item abaixo. Prefira **texto ou role** ao localizador que o *Pick locator* sugerir primeiro — ele costuma sugerir a classe, e classe é regra 1 quebrada (styled-components com hash, muda a cada deploy). Anote o texto exato dos rótulos, porque a interface está em português (`pt` fixo na URL — regra 6):
 
-1. Indicador de créditos no cabeçalho
+1. Indicador de créditos — **não está na tela do projeto**; procurar em "Mais opções" ou nas configurações da conta
 2. Campo de prompt
 3. Seletor de modelo (o dropdown com Veo / Nano Banana) e a opção de cada modelo
 4. Botão de gerar
-5. Botão/área de upload de imagem de referência (ingredients)
-6. Botão/área de upload de primeiro frame e de último frame
-7. O card de resultado enquanto está gerando (spinner) e quando termina
-8. Botão de download do resultado
-9. O aviso de "créditos insuficientes"
-10. A tela de login (para detectar sessão caída)
-11. A lista de projetos na tela inicial, e o card/link de **um** projeto dentro dela (o localizador precisa dar tanto o nome visível quanto o id/href)
-12. O botão de **novo projeto**
-13. O campo de **nome do projeto** e o botão que confirma a criação
-14. O padrão da URL com o projeto aberto — anote uma URL real e confira onde o id cai
+5. O **único** `input[type=file]` de upload (`multiple`, `accept="image/*"`) — não são três campos separados; anote também **por onde** a UI distingue "isto é referência" de "isto é frame inicial/final" (aba, botão, ordem de clique — o que for)
+6. O card de resultado enquanto está gerando (spinner) e quando termina
+7. Botão de download do resultado
+8. O aviso de "créditos insuficientes"
+9. A tela de login (para detectar sessão caída)
+10. A lista de projetos na tela inicial, e o card/link de **um** projeto dentro dela (o localizador precisa dar tanto o nome visível quanto o id/href)
+11. O botão de **novo projeto**
+12. O campo de **nome do projeto** e o botão que confirma a criação
+13. O padrão da URL com o projeto aberto — anote uma URL real e confira onde o id cai (é para achar o card certo na lista; **não** vira `page.goto` — regra 3)
 
-Nos itens 11 a 13, anote também **de onde sai o id do projeto**: do `href` do card, da URL após abrir, ou de um atributo. É esse id que vai para `projeto.id_remoto` no banco, e um id errado faz o app abrir o projeto de outro produto — ou, pior, tentar abrir um que a conta da vez nem enxerga.
+Nos itens 10 a 12, anote também **de onde sai o id do projeto**: do `href` do card, da URL após abrir, ou de um atributo. É esse id que vai para `projeto.id_remoto` no banco, e um id errado faz o app abrir o projeto de outro produto — ou, pior, tentar abrir um que a conta da vez nem enxerga.
 
-- [ ] **Step 5: Preencher o arquivo de seletores**
+- [ ] **Step 6: Preencher o arquivo de seletores**
 
-`flowpool/transporte/pw/seletores.py` — substitua cada `...` pelo localizador real coletado no passo anterior. Não invente: use o que o Inspector mostrou.
+`flowpool/transporte/pw/seletores.py` — substitua cada `...` pelo localizador real coletado no passo anterior. Não invente: use o que o Inspector mostrou, e prefira texto/role a classe (regra 1).
 
 ```python
-"""Todos os seletores da UI do Flow. Quando o Google mexer no layout, so este arquivo muda.
+"""Seletores da UI do Flow. Quando o Google mexer no layout, so este arquivo muda.
 
-Preenchido por inspecao manual em <DATA DO MAPEAMENTO>. Cada constante e um seletor
-do Playwright (CSS, texto ou role).
+Mapeado ao vivo em <DATA DO MAPEAMENTO>, conta gratuita, locale pt.
+
+REGRAS APRENDIDAS NO MAPEAMENTO — leia antes de mexer:
+
+1. NAO usar seletor por classe. As classes sao styled-components com hash
+   (`button.sc-e8425ea6-0.hOBPaw`) e mudam a cada deploy do Google. O texto vem de um
+   dicionario i18n versionado; e por texto que se navega.
+
+2. NAO varrer <script>. O `__NEXT_DATA__` da pagina carrega o access_token OAuth em
+   texto puro. Qualquer varredura de DOM tem que excluir SCRIPT/STYLE/NOSCRIPT, senao
+   o token vaza para log em producao.
+
+3. NAO entrar por deep link. `page.goto(url_do_projeto)` derruba a aplicacao com
+   "Application error: a client-side exception has occurred". O caminho e ir na lista
+   e CLICAR no card — roteamento interno do Next.
+
+4. A janela precisa estar VISIVEL, nao so nao-headless. Varias partes da interface
+   (portao do aviso de privacidade, carregamento da lista de projetos) dependem de
+   IntersectionObserver, que nao dispara com `document.visibilityState == 'hidden'`.
+   Janela minimizada ou fora de tela conta como oculta.
+
+5. Login NAO acontece sob Playwright. O Google recusa com "esse navegador ou app pode
+   nao ser seguro". Cadastro de conta sobe um chrome.exe comum por subprocess; o
+   Playwright so reaproveita o perfil depois. A checagem e exclusiva do fluxo de login:
+   uma vez autenticado, o Playwright dirige a sessao sem reclamacao.
+
+6. Existe reCAPTCHA na pagina (`textarea.g-recaptcha-response`).
 """
 
-URL_FLOW = "https://labs.google/fx/tools/flow"
-URL_PROJETO = "https://labs.google/fx/tools/flow/project"
-# A app vive dentro de um projeto: `labs.google/fx/tools/flow/[id]`. Formate com o
-# id_remoto guardado no banco para abrir o projeto de um produto.
-URL_PROJETO_ABERTO = "https://labs.google/fx/tools/flow/{id_remoto}"
+# --- URLs ---------------------------------------------------------------
+# O locale entra na URL. Fixar em pt evita depender da deteccao de idioma do Google,
+# que varia por conta e derrubaria os seletores por texto.
+URL_FLOW = "https://labs.google/fx/pt/tools/flow"
+URL_SESSAO = "/fx/api/auth/session"          # devolve user, expires e access_token
+PADRAO_PROJETO = "/fx/pt/tools/flow/project/"  # id_remoto e o UUID no fim
 
-# --- sessao ---
-LOGIN_VISIVEL = "..."          # algo que so aparece deslogado, ex: botao "Sign in"
-CREDITOS = "..."               # elemento com o numero de creditos
+# --- sessao ---------------------------------------------------------------
+LOGIN_VISIVEL = "..."          # so aparece deslogado
 
-# --- prompt e modelo ---
-CAMPO_PROMPT = "..."
-SELETOR_MODELO = "..."
-OPCAO_MODELO = {
-    "veo-lite": "...",
-    "veo-fast": "...",
-    "veo-quality": "...",
-    "nano-banana": "...",
+# --- lista de projetos ------------------------------------------------------
+CARD_PROJETO = "..."           # f'a[href*="{PADRAO_PROJETO}"]' — um item da lista
+BOTAO_NOVO_PROJETO = "..."
+
+# --- onboarding de perfil novo ---------------------------------------------
+# Duas telas em sequencia. A segunda so libera o "Continuar" depois que o fim do texto
+# entra em viewport DE VERDADE (IntersectionObserver) — ver regra 4.
+DIALOGO = "..."
+BOTAO_AVANCAR = "..."
+BOTAO_CONTINUAR = "..."
+CAIXA_CONSENTIMENTO = "..."   # deixar sempre DESMARCADA
+
+# --- dentro do projeto -------------------------------------------------------
+# ATENCAO: `input[aria-label="Texto editável"]` NAO e o campo de prompt — e o editor do
+# NOME DO PROJETO. Escrever nele renomeia o projeto em vez de gerar, e o sintoma e
+# "nada acontece". Ja aconteceu no mapeamento.
+CAMPO_NOME_PROJETO = 'input[aria-label="Texto editável"]'
+CAMPO_PROMPT = '[contenteditable=true]'   # o unico contenteditable visivel da pagina
+BOTAO_ENVIAR = 'button:has-text("arrow_forward")'
+BOTAO_ANEXAR = 'button:has-text("add_2")'  # dois botoes tem "Criar"; a ligadura separa
+
+# Um unico input de arquivo serve referencias E frames: multiple=True, accept=image/*.
+UPLOAD = 'input[type=file]'
+
+# --- painel de configuracao da geracao --------------------------------------
+# ARMADILHA DE ORDEM: `tune Configurações` NAO existe numa sessao nova. So aparece
+# DEPOIS que o primeiro prompt foi enviado ao agente. Abrir antes da TimeoutError.
+#
+# O painel tem quatro grupos: confirmacao, proporcao, quantidade e os DOIS dropdowns
+# de modelo (um de imagem, um de video). Fecha em "Salvar".
+BOTAO_CONFIGURACOES = 'button:has-text("tune Configurações")'
+BOTAO_SALVAR_CONFIG = 'button:has-text("Salvar")'
+
+# Confirmacao (ARMADILHA): o padrao e "Sempre" — o agente pede confirmacao antes de
+# gastar credito. Um robo nessa configuracao NAO falha com erro: fica pendurado ate o
+# timeout, queima as tres tentativas e marca o job como falho sem dizer o porque.
+AGENTE_SEMPRE = '[role=radio]:has-text("Sempre")'
+AGENTE_NUNCA = '[role=radio]:has-text("Nunca")'
+
+# Proporcao — 9:16 e o formato do TikTok e o padrao do FlowPool (`Job.proporcao`).
+PROPORCAO = {
+    "16:9": 'button:has-text("crop_16_9")',
+    "4:3": 'button:has-text("crop_landscape")',
+    "1:1": 'button:has-text("crop_square")',
+    "3:4": 'button:has-text("crop_portrait")',
+    "9:16": 'button:has-text("crop_9_16")',
 }
-BOTAO_GERAR = "..."
 
-# --- uploads ---
-UPLOAD_REFERENCIA = "..."      # input[type=file] dos ingredients
-UPLOAD_FRAME_INICIAL = "..."
-UPLOAD_FRAME_FINAL = "..."
+# Quantidade de variacoes por geracao (`Job.quantidade`). Custa N x credito — nunca
+# deixar implicito. Video sai sempre em x1 pela regra de negocio (Task 1).
+QUANTIDADE = {1: 'button:has-text("x1")', 2: 'button:has-text("x2")',
+              3: 'button:has-text("x3")', 4: 'button:has-text("x4")'}
 
-# --- resultado ---
+# Dois dropdowns separados. O de video vem em "Omni Flash" por PADRAO, nao em Veo — se
+# o transporte nao trocar explicitamente, todo job sai no modelo errado.
+DROPDOWN_MODELO_IMAGEM = 'button:has-text("Nano Banana")'
+DROPDOWN_MODELO_VIDEO = 'button:has-text("Omni")'
+
+# Rotulos exatos, medidos em 2026-08-20 numa conta gratuita.
+OPCAO_MODELO = {
+    # video
+    "omni-flash": '[role=menuitem]:has-text("Omni Flash")',
+    "veo-lite": '[role=menuitem]:has-text("Veo 3.1 - Lite")',
+    "veo-fast": '[role=menuitem]:has-text("Veo 3.1 - Fast")',
+    "veo-quality": '[role=menuitem]:has-text("Veo 3.1 - Quality")',
+    # imagem
+    "nano-banana-pro": '[role=menuitem]:has-text("Nano Banana Pro")',
+    "nano-banana-2": '[role=menuitem]:has-text("Nano Banana 2")',
+    "nano-banana": '[role=menuitem]:has-text("Nano Banana 2 Lite")',
+}
+# ATENCAO ao casar por texto: "Nano Banana 2" e prefixo de "Nano Banana 2 Lite".
+# Usar correspondencia exata, senao o Lite e escolhido quando se pediu o 2.
+
+# --- menu da conta ------------------------------------------------------
+# O saldo NAO fica na tela do projeto. Esta no menu do avatar, que rende
+# "50 Créditos do Google Flow". Ler saldo custa dois cliques por geracao.
+AVATAR_CONTA = 'img[src*="googleusercontent"]'
+PADRAO_CREDITOS = r"(\d[\d.,]*)\s+Créditos"   # aplicar no innerText do menu aberto
+
+# --- A PREENCHER --------------------------------------------------------
+# So aparecem quando uma geracao acontece de verdade.
+BOTAO_CONFIRMAR_GERACAO = "..."   # o agente pergunta antes de gastar (modo "Sempre")
 CARD_GERANDO = "..."
 CARD_PRONTO = "..."
 BOTAO_DOWNLOAD = "..."
-
-# --- projetos ---
-# Toda geracao acontece DENTRO de um projeto. Sem estes cinco, cada geracao criaria
-# um projeto novo e a conta viraria um lixao de projetos orfaos.
-LISTA_PROJETOS = "..."         # container da lista na tela inicial
-CARD_PROJETO = "..."           # um item da lista; dele saem o nome e o id/href
-BOTAO_NOVO_PROJETO = "..."
-CAMPO_NOME_PROJETO = "..."
-BOTAO_CRIAR_PROJETO = "..."    # o que confirma a criacao depois do nome
-
-# --- erros ---
 AVISO_SEM_CREDITO = "..."
+BOTAO_PARAR = 'button:has-text("stop Parar")'   # aparece enquanto o agente trabalha
 ```
 
-Os cinco de projeto ficam `"..."` como os outros: só a sessão de mapeamento os preenche. O que **não** pode ficar em aberto é de onde sai o id — anote isso no comentário de `CARD_PROJETO` junto com o localizador.
+Note que este template já reflete o que a primeira passada de campo (20/08) encontrou: URLs, sessão, lista de projetos, onboarding, campo de prompt, upload único, saldo no menu do avatar e **o painel de configuração inteiro** têm seletor conhecido para preencher direto. A seção **A PREENCHER** é a pendência real e explícita desta task — só o que aparece durante uma geração de verdade: confirmação do agente, card gerando, card pronto, botão de download e aviso de saldo insuficiente. Uma sessão futura de mapeamento com a janela realmente aberta (regra 4) resolve essa seção; o resto já está provado.
 
-- [ ] **Step 6: Commit**
+Três achados do painel que mudam o domínio do app, e já estão nas Tasks 1–8:
+
+1. **O dropdown de vídeo abre em "Omni Flash", não em Veo.** Daí `Modelo.OMNI_FLASH` e o padrão de vídeo da API. Um transporte que não troque explicitamente gera nele.
+2. **Existem dois dropdowns de modelo**, um de imagem e um de vídeo — não um só. O transporte mexe no que corresponde ao modo do job.
+3. **Proporção e quantidade são grupos do mesmo painel**, e a quantidade multiplica o crédito. `Job.proporcao` e `Job.quantidade` existem por causa disso.
+
+Uma quarta armadilha, de ordem e não de domínio: `tune Configurações` **não existe numa sessão nova** — só aparece depois que o primeiro prompt foi enviado ao agente. A sequência do transporte real (Task 11) é sempre: enviar prompt → esperar resposta → abrir `tune` → configurar → salvar.
+
+O que **não** pode ficar em aberto é de onde sai o id do projeto — anote isso no comentário de `CARD_PROJETO` junto com o localizador.
+
+- [ ] **Step 7: Commit**
 
 ```bash
 git add flowpool/transporte/pw/seletores.py flowpool/transporte/pw/mapear.py
@@ -3692,7 +4276,7 @@ from flowpool.transporte.pw.sessao import cadastrar, caminho_perfil
 - [ ] **Step 6: Rodar a suíte**
 
 Run: `.venv/Scripts/pytest -q`
-Expected: `138 passed` (119 + 15 da api + 4 da sessão)
+Expected: `176 passed` (146 + 26 da api + 4 da sessão)
 
 - [ ] **Step 7: Commit**
 
@@ -3714,6 +4298,16 @@ Os quatro modos compartilham o mesmo esqueleto: preencher prompt → escolher mo
 Antes do esqueleto vem o projeto: `listar_projetos`, `criar_projeto` e `abrir_projeto` fecham o contrato que o motor já usa desde a Task 7. `abrir_projeto` é navegação pura (`URL_PROJETO_ABERTO.format(...)`); `criar_projeto` é botão → nome → confirmar, e **devolve o id lido da URL depois que o projeto abre** — é esse id que vai para o banco. Se a URL não mudar, a criação falhou: devolver um id inventado gravaria no banco um vínculo que nunca abre.
 
 `gerar` passa a assumir que a página **já está dentro do projeto certo** — quem colocou foi `_resolver_projeto`, no orquestrador. O transporte não decide projeto: ele só lista, cria e abre.
+
+**O painel de configuração é obrigatório, e a ordem importa.** O mapeamento (Task 9) mostrou que `tune Configurações` não existe numa sessão nova: só aparece **depois** que o primeiro prompt foi enviado ao agente. Tentar abri-lo antes dá `TimeoutError`. A sequência de `gerar` é portanto: escrever o prompt → enviar → esperar a resposta do agente → abrir `tune` → configurar → salvar → confirmar a geração.
+
+Três coisas se configuram ali, e nenhuma pode ficar no default:
+
+- **Modelo.** São **dois** dropdowns, um de imagem e um de vídeo. O transporte mexe no que corresponde ao modo do job. O de vídeo abre em **Omni Flash** — quem não trocar explicitamente gera nele, e o job sai no modelo errado sem nenhum erro.
+- **Proporção** (`p.proporcao`). O padrão do app é 9:16; o painel tem um botão por valor.
+- **Quantidade** (`p.quantidade`). Custa N × crédito — é o número que `escolher` e `reservar` já usaram para reservar saldo (Tasks 3 e 4). Deixar a UI escolher faria o Flow cobrar o que o app não previu.
+
+Uma quarta, do cadastro e não da geração: a confirmação do agente vem em **"Sempre"** por padrão. Nessa configuração o robô não falha com erro — ele fica pendurado até o timeout, queima as três tentativas e marca o job como falho sem dizer o porquê. Ou o cadastro de conta (Task 10) deixa em "Nunca", ou o transporte aprende a clicar em `BOTAO_CONFIRMAR_GERACAO` (ainda por mapear).
 
 - [ ] **Step 1: Implementar**
 
@@ -3806,9 +4400,6 @@ class TransportePlaywright:
         # a pagina ja esta dentro do projeto certo: quem colocou foi o orquestrador
         _, _, pagina = s.handle
 
-        await pagina.locator(sel.SELETOR_MODELO).click()
-        await pagina.locator(sel.OPCAO_MODELO[p.modelo.value]).click()
-
         await self._subir_arquivos(pagina, p)
 
         campo = pagina.locator(sel.CAMPO_PROMPT)
@@ -3816,7 +4407,11 @@ class TransportePlaywright:
         await campo.fill(p.prompt)
 
         antes = await pagina.locator(sel.CARD_PRONTO).count()
-        await pagina.locator(sel.BOTAO_GERAR).click()
+        await pagina.locator(sel.BOTAO_ENVIAR).click()
+
+        # ORDEM OBRIGATORIA: `tune Configuracoes` so existe depois que o agente
+        # respondeu ao primeiro prompt. Abrir antes da TimeoutError (Task 9).
+        await self._configurar_painel(pagina, p)
 
         if await pagina.locator(sel.AVISO_SEM_CREDITO).is_visible(timeout=5000):
             raise SaldoInsuficiente(f"conta {s.conta.email} sem credito")
@@ -3824,6 +4419,29 @@ class TransportePlaywright:
         await pagina.locator(sel.CARD_GERANDO).first.wait_for(timeout=30_000)
         # o "id remoto" aqui e o indice do card novo; o Flow nao expoe id na UI
         return f"card-{antes}"
+
+    async def _configurar_painel(self, pagina, p: Pedido) -> None:
+        """Modelo, proporcao e quantidade — nenhum dos tres pode ficar no default.
+
+        O dropdown de video abre em Omni Flash: sem trocar explicitamente, todo job
+        sai no modelo errado e sem erro nenhum. A quantidade multiplica o credito, e
+        o saldo ja foi reservado com o numero do job (Tasks 3 e 4) — deixar a UI
+        escolher faria o Flow cobrar o que o app nao previu.
+        """
+        tune = pagina.locator(sel.BOTAO_CONFIGURACOES)
+        await tune.wait_for(timeout=60_000)
+        await tune.click()
+
+        dropdown = (sel.DROPDOWN_MODELO_IMAGEM if p.modo is Modo.IMAGEM
+                    else sel.DROPDOWN_MODELO_VIDEO)
+        await pagina.locator(dropdown).click()
+        # correspondencia exata: "Nano Banana 2" e prefixo de "Nano Banana 2 Lite"
+        await pagina.locator(sel.OPCAO_MODELO[p.modelo.value]).first.click()
+
+        await pagina.locator(sel.PROPORCAO[p.proporcao]).click()
+        await pagina.locator(sel.QUANTIDADE[p.quantidade]).click()
+
+        await pagina.locator(sel.BOTAO_SALVAR_CONFIG).click()
 
     async def _subir_arquivos(self, pagina, p: Pedido) -> None:
         if p.modo is Modo.INGREDIENTS2V:
@@ -3911,8 +4529,11 @@ async def main(perfil: str, modelo: str, prompt: str) -> None:
         print("saldo antes:", await t.saldo(s))
         # a fumaca tambem passa pelo projeto: gerar fora de um nao existe no Flow
         await entrar_no_projeto(t, s, PRODUTO_FUMACA)
+        # proporcao e quantidade explicitas: e o que o painel vai receber, e o que
+        # decide quanto credito a fumaca gasta
         id_remoto = await t.gerar(s, Pedido(modo=Modo.T2V, modelo=Modelo(modelo),
-                                            prompt=prompt))
+                                            prompt=prompt, proporcao="9:16",
+                                            quantidade=1))
         print("gerando:", id_remoto)
         while await t.consultar(s, id_remoto) is Estado.RODANDO:
             await asyncio.sleep(5)
@@ -3960,7 +4581,8 @@ Substitua o `main` de `fumaca.py` por:
 
 ```python
 async def main(perfil: str, modo: str, modelo: str, prompt: str,
-               arquivos: list[str]) -> None:
+               arquivos: list[str], proporcao: str = "9:16",
+               quantidade: int = 1) -> None:
     t = TransportePlaywright()
     conta = Conta(id=1, email="fumaca", tier=Tier.FREE, perfil=perfil)
     m = Modo(modo)
@@ -3969,6 +4591,9 @@ async def main(perfil: str, modo: str, modelo: str, prompt: str,
         referencias=arquivos if m is Modo.INGREDIENTS2V else [],
         frame_inicial=arquivos[0] if m is Modo.FRAMES2V and arquivos else None,
         frame_final=arquivos[1] if m is Modo.FRAMES2V and len(arquivos) > 1 else None,
+        # explicitos de proposito: e o que o painel vai receber, e a quantidade decide
+        # quanto credito a fumaca gasta
+        proporcao=proporcao, quantidade=quantidade,
     )
     s = await t.abrir_sessao(conta)
     try:
@@ -4014,6 +4639,22 @@ Expected: `scratch/fumaca.mp4` existe e o primeiro frame é a foto da Clara.
 ```
 
 Expected: `scratch/fumaca.mp4` existe e o rosto é o da Clara. Três referências é o teto do Flow — o quarto arquivo é ignorado pelo `[:3]` no transporte, e a API já recusa com 422.
+
+- [ ] **Step 4b: Fumaça do painel — Omni Flash, vertical e lote**
+
+Duas rodadas, para provar que o painel foi mesmo configurado e não ficou no default:
+
+```bash
+# 1) video no padrao do app: Omni Flash em 9:16, uma saida
+.venv/Scripts/python -m flowpool.transporte.pw.fumaca flowpool/perfis/mapeamento t2v omni-flash "a slow push-in on a ceramic mug, soft window light"
+
+# 2) imagem em lote: quatro variacoes, e o saldo tem que cair 4x
+.venv/Scripts/python -m flowpool.transporte.pw.fumaca flowpool/perfis/mapeamento imagem nano-banana "a red ceramic mug on linen" --quantidade 4
+```
+
+Expected: o vídeo sai **vertical** (não 16:9) e o dropdown de vídeo mostra Omni Flash; a rodada de imagem devolve quatro variações e a diferença entre "saldo antes" e "saldo depois" é **quatro vezes** o custo de uma. Se a diferença for de uma só, o clique em `QUANTIDADE` não pegou — e é isso que faria o app reservar 8 e gastar 2 (ou o contrário) sem ninguém notar.
+
+Este é também o passo que mede o **custo real do Omni Flash**: `_CUSTO` o cadastra em 20/20/10 como estimativa declarada (Task 2). Anote o número medido e corrija a tabela.
 
 - [ ] **Step 5: Fumaça de projeto — reuso e adoção**
 
@@ -4079,11 +4720,15 @@ def test_estado_devolve_o_dicionario_do_job(cliente):
     assert cliente.estado(jid)["estado"] == "pendente"
 
 
-def test_padroes_sao_t2v_e_veo_fast(cliente):
+def test_padroes_sao_t2v_omni_flash_e_vertical(cliente):
+    # omni-flash porque e o que o dropdown de video do Flow ja mostra;
+    # 9:16 porque o canal e TikTok
     jid = cliente.gerar(prompt="p", produto="Moda", nome="n")
     j = cliente.estado(jid)
     assert j["modo"] == "t2v"
-    assert j["modelo"] == "veo-fast"
+    assert j["modelo"] == "omni-flash"
+    assert j["proporcao"] == "9:16"
+    assert j["quantidade"] == 1
 ```
 
 - [ ] **Step 2: Rodar e ver falhar**
@@ -4119,16 +4764,22 @@ class FlowPool:
         self.http = transporte_http or httpx.Client(base_url=base, timeout=30)
 
     def gerar(self, prompt: str, produto: str, nome: str, modo: str = "t2v",
-              modelo: str = "veo-fast", destino: str | None = None,
+              modelo: str = "omni-flash", destino: str | None = None,
               referencias: list[str] | None = None,
               frame_inicial: str | None = None, frame_final: str | None = None,
+              proporcao: str = "9:16", quantidade: int = 1,
               prioridade: int = 0) -> int:
         # `destino` fica de fora quando e None: a API o deriva do produto
         # (`{produto}/clipes`), e mandar null explicito seria a mesma coisa com ruido.
+        #
+        # `modelo="omni-flash"` e o padrao de video do Flow, nao Veo. `proporcao="9:16"`
+        # porque o canal e TikTok. `quantidade=1` porque video sai sempre um — pedir
+        # mais de um em modo de video e 422 na API, de proposito.
         r = self.http.post("/jobs", json={
             "modo": modo, "modelo": modelo, "prompt": prompt, "produto": produto,
             "nome": nome, "referencias": referencias or [],
             "frame_inicial": frame_inicial, "frame_final": frame_final,
+            "proporcao": proporcao, "quantidade": quantidade,
             "prioridade": prioridade,
             **({"destino": destino} if destino else {}),
         })
@@ -4136,7 +4787,8 @@ class FlowPool:
         return r.json()["id"]
 
     def lote(self, jobs: list[dict]) -> list[int]:
-        completos = [{"modo": "t2v", "modelo": "veo-fast", "referencias": [],
+        completos = [{"modo": "t2v", "modelo": "omni-flash", "referencias": [],
+                      "proporcao": "9:16", "quantidade": 1,
                       "prioridade": 0, **j} for j in jobs]
         r = self.http.post("/jobs/lote", json={"jobs": completos})
         r.raise_for_status()
@@ -4211,7 +4863,7 @@ Expected: `4 passed`
 - [ ] **Step 6: Rodar a suíte inteira**
 
 Run: `.venv/Scripts/pytest -q`
-Expected: `142 passed` (138 + 4 do cliente)
+Expected: `180 passed` (176 + 4 do cliente)
 
 - [ ] **Step 7: Commit**
 
@@ -4292,14 +4944,25 @@ Precisa ser o **Chrome instalado** — o Chromium do Playwright é recusado pelo
 
     from flowpool.cliente import FlowPool
     fp = FlowPool()
-    jid = fp.gerar(prompt="...", produto="Video Roupa", nome="c3-take1",
-                   modelo="veo-fast")
+    jid = fp.gerar(prompt="...", produto="Video Roupa", nome="c3-take1")
     caminho = fp.esperar(jid)
+
+Sem dizer o modelo, vídeo sai em **Omni Flash** (é o padrão do próprio Flow) e imagem
+em Nano Banana. Sem dizer a proporção, sai em **9:16** — vertical, formato do TikTok.
+
+    # quatro variações de imagem para escolher (custa 4x)
+    jid = fp.gerar(prompt="...", produto="Panelas Monaco", nome="capa",
+                   modo="imagem", quantidade=4)
 
 ## O que saber
 
-- Conta grátis: 50 créditos/dia. Lite 10, Fast 20. **Quality (100) nunca cabe** — vai
-  para conta paga.
+- Conta grátis: 50 créditos/dia. Lite 10, Fast 20, Omni Flash ~20 (estimado, a medir).
+  **Quality (100) nunca cabe** — vai para conta paga.
+- Vídeo sai sempre **uma** geração por job; `quantidade` acima de 1 só em `modo=imagem`
+  (até 4) e é 422 no resto. Take de vídeo é escolha sua, não sorteio — e cada take
+  extra custa cheio. `quantidade` multiplica o crédito reservado.
+- Proporção padrão **9:16**. Os valores aceitos são `16:9`, `4:3`, `1:1`, `3:4`, `9:16`;
+  qualquer outro é 422.
 - Job sem conta apta não falha: espera o reset e volta sozinho.
 - Sessão caída exige pessoa: `POST /contas/{id}/revalidar`.
 - `produto` é obrigatório: é a pasta de destino (`{produto}/clipes`, se você não mandar
