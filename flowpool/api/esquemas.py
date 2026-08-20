@@ -6,7 +6,7 @@ from flowpool.nucleo.erros import ProxyInvalido
 from flowpool.nucleo.proxy import analisar
 from flowpool.nucleo.tipos import (
     DURACAO_PADRAO, DURACOES, PROPORCAO_PADRAO, PROPORCOES, EstadoJob, Modelo, Modo,
-    SaudeSessao, Tier, duracao_valida, quantidade_maxima,
+    SaudeSessao, Tier, duracao_valida, max_referencias, quantidade_maxima,
 )
 
 
@@ -52,7 +52,10 @@ class PedidoJob(BaseModel):
     # explicito para quando o arquivo deve cair em outro lugar.
     destino: str | None = None
     nome: str
-    referencias: list[str] = Field(default_factory=list, max_length=3)
+    # Ate tres, e QUAIS modos aceitam sai de `max_referencias` — ver
+    # `referencias_coerentes_com_o_modo`. Imagem aceita: o Flow gera imagem a partir de
+    # uma foto, e e por ai que o pipeline do usuario comeca.
+    referencias: list[str] = Field(default_factory=list)
     frame_inicial: str | None = None
     frame_final: str | None = None
     # Vertical por padrao: o canal e TikTok. Sobrescrevivel por pedido.
@@ -126,6 +129,44 @@ class PedidoJob(BaseModel):
         """`produto: "Panelas Monaco"` basta; repetir o caminho e ruido."""
         if not self.destino:
             self.destino = f"{self.produto}/clipes"
+        return self
+
+    @model_validator(mode="after")
+    def referencias_coerentes_com_o_modo(self) -> PedidoJob:
+        """Quem aceita referencia, quantas, e quem nao aceita nenhuma.
+
+        IMAGEM ACEITA — e sempre aceitou, do lado do Flow. Quem recusava era o
+        transporte, em silencio: a pessoa colava a foto, trocava para modo imagem e a
+        foto sumia. Nao e um canto raro do app; e a primeira etapa do pipeline do
+        usuario, "foto da roupa -> imagem da modelo vestida".
+
+        Nos modos que NAO aceitam a recusa e explicita, e nao um descarte calado la na
+        frente: mandar referencia em `t2v` so pode ser engano de quem chama, e um 422
+        aqui custa menos do que um clipe gerado sem a referencia que o pedido trazia.
+        """
+        teto = max_referencias(self.modo)
+        if self.referencias and not teto:
+            raise ValueError(
+                f"modo {self.modo.value} nao aceita referencia: o arquivo seria "
+                f"descartado sem chegar ao Flow. Use ingredients2v (video) ou imagem")
+        if len(self.referencias) > teto:
+            raise ValueError(
+                f"modo {self.modo.value} aceita no maximo {teto} referencias, "
+                f"pedidas {len(self.referencias)}")
+        return self
+
+    @model_validator(mode="after")
+    def frames_sao_exclusivos_do_frames2v(self) -> PedidoJob:
+        """Frame inicial e final so existem em `frames2v`.
+
+        Fora dele o painel do Flow nao tem onde colocar esses arquivos, e o transporte
+        nao os anexa — aceitar aqui seria prometer uma coisa e entregar outra. Referencia
+        de imagem tem campo proprio (`referencias`), e e por ele que a foto entra.
+        """
+        if self.modo is not Modo.FRAMES2V and (self.frame_inicial or self.frame_final):
+            raise ValueError(
+                f"frame_inicial/frame_final so valem em frames2v; em "
+                f"{self.modo.value} use referencias")
         return self
 
     @model_validator(mode="after")

@@ -54,6 +54,42 @@ def quantidade_maxima(modo: Modo) -> int:
     return MAX_QUANTIDADE_IMAGEM if modo is Modo.IMAGEM else 1
 
 
+# Teto de referencias de uma geracao. E o mesmo nos dois modos que aceitam: tres.
+MAX_REFERENCIAS = 3
+
+
+def max_referencias(modo: Modo) -> int:
+    """Quantas imagens de referencia aquele modo aceita.
+
+    IMAGEM ACEITA. MEDIDO 2026-08-20: com o chip em modo imagem a pagina tem um
+    `input[type=file]` e um botao de anexar — o Flow gera imagem a partir de uma foto,
+    e e o Nano Banana fazendo isso. Enquanto isto valia zero, o transporte descartava a
+    referencia SEM AVISO: a pessoa colava a imagem, trocava para modo imagem e a imagem
+    sumia. E nao era um canto raro do app — e a PRIMEIRA etapa do pipeline do usuario,
+    "foto da roupa -> imagem da modelo vestida".
+
+    Video por texto e video por frames nao aceitam: la o arquivo tem outro papel (ou
+    papel nenhum), e anexar seria o mesmo descarte silencioso pela outra porta.
+    """
+    if modo in (Modo.INGREDIENTS2V, Modo.IMAGEM):
+        return MAX_REFERENCIAS
+    return 0
+
+
+def aceita_referencia(modo: Modo) -> bool:
+    return max_referencias(modo) > 0
+
+
+def exige_arquivo(modo: Modo) -> bool:
+    """Se o modo nao GERA sem um arquivo — diferente de apenas aceitar um.
+
+    `ingredients2v` sem referencia e `frames2v` sem frame inicial nao tem o que gerar.
+    Imagem sem referencia e o caso comum: geracao por texto puro. Confundir as duas
+    coisas transformaria toda geracao de imagem em erro.
+    """
+    return modo in (Modo.INGREDIENTS2V, Modo.FRAMES2V)
+
+
 # As quatro do grupo de duracao do chip, medidas ao vivo. Imagem nao tem grupo de
 # duracao: nao existe botao onde clicar.
 DURACOES = ("4s", "6s", "8s", "10s")

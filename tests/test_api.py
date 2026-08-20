@@ -53,6 +53,62 @@ def test_ingredients2v_recusa_mais_de_tres_referencias(cliente):
     assert r.status_code == 422
 
 
+def test_imagem_aceita_referencia(cliente):
+    # O DEFEITO: imagem com referencia e o Nano Banana gerando a partir de uma foto, e
+    # e a PRIMEIRA etapa do pipeline do usuario — foto da roupa -> modelo vestida.
+    c, repo = cliente
+    r = c.post("/jobs", json={"modo": "imagem", "prompt": "a modelo vestindo",
+                              "produto": "Moda", "nome": "n",
+                              "referencias": ["roupa.png"]})
+    assert r.status_code == 201
+    assert repo.job(r.json()["id"]).referencias == ["roupa.png"]
+
+
+def test_imagem_recusa_mais_de_tres_referencias(cliente):
+    # o mesmo teto do ingredients2v: tres
+    c, _ = cliente
+    r = c.post("/jobs", json={"modo": "imagem", "prompt": "p", "produto": "Moda",
+                              "nome": "n",
+                              "referencias": ["1.png", "2.png", "3.png", "4.png"]})
+    assert r.status_code == 422
+
+
+def test_imagem_com_referencia_continua_aceitando_quatro_variacoes(cliente):
+    # as duas regras sao independentes: amarrar quantidade a referencia tiraria as
+    # variacoes justamente do caso em que elas mais servem
+    c, _ = cliente
+    r = c.post("/jobs", json={"modo": "imagem", "prompt": "p", "produto": "Moda",
+                              "nome": "n", "quantidade": 4,
+                              "referencias": ["roupa.png"]})
+    assert r.status_code == 201
+
+
+def test_imagem_sem_referencia_continua_valendo(cliente):
+    # texto puro e o caso comum de imagem; exigir arquivo aqui quebraria todos eles
+    c, _ = cliente
+    r = c.post("/jobs", json={"modo": "imagem", "prompt": "p", "produto": "Moda",
+                              "nome": "n"})
+    assert r.status_code == 201
+
+
+def test_t2v_recusa_referencia_em_vez_de_descartar_calado(cliente):
+    # em t2v o transporte nao anexa nada: aceitar seria prometer uma coisa e gerar
+    # outra, com credito gasto
+    c, _ = cliente
+    r = c.post("/jobs", json={"modo": "t2v", "prompt": "p", "produto": "Moda",
+                              "nome": "n", "referencias": ["roupa.png"]})
+    assert r.status_code == 422
+
+
+def test_frame_inicial_fora_do_frames2v_e_recusado(cliente):
+    # frame inicial e final continuam exclusivos de frames2v: em imagem a foto entra
+    # por `referencias`
+    c, _ = cliente
+    r = c.post("/jobs", json={"modo": "imagem", "prompt": "p", "produto": "Moda",
+                              "nome": "n", "frame_inicial": "a.png"})
+    assert r.status_code == 422
+
+
 def test_frames2v_exige_frame_inicial(cliente):
     c, _ = cliente
     r = c.post("/jobs", json={"modo": "frames2v", "modelo": "veo-fast", "prompt": "p",

@@ -2,7 +2,8 @@ from datetime import datetime, timezone
 
 from flowpool.nucleo.tipos import (
     DURACAO_PADRAO, DURACOES, PROPORCOES, Conta, EstadoJob, Job, Modelo, Modo, Projeto,
-    SaudeSessao, Tier, duracao_valida, quantidade_maxima,
+    SaudeSessao, Tier, aceita_referencia, duracao_valida, exige_arquivo,
+    max_referencias, quantidade_maxima,
 )
 
 
@@ -147,3 +148,43 @@ def test_video_aceita_so_as_quatro_duracoes():
             assert duracao_valida(modo, d) is True
         assert duracao_valida(modo, "5s") is False
         assert duracao_valida(modo, None) is False
+
+
+# --- referencia por modo: imagem aceita, e sempre aceitou ---------------
+
+
+def test_imagem_aceita_referencia():
+    # MEDIDO: o Flow gera imagem A PARTIR de uma foto (Nano Banana). Enquanto isto
+    # valia zero, a referencia anexada era descartada sem aviso — e e a PRIMEIRA etapa
+    # do pipeline do usuario: foto da roupa -> imagem da modelo vestida.
+    assert max_referencias(Modo.IMAGEM) == 3
+    assert aceita_referencia(Modo.IMAGEM) is True
+
+
+def test_ingredients2v_continua_com_o_mesmo_teto():
+    assert max_referencias(Modo.INGREDIENTS2V) == 3
+
+
+def test_video_por_texto_e_por_frames_nao_aceitam_referencia():
+    # la o arquivo tem outro papel (ou papel nenhum): aceitar seria o mesmo descarte
+    # silencioso pela outra porta
+    for modo in (Modo.T2V, Modo.FRAMES2V):
+        assert max_referencias(modo) == 0
+        assert aceita_referencia(modo) is False
+
+
+def test_aceitar_arquivo_nao_e_o_mesmo_que_exigir():
+    # imagem sem referencia e o caso comum (texto puro); confundir as duas coisas
+    # transformaria toda geracao de imagem em erro
+    assert exige_arquivo(Modo.IMAGEM) is False
+    assert exige_arquivo(Modo.T2V) is False
+    assert exige_arquivo(Modo.INGREDIENTS2V) is True
+    assert exige_arquivo(Modo.FRAMES2V) is True
+
+
+def test_referencia_em_imagem_nao_mexe_no_teto_de_quantidade():
+    # imagem aceita x1..x4 e isso continua valendo com referencia: sao duas regras
+    # independentes, e amarrar uma na outra tiraria as variacoes justamente do caso em
+    # que elas mais servem
+    assert quantidade_maxima(Modo.IMAGEM) == 4
+    assert max_referencias(Modo.IMAGEM) == 3
