@@ -146,14 +146,20 @@ ROTULO_MODO_NO_CHIP = {
     "frames2v": "frames", "ingredients2v": "elementos",
 }
 
-# Proporcao. `:text-is` e exato de proposito: `:has-text("crop_9_16")` casaria tambem
-# o proprio chip, cujo texto TERMINA em "crop_9_16 x1".
+# Proporcao. MEDIDO 2026-08-20: `:text-is` NAO serve aqui, ao contrario do que a
+# primeira versao supos. O innerText do botao e a LIGADURA mais o ROTULO, separados
+# por quebra de linha — algo como crop_9_16 seguido de 9:16 —, entao correspondencia
+# exata nunca casa: o conferidor acusou os cinco como FALTA.
+#
+# `has-text` (substring) casa. O risco que motivou o `text-is` — pegar o proprio
+# CHIP_CONFIG, cujo texto tambem contem a ligadura — e eliminado pelo escopo do
+# PAINEL_CHIP, que todo clique dentro do painel ja usa.
 PROPORCAO = {
-    "16:9": 'button:text-is("crop_16_9")',
-    "4:3": 'button:text-is("crop_landscape")',
-    "1:1": 'button:text-is("crop_square")',
-    "3:4": 'button:text-is("crop_portrait")',
-    "9:16": 'button:text-is("crop_9_16")',
+    "16:9": 'button:has-text("crop_16_9")',
+    "4:3": 'button:has-text("crop_landscape")',
+    "1:1": 'button:has-text("crop_square")',
+    "3:4": 'button:has-text("crop_portrait")',
+    "9:16": 'button:has-text("crop_9_16")',
 }
 # A ligadura que o CHIP mostra para cada proporcao — e o que a verificacao procura no
 # texto do chip. Sai daqui, e nao de um `.split('"')` no seletor, porque partir string
@@ -215,7 +221,13 @@ ROTULO_MODELO = {
 # NAO contar elementos <video> soltos. Da falso positivo: o Flow usa <video> em outros
 # lugares da tela (previa, cabecalho de cena), e um contador de <video> declara
 # "pronto" antes de existir card nenhum. Conta-se CARD DA GRADE.
-CARD_GRADE = PENDENTE        # MEDIR ao vivo — o container clicavel de um item
+# MEDIDO 2026-08-20 pelo `conferir.py`. A escada de ancestrais de uma miniatura e:
+#   1 a[data-discover]  2 div[data-tile-id]  3 span[data-state]  4 div  5 div[role=button]
+# O degrau 2 e o certo: aparece UMA vez por item e carrega um id proprio
+# (`fe_id_<uuid>`). Preferido a `div[role=button]` (degrau 5) porque atributo `data-*`
+# existe porque o codigo do Google o usa — nao muda a cada build de estilo, como classe
+# com hash muda.
+CARD_GRADE = "div[data-tile-id]"
 CARD_MIDIA = 'img[src*="media.getMedia"], img[src*="trpc"]'   # a miniatura dentro dele
 CARD_FALHA = 'text="Ops! Algo deu errado"'
 BOTAO_REPETIR_CARD = 'button:has-text("redo")'   # repete a geracao SEM cobrar de novo
