@@ -86,6 +86,11 @@ def e_ruido(relativo: str) -> bool:
     partes = PurePosixPath(relativo).parts
     if any(p in NOMES_IGNORADOS for p in partes):
         return True
+    # Pasta oculta e ruido por definicao: `.git`, `.venv` e `.pytest_cache` da lista sao
+    # tres casos da mesma regra, e o projeto tem outras (`.claude`, `.obsidian`) que
+    # apareceriam na primeira tela do seletor sem nunca ter uma imagem dentro.
+    if any(p.startswith(".") and p not in {".", ".."} for p in partes):
+        return True
     return any(relativo == c or relativo.startswith(f"{c}/")
                for c in CAMINHOS_IGNORADOS)
 

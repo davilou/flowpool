@@ -142,6 +142,13 @@ def test_pasta_de_ruido_e_reconhecida():
     assert e_ruido("flowpool/perfis/conta1/Cookies")
 
 
+def test_pasta_oculta_e_ruido_mesmo_fora_da_lista():
+    # `.git`, `.venv` e `.pytest_cache` sao tres casos da mesma regra; `.claude` e
+    # `.obsidian` existem neste projeto e apareceriam na primeira tela do seletor
+    assert e_ruido(".claude")
+    assert e_ruido(".obsidian/plugins")
+
+
 def test_pasta_normal_nao_e_ruido():
     assert not e_ruido("")
     assert not e_ruido("Panelas Monaco/imagens")
