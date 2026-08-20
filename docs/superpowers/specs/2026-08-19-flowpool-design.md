@@ -36,7 +36,7 @@ A aritmética que justifica o esforço: conta sem assinatura recebe 50 créditos
 
 **Conta grátis nunca roda Veo Quality.** São 100 créditos por geração contra teto de 50/dia. Quality é exclusivo das contas pagas. Grátis roda Omni Flash, Lite, Fast e imagem.
 
-O custo do **Omni Flash** foi medido (20/08): **12 créditos** em conta grátis, a 720p/8s/9:16/x1 — saldo 50 → 38. Não é a faixa do Veo Fast que a estimativa supunha. Ver *Notas de custo*.
+O custo do **Omni Flash** foi medido (20/08): **12 créditos** em conta grátis, a 720p/8s/9:16/x1 — saldo 50 → 38. Não é a faixa do Veo Fast que a estimativa supunha. E o **8s** dessa medição não é detalhe: no clipe padrão de **4s** o mesmo pedido custa **7**, o que faz a mesma conta grátis render **7 vídeos por dia em vez de 4**. Ver *Notas de custo*.
 
 **A sessão expira em ~48 horas** (medido: o `expires` de `/fx/api/auth/session` volta dois dias à frente). Revalidar é o mesmo fluxo do cadastro — mesma janela, mesmo perfil, mesmas duas telas —, então não é um caminho excepcional do app: é rotina de dois em dois dias, por conta. Com vinte contas, isso é o custo humano recorrente do pool, e é ele que decide se vinte contas é um número praticável.
 
@@ -109,13 +109,15 @@ Python 3.13 (mesmo do pipeline), FastAPI + uvicorn, SQLite, Playwright async, ht
 
 ## Decisões de geração
 
-Três decisões tomadas pelo Davi depois do mapeamento do painel de configuração (20/08), com o porquê de cada uma. Elas mudam o domínio, não só a interface.
+Quatro decisões tomadas pelo Davi depois do mapeamento do painel de configuração (20/08), com o porquê de cada uma. Elas mudam o domínio, não só a interface.
 
 **O modelo padrão de vídeo é Omni Flash, não Veo.** O dropdown de vídeo do Flow **já abre em Omni Flash** — é o que a interface faz quando ninguém escolhe nada. Um transporte que não troque o modelo explicitamente gera nele, e o job sairia "Veo" no banco e Omni Flash na realidade, sem erro nenhum para denunciar. Duas consequências: `Modelo` ganha `OMNI_FLASH`, e é ele o padrão da API quando o pedido não diz o modelo (imagem herda `nano-banana`). O custo entrou como estimativa declarada (20/20/10, a faixa do Veo Fast) e a medição de 20/08 o corrigiu para **12** em conta grátis — a estimativa estava alta, que era o lado certo de errar. Ficar sem custo cadastrado seria pior: levantaria `ModeloSemCusto` no caminho mais usado do app. Ver *Notas de custo*.
 
 **A proporção padrão é 9:16, sobrescrevível por pedido.** O canal do Davi é TikTok. Hoje ele gera em horizontal e recorta à mão depois; gerar já em vertical elimina esse passo e o recorte que ele custa. Os valores aceitos são exatamente os cinco botões do painel — `16:9`, `4:3`, `1:1`, `3:4`, `9:16` — porque um sexto valor não teria onde clicar. Continua por pedido: o padrão serve ao caso comum, não impede o resto. Medido depois: em **vídeo** o chip só oferece `9:16` e `16:9`, então o padrão do canal é também uma das duas únicas opções — o caso comum e o caso possível coincidem.
 
 **Vídeo sai sempre em uma geração; imagem em lote só quando pedido explicitamente.** Razão do usuário: **take de vídeo é escolha dele, não sorteio.** Quatro variações de um vídeo não é escolher entre quatro takes — é gastar quatro vezes o crédito para receber três descartes. Variação de imagem é o oposto: barata, e serve justamente para escolher. Por isso `quantidade` aceita 1 a 4 em `modo=imagem` e **só 1** nos três modos de vídeo; um pedido de vídeo com mais é recusado com 422, e recusar é melhor do que gerar três vídeos que ninguém pediu.
+
+**A duração padrão do clipe é 4s, sobrescrevível por pedido.** O chip oferece `4s`, `6s`, `8s` e `10s`, e enquanto o domínio não tinha o campo o transporte fixava **8s**. O número que fecha a decisão: no Omni Flash, **4s custa 7 créditos e 8s custa 12**. Fixar 8s desperdiçava **70% do crédito em todo vídeo** — numa conta grátis de 50 créditos por dia, a diferença entre gerar **4 e 7 vídeos**. O padrão é 4s pelos dois lados: é o mais barato, e é o caso comum do usuário, cujo pipeline monta cenas de ~5s. Continua por pedido — o padrão só precisa servir a quem não escolhe. **Imagem não tem duração**: o painel não oferece o grupo nesse modo, e mandar o campo em `modo=imagem` é 422.
 
 ## Modelo de dados
 
@@ -141,13 +143,15 @@ campo inteiro existe para evitar.
 
 `seca_ate` é até quando a conta está fora do pool. O Flow às vezes mostra saldo e mesmo assim recusa gerar — cota diária, throttle, rate limit. Sem um prazo gravado, o job recusado volta para a fila no mesmo instante, é despachado para a mesma conta e o motor gira em laço quente: CPU a 100%, um Chrome aberto e fechado por iteração, tabela de eventos crescendo sem parar, nenhuma tentativa consumida e nada nunca desistindo. É a materialização do que a seção *Fila e execução* já pedia com "marca a conta seca até o reset estimado".
 
-**job** — id, modo, prompt, referências (caminhos), modelo, `proporcao`, `quantidade`, prioridade, estado (`pending` | `running` | `done` | `failed` | `cancelled`), conta usada, id remoto da geração, caminho do arquivo final, tentativas, `custo_estimado`, erro, `produto`, timestamps.
+**job** — id, modo, prompt, referências (caminhos), modelo, `proporcao`, `quantidade`, `duracao`, prioridade, estado (`pending` | `running` | `done` | `failed` | `cancelled`), conta usada, id remoto da geração, caminho do arquivo final, tentativas, `custo_estimado`, erro, `produto`, timestamps.
 
 `produto` é o nome da pasta do produto na pasta do usuário (`Video Roupa`, `Panelas Monaco`, `Furadeira Pnoeoce`) e, ao mesmo tempo, o nome do projeto no Flow. É dele que `destino` deriva quando o pedido não traz caminho: `{produto}/clipes`. Ter os dois campos, e não só o caminho, é o que permite ao motor saber **em qual projeto do Flow** a geração acontece — ver *Projetos*.
 
-`proporcao` e `quantidade` são os dois grupos do painel de configuração da geração que o job carrega até o transporte. `proporcao` nasce `9:16` e `quantidade` nasce `1` — os defaults vivem na dataclass **e** na coluna, de propósito: job criado direto pelo repositório, sem passar pela API, também precisa nascer vertical e com uma geração só. Um `NULL` em `quantidade` viraria `None` multiplicando o custo, e o erro apareceria como `TypeError` dentro de `reservar`, longe da causa.
+`proporcao`, `quantidade` e `duracao` são os três grupos do painel de configuração da geração que o job carrega até o transporte. `proporcao` nasce `9:16`, `quantidade` nasce `1` e `duracao` nasce `4s` — os defaults vivem na dataclass **e** na coluna, de propósito: job criado direto pelo repositório, sem passar pela API, também precisa nascer vertical, com uma geração só e no clipe barato. Um `NULL` em `quantidade` viraria `None` multiplicando o custo, e o erro apareceria como `TypeError` dentro de `reservar`, longe da causa.
 
-Nenhum dos dois é atualizado depois da criação: são do pedido, como `prompt` e `modo`. Só muda ao longo da vida do job o que a execução decide — estado, conta, id remoto, arquivo, tentativas, custo, erro, reavaliação.
+`duracao` é `TEXT NOT NULL DEFAULT '4s'` e vale um de `4s | 6s | 8s | 10s`. **Em `modo=imagem` o campo fica no padrão e não significa nada**: não existe grupo de duração no painel do Flow em imagem, o transporte não o aplica e o custo o ignora. É o mesmo arranjo de `frame_inicial`, que só quer dizer algo em `frames2v` — o campo sempre tem valor, e é o **modo** que decide se ele tem sentido. Quem impede o usuário de informar duração em imagem é a API, com 422.
+
+Nenhum dos três é atualizado depois da criação: são do pedido, como `prompt` e `modo`. Só muda ao longo da vida do job o que a execução decide — estado, conta, id remoto, arquivo, tentativas, custo, erro, reavaliação.
 
 `custo_estimado` é quanto o job reservou da conta ao ser despachado — o **total**, já multiplicado pela `quantidade` —, e fica gravado no banco. É o que permite estornar a reserva de um job que morreu antes de gerar — inclusive depois de um restart do serviço, quando não há mais nada em memória dizendo quanto aquele job tinha travado. Quem consome esse campo depois do restart é a **recuperação no boot**, descrita em *Fila e execução*; sem ela o campo seria persistido e nunca lido por ninguém.
 
@@ -165,9 +169,13 @@ O saldo é **lido do Flow e reconciliado** com o débito previsto, não apenas d
 
 Regra: descontar o custo previsto na hora de despachar (para não estourar o saldo com jobs simultâneos) e reconciliar com a leitura real ao término. Divergência acima de um limiar vira evento e derruba a confiança no valor até a próxima leitura.
 
-**O custo previsto é `custo_de(modelo, tier) × quantidade`.** O Flow cobra por geração: um lote de quatro imagens custa quatro vezes uma. `reservar(conta, modelo, quantidade)` desconta o total, e é esse total que fica em `custo_estimado` — o estorno continua correto sem mudança nenhuma. Reservar só uma geração quando o pedido tem quatro deixaria o saldo local acreditando em crédito que o Flow já cobrou, e a escolha seguinte mandaria job para uma conta mais magra do que o app pensa.
+**O custo previsto é `custo_de(modelo, tier, duracao) × quantidade`.** O Flow cobra por geração **e por duração**: um lote de quatro imagens custa quatro vezes uma, e um clipe de 8s custa mais que o de 4s. `reservar(conta, modelo, quantidade, duracao)` desconta o total, e é esse total que fica em `custo_estimado` — o estorno continua correto sem mudança nenhuma.
 
-O par obrigatório disso está em *Escolha de conta*: a mesma multiplicação precisa acontecer **antes** da reserva, na hora de escolher. Só na reserva não basta.
+Os dois erros que isso evita são simétricos, e os dois estragam o pool. Reservar só uma geração quando o pedido tem quatro deixa o saldo local acreditando em crédito que o Flow já cobrou, e a escolha seguinte manda job para uma conta mais magra do que o app pensa. Reservar sempre o clipe de 8s faz o contrário: tira do saldo local crédito que o Flow não vai cobrar (12 onde ele cobraria 7), e a conta sai do pool antes da hora.
+
+**A duração só pesa em vídeo.** Imagem não tem a dimensão, e a tabela de custos reflete isso na própria estrutura: vídeo e imagem moram em dicionários separados, em vez de um `if` escondido dentro da função.
+
+O par obrigatório disso está em *Escolha de conta*: a mesma conta precisa ser feita **antes** da reserva, na hora de escolher. Só na reserva não basta.
 
 Três detalhes que a regra acima esconde e sem os quais o pool se estraga sozinho:
 
@@ -181,7 +189,7 @@ Acima do limiar, o delta com sinal e o valor lido viram um evento `divergencia`.
 
 ## Escolha de conta
 
-Função pura: `escolher(contas, modelo, agora, quantidade=1) -> Conta | None`.
+Função pura: `escolher(contas, modelo, agora, quantidade=1, duracao=None) -> Conta | None`.
 
 O parâmetro é o **modelo**, não um custo: o custo depende do tier (Ultra paga 10 por um Fast que custa 20 na grátis), então um número único não descreveria um pool misto — e é o modelo, não o custo, que diz se o job é Quality e portanto proibido em conta grátis.
 
@@ -189,13 +197,15 @@ O **relógio entra por parâmetro**, nunca por `datetime.now()` dentro da funç�
 
 A **quantidade** entra pelo mesmo motivo do relógio — pureza — e resolve um defeito que só aparece com lote: ela multiplica o custo. Se apenas a reserva multiplicasse, `escolher` aprovaria uma conta que comporta *uma* geração para um job de quatro; o Flow recusaria na hora de gerar, o job voltaria para a fila e a conta seria marcada **seca** — por um problema que era de cálculo, não de crédito. O filtro de saldo é portanto sobre o total, e a regra do teto diário da conta grátis também: quatro imagens ainda cabem em 50 créditos, mas isso precisa ser conta feita, não sorte.
 
+A **duração** entra pela mesma porta e pela mesma razão. Ela não multiplica, mas escala: no Omni Flash grátis, 4s custa 7 e 8s custa 12. Uma conta com saldo 10 paga o clipe curto e **não** paga o longo — e se só a reserva soubesse disso, `escolher` aprovaria a conta para o job de 8s e o resultado seria o mesmo laço já descrito: recusa do Flow, job de volta na fila, conta marcada seca por erro de cálculo. `duracao=None` vale o padrão do domínio (`4s`), que é o mesmo com que todo job nasce; um default diferente aqui faria a reserva do job comum sair errada em silêncio.
+
 (`prioridade` no job é outra coisa: ordena a **fila**, não influencia a conta. Inteiro, maior primeiro, empate resolvido por ordem de chegada.)
 
 Política, com o porquê:
 
-1. Descarta conta sem sessão viva, inativa, ou com saldo abaixo do custo **total** do pedido (custo de uma geração × `quantidade`).
+1. Descarta conta sem sessão viva, inativa, ou com saldo abaixo do custo **total** do pedido (custo de uma geração naquela `duracao` × `quantidade`).
 2. Descarta conta com `seca_ate` no futuro — o Flow já recusou gerar nela apesar do saldo aparente, e insistir antes do prazo é o laço quente descrito em *Modelo de dados*.
-3. Descarta conta grátis quando o pedido não cabe no teto diário — sempre o caso de Quality (100 contra 50), e também de qualquer lote cujo total estoure o teto.
+3. Descarta conta grátis quando o pedido não cabe no teto diário — sempre o caso de Quality (59 no clipe mais curto, contra 50), e também de qualquer lote cujo total estoure o teto. A duração conta aqui nas duas direções: três clipes de 8s (60) estouram o teto, três de 4s (36) não.
 4. **Prefere crédito que expira antes.** Crédito de conta grátis morre em 24h; o de conta paga acumula até o fim do mês. Gastar grátis primeiro não é preferência, é aritmética.
 5. Entre contas do mesmo tier, a de maior saldo — espalha o uso e evita deixar sobras inúteis de 5 créditos espalhadas pelo pool.
 6. Nenhuma serve: o job volta para a fila com um horário de reavaliação (o próximo reset conhecido), em vez de falhar.
@@ -313,6 +323,7 @@ Corpo de `POST /jobs`:
   "frame_final": null,
   "proporcao": "9:16",
   "quantidade": 1,
+  "duracao": "4s",
   "produto": "Video Roupa",
   "destino": "Video Roupa/clipes",
   "nome": "c3-take1",
@@ -326,7 +337,11 @@ Corpo de `POST /jobs`:
 
 `proporcao` é opcional e vale `9:16` quando ausente. Valor fora de `16:9 | 4:3 | 1:1 | 3:4 | 9:16` é **422**: o painel tem cinco botões, e um sexto valor não teria onde clicar.
 
-Medido em 20/08, e ainda **não** refletido aqui: em modo vídeo o chip oferece **só** `9:16` e `16:9`. As outras três só existem em imagem. Enquanto a API aceitar as cinco para qualquer modo, quem recusa é o transporte — cedo, antes de tocar no chip e com a reserva ainda estornável. O lugar certo é este 422, junto com o de `quantidade`, e isso entra no mesmo task que acrescentar `duracao`.
+`duracao` é opcional e vale `4s` quando ausente. Valor fora de `4s | 6s | 8s | 10s` é **422**: o painel tem quatro botões, e `5s` não teria onde clicar. **Em `modo=imagem`, mandar o campo — qualquer valor — também é 422**, com a mensagem dizendo que imagem não tem duração; aceitar seria prometer uma configuração que o transporte não tem onde aplicar, e o usuário receberia o arquivo achando que foi. A recusa olha se o campo **veio no corpo**, e não o valor: o padrão do domínio é `"4s"`, então comparar valor recusaria todo pedido de imagem. É o mesmo critério que `PatchConta` usa para o proxy.
+
+E `duracao` não é preferência de formato: **é preço**. 4s custa 7 créditos e 8s custa 12 no Omni Flash — ver *Decisões de geração* e *Notas de custo*.
+
+Medido em 20/08, e ainda **não** refletido aqui: em modo vídeo o chip oferece **só** `9:16` e `16:9`. As outras três só existem em imagem. Enquanto a API aceitar as cinco para qualquer modo, quem recusa é o transporte — cedo, antes de tocar no chip e com a reserva ainda estornável. O lugar certo é este 422, junto com os de `quantidade` e `duracao`.
 
 `NovaConta` (`POST /contas`) e `PatchConta` (`PATCH /contas/{id}`) aceitam `proxy`.
 URL que não dá para usar é **422**, e a validação acontece na entrada justamente para
@@ -378,11 +393,12 @@ Continua valendo que a UI tem **um único** `input[type=file]` (`multiple=True`,
 
 Observação de campo (19/08, confirmada em 20/08): o Flow passou a expor um modelo **Gemini Omni** — vídeo a partir de qualquer referência, com edição conversacional. **`Omni Flash` é o padrão do dropdown de vídeo**. Entrou no escopo como `Modelo.OMNI_FLASH` e como padrão de vídeo da API. A previsão de deixar o campo `modelo` aberto se pagou — acomodou o modelo novo sem migração nenhuma.
 
-Dois grupos do chip atravessam o domínio inteiro, e por isso viram campo do job (`proporcao`, `quantidade`) e do `Pedido` que cruza a fronteira do transporte. Sem atravessar, o Flow geraria sempre no default da UI e o pedido do usuário seria ignorado **em silêncio** — o pior modo de falha deste app, porque a saída existe e parece certa. As decisões e o porquê estão em *Decisões de geração*.
+Três grupos do chip atravessam o domínio inteiro, e por isso viram campo do job (`proporcao`, `quantidade`, `duracao`) e do `Pedido` que cruza a fronteira do transporte. Sem atravessar, o Flow geraria sempre no default da UI e o pedido do usuário seria ignorado **em silêncio** — o pior modo de falha deste app, porque a saída existe e parece certa. As decisões e o porquê estão em *Decisões de geração*.
 
-Dois grupos **não** atravessam, e ficam registrados como pendência:
+A **duração** foi a última a atravessar, e o atraso teve preço mensurável. Enquanto ela era uma constante `"8s"` dentro do transporte, todo vídeo saía no clipe mais caro: 12 créditos onde 7 bastavam, **70% a mais por vídeo**, ou seja 4 vídeos por dia numa conta grátis onde caberiam 7. O campo não era cosmético — era a diferença entre o pool render quase o dobro ou não.
 
-- **Duração.** O chip aceita 4s/6s/8s/10s; `Job` e `Pedido` não modelam isso. O transporte fixa 8s e **verifica**. Enquanto o campo não existir, pedir 4s é impossível — e é melhor impossível do que silenciosamente ignorado, que foi o que aconteceu quando o transporte tinha um passo tolerante (ver *Transporte*).
+Um grupo **ainda não** atravessa, e fica registrado como pendência:
+
 - **Proporção por modo.** A API aceita as cinco proporções para qualquer modo, mas **vídeo só tem duas**. Hoje o transporte recusa cedo, antes de tocar no chip e com a reserva ainda estornável; o lugar certo de recusar é o 422 do `POST /jobs`.
 
 ## Transporte — DECIDIDO: Playwright com Chrome real
@@ -468,7 +484,20 @@ O `gflow-cli` estava certo: **crédito só é gasto em vídeo**. A consequência
 
 A estimativa de Omni Flash (20/20/10, faixa do Veo Fast) estava alta. Os tiers pagos continuam **não medidos**: 12/12 é o número da conta grátis repetido em Pro, e 6 em Ultra é extrapolação da razão que Lite e Fast mostram. Os três Veo continuam estimativa inteira.
 
-**A limitação que a medição expôs, e que a tabela não modela:** o custo de vídeo depende da **configuração**, não só do modelo. Pelo agente conversacional, a mesma família de pedido anunciou **7 e 15** créditos em ajustes diferentes — enquanto o número da tabela é um só por modelo. Isso não quebra nada, porque a tabela nunca foi preço: é **reserva** anterior ao despacho, e a reconciliação corrige depois. Mas encerra a ideia de que um dia a tabela vá ficar "certa": ela só ficaria se `duracao` e `proporcao` entrassem na chave, e nem assim cobriria as combinações que ninguém rodou.
+**A limitação que a medição expôs, e que a tabela passou a modelar:** o custo de vídeo depende da **configuração**, não só do modelo. Pelo agente conversacional, a mesma família de pedido anunciou **7 e 15** créditos em ajustes diferentes — e os dois números são os extremos da **duração**. A tabela de vídeo passou a ser por **(modelo, tier, duração)**; imagem continua sem a dimensão, porque não tem o grupo no painel.
+
+Os dois pontos conhecidos, marcados pelo que são:
+
+| clipe | Omni Flash free/pro | origem |
+|---|---|---|
+| **8s** | **12** | **MEDIDO** por saldo: 50 → 38, a 720p / 9:16 / x1 |
+| **4s** | **7** | **ANUNCIADO** pelo agente na confirmação do pedido; não medido por saldo |
+
+O resto é **extrapolado**, e o código diz isso linha a linha. A reta que passa pelos dois pontos é `2 + 1,25` por segundo: 9,5 em 6s e 14,5 em 10s, arredondados para cima em **10** e **15**. O 15 tem um apoio a mais — é o outro número que o agente já anunciou para essa mesma família. Os três Veo herdam a mesma forma a partir do seu próprio 8s, e ali a extrapolação é dupla: nenhum Veo foi medido em duração nenhuma.
+
+O arredondamento é sempre **para cima**, e a direção é escolhida: reserva curta demais aprova uma conta que não paga o job, o Flow recusa, o job volta pra fila e a conta é marcada seca por erro de cálculo. Reserva folgada só custa um pouco de saldo até a reconciliação.
+
+Nada disso torna a tabela "certa", e ela nunca precisou ser: continua sendo **reserva** anterior ao despacho, e **a reconciliação corrige**. O que mudou é que ela deixou de estar sistematicamente errada na direção cara. E o que a decisão vale, em números do usuário: com 4s a 7 créditos, uma conta grátis de 50 rende **7 vídeos por dia** em vez de 4.
 
 ## Erro e observabilidade
 
@@ -487,6 +516,8 @@ O motor inteiro — escolha de conta, contabilidade, transições da fila — é
 A gestão de projetos é testada pelo **contador de criações** do transporte falso, não pelo estado final do banco: o estado final não distingue "reusou o projeto" de "criou outro e regravou o vínculo por cima", que é exatamente o defeito que interessa. Três cenários: mesmo produto duas vezes na mesma conta (uma criação só), mesmo produto em duas contas (duas criações, ids distintos) e projeto que existe no remoto mas não no banco (zero criações — é adoção).
 
 O caso de lote ganha teste próprio na escolha de conta, e ele afirma a coisa certa: **conta com saldo para uma imagem não pode ser escolhida para um job de quatro.** Afirmar só sobre a reserva deixaria passar exatamente o defeito que interessa — o app escolhendo uma conta que não paga o pedido e culpando a conta (marcando-a seca) por um erro de cálculo.
+
+A **duração** ganha o teste gêmeo, e pelo mesmo raciocínio: **conta com saldo 10 é escolhida para um clipe de 4s (7 créditos) e não é escolhida para o de 8s (12).** É esse par de asserções que prova que a duração atravessou `escolher`, e não só `reservar` — e ele existe em duas alturas, na função pura e ponta a ponta pelo orquestrador. Do outro lado da fronteira, o transporte falso cobra por duração igual ao Flow: se ele cobrasse um número fixo, o motor passaria no teste com uma contabilidade que o real desmente.
 
 O transporte real é verificado à mão contra o Flow, não em CI. Três coisas do chip só se provam ali:
 
