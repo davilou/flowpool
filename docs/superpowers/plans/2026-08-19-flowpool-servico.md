@@ -144,7 +144,9 @@ Mora em `nucleo/` porque as camadas de cima dependem de `nucleo`, nunca o contr�
 ```python
 from datetime import datetime, timezone
 
-from flowpool.nucleo.tipos import Conta, EstadoJob, Job, Modelo, Modo, SaudeSessao, Tier
+from flowpool.nucleo.tipos import (
+    Conta, EstadoJob, Job, Modelo, Modo, Projeto, SaudeSessao, Tier,
+)
 
 
 def test_conta_nasce_viva_e_ativa():
@@ -190,6 +192,27 @@ def test_conta_nasce_sem_prazo_de_seca():
     assert c.seca_ate is None
     c.seca_ate = datetime(2026, 8, 20, 13, 0, tzinfo=timezone.utc)
     assert c.seca_ate.hour == 13
+
+
+def test_projeto_liga_uma_conta_a_um_produto():
+    # projeto pertence a UMA conta: a chave e o par (conta, produto), nunca o produto
+    # sozinho — a conta g2 nao enxerga nem abre projeto da g1
+    p = Projeto(id=1, conta_id=2, produto="Panelas Monaco",
+                id_remoto="a1b2c3", nome_remoto="Panelas Monaco")
+    assert p.conta_id == 2
+    assert p.produto == "Panelas Monaco"
+    assert p.id_remoto == "a1b2c3"
+    assert p.criado_em is None
+
+
+def test_job_nasce_sem_produto():
+    # o default existe so para nao quebrar a ordem dos campos da dataclass;
+    # na pratica a API exige `produto`
+    j = Job(id=1, modo=Modo.T2V, modelo=Modelo.VEO_FAST, prompt="p", destino="x", nome="c1")
+    assert j.produto == ""
+    outro = Job(id=2, modo=Modo.T2V, modelo=Modelo.VEO_FAST, prompt="p", destino="x",
+                nome="c1", produto="Panelas Monaco")
+    assert outro.produto == "Panelas Monaco"
 ```
 
 - [ ] **Step 2: Rodar e ver falhar**
@@ -271,6 +294,10 @@ class Job:
     prompt: str
     destino: str
     nome: str
+    # Pasta do produto na pasta do usuario ("Panelas Monaco") e, ao mesmo tempo, o nome
+    # do projeto no Flow. Tem default so para nao quebrar a ordem dos campos da
+    # dataclass; a API exige.
+    produto: str = ""
     referencias: list[str] = field(default_factory=list)
     frame_inicial: str | None = None
     frame_final: str | None = None
@@ -285,6 +312,23 @@ class Job:
     reavaliar_em: datetime | None = None
     criado_em: datetime | None = None
     atualizado_em: datetime | None = None
+
+
+@dataclass
+class Projeto:
+    """Vinculo entre uma conta e um projeto do Flow.
+
+    Projeto pertence a UMA conta: a `g2` nao enxerga nem abre projeto da `g1`. Por isso
+    a chave e o par (conta, produto) — nao existe "o projeto do Vestido Vermelho",
+    existe um projeto do Vestido Vermelho em cada conta que gerou algo dele.
+    """
+
+    id: int
+    conta_id: int
+    produto: str
+    id_remoto: str
+    nome_remoto: str
+    criado_em: datetime | None = None
 ```
 
 `custo_estimado` guarda quanto o job reservou. Sem esse número não há como estornar a
@@ -298,10 +342,24 @@ eventos crescendo sem parar e nenhuma tentativa sendo consumida — ou seja, nad
 desiste. É a coluna que o spec já pedia quando falava em "marcar a conta seca até o
 reset estimado".
 
+`Projeto` existe porque, no Flow real, **toda geração acontece dentro de um projeto** e
+o projeto tem id na URL (`labs.google/fx/tools/flow/[id]`). Sem gerenciar isso, cada
+geração criaria um projeto novo e a conta viraria um lixão de projetos órfãos.
+
+A restrição que define o desenho: **projeto pertence a UMA conta.** A `g2` não enxerga
+nem abre projeto da `g1`. Como o app roda entre vinte contas, não existe "o projeto do
+Vestido Vermelho" — existe um projeto do Vestido Vermelho *em cada conta que gerou algo
+dele*. Por isso a chave é o par `(conta_id, produto)`, nunca o produto sozinho.
+
+`Job.produto` é o nome da pasta do produto e, ao mesmo tempo, o nome do projeto no
+Flow. Tem default `""` só para não quebrar a ordem dos campos da dataclass — os campos
+com default precisam vir depois dos sem default, e `produto` entra logo após `nome`. Na
+prática a API exige (Task 8), e é dele que `destino` passa a derivar.
+
 - [ ] **Step 4: Rodar e ver passar**
 
 Run: `.venv/Scripts/pytest tests/test_tipos.py -q`
-Expected: `6 passed`
+Expected: `8 passed`
 
 - [ ] **Step 5: Commit**
 
@@ -959,7 +1017,7 @@ Expected: `3 passed`
 - [ ] **Step 7: Rodar o núcleo inteiro**
 
 Run: `.venv/Scripts/pytest -q`
-Expected: `57 passed` (6 tipos + 17 custos + 16 escolha + 15 credito + 3 pool)
+Expected: `59 passed` (8 tipos + 17 custos + 16 escolha + 15 credito + 3 pool)
 
 - [ ] **Step 8: Commit**
 
@@ -978,13 +1036,17 @@ git commit -m "feat: reserva, estorno e reconciliacao de credito"
 
 `custo_estimado` é persistido junto com o job. Não é enfeite: é o que permite estornar a reserva de um job que morreu no meio, inclusive depois de um restart do serviço — quem reabrir o banco precisa saber quanto aquele job tinha reservado. Quem consome esse campo depois do restart é o `recuperar()` da Task 7.
 
-Quatro decisões desta task que não são detalhe de implementação:
+Cinco decisões desta task que não são detalhe de implementação:
 
 **`reivindicar(agora)` no lugar de `proximo_pendente(agora)`.** Ler o job e marcá-lo `rodando` em dois passos deixa entre os dois uma janela em que o job continua `pendente` e visível para todo mundo. Com três workers e teto de simultâneos 1, dois jobs viraram três gerações e 60 créditos gastos em vez de 40 — e o worker perdedor sobrescreveu o arquivo do vencedor. O `UPDATE ... RETURNING` fecha a janela: quem perde a corrida simplesmente não vê mais o job.
 
 **`marcar_sessao(conta_id, saude, falhas=None)`.** `salvar_conta` grava a linha inteira a partir de uma cópia carregada no início do passo. Com dois workers na mesma conta, um marca `EXPIRADA` e o outro ressuscita para `VIVA` com a cópia velha — e o pool volta a despachar para uma conta que exige login manual. A escrita de campo específico é o que impede isso onde a corrida importa.
 
 **`PRAGMA busy_timeout = 5000` e `close()`.** Vários workers escrevem na mesma base; sem o `busy_timeout` o segundo escritor recebe `database is locked` na hora em vez de esperar a transação curta do outro. O `close()` existe por causa do Windows: o handle aberto impede o pytest de apagar o `tmp_path`, e a suíte falha de forma intermitente, sem relação nenhuma com o teste que falhou.
+
+**A tabela `projeto` tem `UNIQUE (conta_id, produto)` e `registrar_projeto` é um upsert.** A chave é o par porque projeto do Flow pertence a uma conta só: a `g2` não abre o projeto da `g1`, então o mesmo produto precisa de um projeto próprio em cada conta. O upsert (`ON CONFLICT ... DO UPDATE ... RETURNING id`) existe porque dois workers podem resolver o mesmo produto na mesma conta ao mesmo tempo; com `INSERT` puro o perdedor da corrida levantaria `IntegrityError` no meio de um job que **já pagou crédito**. O `UNIQUE` continua sendo a garantia de que não existem duas linhas para o mesmo par — o upsert só decide o que fazer quando a garantia é acionada.
+
+`job.produto` entra como `TEXT NOT NULL DEFAULT ''`. O default cobre a linha antiga e o job criado direto pelo repo; quem exige de verdade é a API.
 
 **`_txt` normaliza o datetime para UTC antes do `isoformat()`.** A comparação de `reavaliar_em` no SQL é lexicográfica sobre texto. Gravar dois offsets diferentes quebraria a ordem em silêncio: um horário com `-03:00` ordena antes de um `+00:00` que é anterior de verdade.
 
@@ -1144,6 +1206,71 @@ def test_registrar_evento_e_listar_por_job(repo):
     eventos = repo.eventos(job_id=jid)
     assert len(eventos) == 1
     assert eventos[0]["tipo"] == "despachado"
+
+
+def test_registrar_e_ler_projeto(repo):
+    cid = repo.criar_conta(email="a@b.com", tier=Tier.FREE, perfil="p/1")
+    pid = repo.registrar_projeto(cid, "Panelas Monaco", "a1b2c3", "Panelas Monaco")
+    p = repo.projeto_de(cid, "Panelas Monaco")
+    assert p.id == pid
+    assert p.id_remoto == "a1b2c3"
+    assert p.nome_remoto == "Panelas Monaco"
+    assert p.criado_em is not None
+
+
+def test_projeto_de_produto_nunca_visto_e_none(repo):
+    cid = repo.criar_conta(email="a@b.com", tier=Tier.FREE, perfil="p/1")
+    assert repo.projeto_de(cid, "Furadeira Pnoeoce") is None
+
+
+def test_mesmo_produto_em_duas_contas_sao_dois_projetos(repo):
+    # projeto pertence a UMA conta: a g2 nao abre o projeto da g1, entao o mesmo
+    # produto precisa de um projeto proprio em cada conta
+    g1 = repo.criar_conta(email="g1@b.com", tier=Tier.FREE, perfil="p/1")
+    g2 = repo.criar_conta(email="g2@b.com", tier=Tier.FREE, perfil="p/2")
+    repo.registrar_projeto(g1, "Video Roupa", "rem-1", "Video Roupa")
+    repo.registrar_projeto(g2, "Video Roupa", "rem-2", "Video Roupa")
+
+    assert repo.projeto_de(g1, "Video Roupa").id_remoto == "rem-1"
+    assert repo.projeto_de(g2, "Video Roupa").id_remoto == "rem-2"
+    assert len(repo.projetos()) == 2
+
+
+def test_registrar_o_mesmo_par_duas_vezes_nao_duplica(repo):
+    # duas corridas simultaneas na mesma dupla (conta, produto) nao podem virar duas
+    # linhas: projeto duplicado no Flow e bagunca que ninguem limpa depois
+    cid = repo.criar_conta(email="a@b.com", tier=Tier.FREE, perfil="p/1")
+    primeiro = repo.registrar_projeto(cid, "Moda", "rem-1", "Moda")
+    segundo = repo.registrar_projeto(cid, "Moda", "rem-2", "Moda")
+    assert primeiro == segundo
+    assert len(repo.projetos(cid)) == 1
+    assert repo.projeto_de(cid, "Moda").id_remoto == "rem-2"
+
+
+def test_projetos_filtra_por_conta(repo):
+    g1 = repo.criar_conta(email="g1@b.com", tier=Tier.FREE, perfil="p/1")
+    g2 = repo.criar_conta(email="g2@b.com", tier=Tier.FREE, perfil="p/2")
+    repo.registrar_projeto(g1, "Moda", "rem-1", "Moda")
+    repo.registrar_projeto(g1, "Vestir", "rem-2", "Vestir")
+    repo.registrar_projeto(g2, "Moda", "rem-3", "Moda")
+
+    assert len(repo.projetos(g1)) == 2
+    assert [p.id_remoto for p in repo.projetos(g2)] == ["rem-3"]
+
+
+def test_esquecer_projeto_apaga_so_o_vinculo_local(repo):
+    cid = repo.criar_conta(email="a@b.com", tier=Tier.FREE, perfil="p/1")
+    pid = repo.registrar_projeto(cid, "Moda", "rem-1", "Moda")
+    repo.esquecer_projeto(pid)
+    assert repo.projeto_de(cid, "Moda") is None
+    assert repo.projetos() == []
+
+
+def test_produto_do_job_sobrevive_ao_banco(repo):
+    id_ = repo.criar_job(Job(id=0, modo=Modo.T2V, modelo=Modelo.VEO_FAST, prompt="p",
+                             destino="Panelas Monaco/clipes", nome="c1",
+                             produto="Panelas Monaco"))
+    assert repo.job(id_).produto == "Panelas Monaco"
 ```
 
 - [ ] **Step 2: Rodar e ver falhar**
@@ -1178,6 +1305,7 @@ CREATE TABLE IF NOT EXISTS job (
     prompt         TEXT    NOT NULL,
     destino        TEXT    NOT NULL,
     nome           TEXT    NOT NULL,
+    produto        TEXT    NOT NULL DEFAULT '',
     referencias    TEXT    NOT NULL DEFAULT '[]',
     frame_inicial  TEXT,
     frame_final    TEXT,
@@ -1195,6 +1323,16 @@ CREATE TABLE IF NOT EXISTS job (
 );
 
 CREATE INDEX IF NOT EXISTS idx_job_fila ON job (estado, prioridade DESC, id);
+
+CREATE TABLE IF NOT EXISTS projeto (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    conta_id    INTEGER NOT NULL REFERENCES conta(id),
+    produto     TEXT    NOT NULL,
+    id_remoto   TEXT    NOT NULL,
+    nome_remoto TEXT    NOT NULL,
+    criado_em   TEXT    NOT NULL,
+    UNIQUE (conta_id, produto)
+);
 
 CREATE TABLE IF NOT EXISTS evento (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1222,7 +1360,9 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from flowpool.nucleo.tipos import Conta, EstadoJob, Job, Modelo, Modo, SaudeSessao, Tier
+from flowpool.nucleo.tipos import (
+    Conta, EstadoJob, Job, Modelo, Modo, Projeto, SaudeSessao, Tier,
+)
 
 _ESQUEMA = Path(__file__).parent / "esquema.sql"
 
@@ -1332,11 +1472,11 @@ class Repo:
     def criar_job(self, j: Job) -> int:
         agora = _txt(datetime.now(timezone.utc))
         cur = self.con.execute(
-            """INSERT INTO job (modo, modelo, prompt, destino, nome, referencias,
-                   frame_inicial, frame_final, prioridade, estado, custo_estimado,
-                   reavaliar_em, criado_em, atualizado_em)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (j.modo.value, j.modelo.value, j.prompt, j.destino, j.nome,
+            """INSERT INTO job (modo, modelo, prompt, destino, nome, produto,
+                   referencias, frame_inicial, frame_final, prioridade, estado,
+                   custo_estimado, reavaliar_em, criado_em, atualizado_em)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (j.modo.value, j.modelo.value, j.prompt, j.destino, j.nome, j.produto,
              json.dumps(j.referencias), j.frame_inicial, j.frame_final, j.prioridade,
              j.estado.value, j.custo_estimado, _txt(j.reavaliar_em), agora, agora),
         )
@@ -1395,7 +1535,7 @@ class Repo:
         return Job(
             id=r["id"], modo=Modo(r["modo"]), modelo=Modelo(r["modelo"]),
             prompt=r["prompt"], destino=r["destino"], nome=r["nome"],
-            referencias=json.loads(r["referencias"]),
+            produto=r["produto"], referencias=json.loads(r["referencias"]),
             frame_inicial=r["frame_inicial"], frame_final=r["frame_final"],
             prioridade=r["prioridade"], estado=EstadoJob(r["estado"]),
             conta_id=r["conta_id"], id_remoto=r["id_remoto"], arquivo=r["arquivo"],
@@ -1403,6 +1543,66 @@ class Repo:
             erro=r["erro"],
             reavaliar_em=_dt(r["reavaliar_em"]), criado_em=_dt(r["criado_em"]),
             atualizado_em=_dt(r["atualizado_em"]),
+        )
+
+    # ---------- projetos ----------
+
+    def projeto_de(self, conta_id: int, produto: str) -> Projeto | None:
+        """Projeto daquele produto NAQUELA conta.
+
+        A chave e o par: projeto do Flow pertence a uma conta so, e a `g2` nao abre o
+        projeto da `g1`. Procurar so pelo produto devolveria um id que a conta da vez
+        nem consegue carregar.
+        """
+        r = self.con.execute(
+            "SELECT * FROM projeto WHERE conta_id = ? AND produto = ?",
+            (conta_id, produto),
+        ).fetchone()
+        return self._projeto(r) if r else None
+
+    def registrar_projeto(self, conta_id: int, produto: str, id_remoto: str,
+                          nome_remoto: str) -> int:
+        """Grava o vinculo (conta, produto) -> projeto do Flow. Devolve o id local.
+
+        Upsert em vez de INSERT puro: dois workers podem resolver o mesmo produto na
+        mesma conta ao mesmo tempo, e o perdedor da corrida levantaria `IntegrityError`
+        no meio de um job que ja pagou credito. O UNIQUE continua sendo a garantia de
+        que nao ha duas linhas para o mesmo par.
+        """
+        cur = self.con.execute(
+            """INSERT INTO projeto (conta_id, produto, id_remoto, nome_remoto, criado_em)
+               VALUES (?,?,?,?,?)
+               ON CONFLICT (conta_id, produto)
+               DO UPDATE SET id_remoto = excluded.id_remoto,
+                             nome_remoto = excluded.nome_remoto
+               RETURNING id""",
+            (conta_id, produto, id_remoto, nome_remoto,
+             _txt(datetime.now(timezone.utc))),
+        )
+        id_ = int(cur.fetchone()["id"])
+        self.con.commit()
+        return id_
+
+    def projetos(self, conta_id: int | None = None) -> list[Projeto]:
+        if conta_id is None:
+            rs = self.con.execute("SELECT * FROM projeto ORDER BY id").fetchall()
+        else:
+            rs = self.con.execute(
+                "SELECT * FROM projeto WHERE conta_id = ? ORDER BY id", (conta_id,)
+            ).fetchall()
+        return [self._projeto(r) for r in rs]
+
+    def esquecer_projeto(self, id_: int) -> None:
+        """Apaga so o vinculo local. O projeto continua existindo no Flow."""
+        self.con.execute("DELETE FROM projeto WHERE id = ?", (id_,))
+        self.con.commit()
+
+    @staticmethod
+    def _projeto(r: sqlite3.Row) -> Projeto:
+        return Projeto(
+            id=r["id"], conta_id=r["conta_id"], produto=r["produto"],
+            id_remoto=r["id_remoto"], nome_remoto=r["nome_remoto"],
+            criado_em=_dt(r["criado_em"]),
         )
 
     # ---------- eventos ----------
@@ -1428,7 +1628,7 @@ class Repo:
 - [ ] **Step 5: Rodar e ver passar**
 
 Run: `.venv/Scripts/pytest tests/test_repo.py -q`
-Expected: `15 passed`
+Expected: `22 passed`
 
 - [ ] **Step 6: Commit**
 
@@ -1453,6 +1653,17 @@ O transporte falso precisa simular geração **assíncrona**, senão o motor nun
 - `nunca_termina`: a geração fica `RODANDO` para sempre, para exercitar o timeout do orquestrador sem esperar dez minutos de verdade.
 - `morre_ao_gerar`: `gerar()` levanta `SessaoMorta`. É o que reproduz a sessão do Google que cai **no meio** da geração, e não só em `abrir_sessao`.
 
+O transporte também ganha **três operações de projeto** — `listar_projetos`, `criar_projeto` e `abrir_projeto` — porque no Flow real toda geração acontece dentro de um projeto e o projeto tem id na URL (`labs.google/fx/tools/flow/[id]`). Sem elas, cada geração criaria um projeto novo e a conta viraria um lixão de projetos órfãos.
+
+`ProjetoRemoto` (`id_remoto`, `nome`) é o projeto como o Flow o mostra. Toda leitura sai de **dentro de uma sessão**: não existe lista global de projetos, cada conta enxerga só os seus.
+
+Dois interruptores novos no falso, os dois a serviço da mesma pergunta — "o app duplicou projeto?":
+
+- `projetos`: nomes de projeto que já existem em cada conta, como se tivessem sido criados na mão pelo site. É o que exercita a **adoção** da Task 7.
+- `criacoes_projeto`: quantas vezes `criar_projeto` foi chamado. É o contador que denuncia duplicação quando o reuso ou a adoção param de funcionar.
+
+`abrir_projeto` do falso **levanta** para id de projeto de outra conta. Isso não é zelo: projeto pertence a uma conta só, e um falso permissivo deixaria passar no teste um motor que no Flow real tentaria abrir a URL de um projeto que a conta da vez nem consegue carregar.
+
 - [ ] **Step 1: Escrever o teste que falha**
 
 `tests/test_transporte_falso.py`:
@@ -1461,7 +1672,9 @@ O transporte falso precisa simular geração **assíncrona**, senão o motor nun
 import pytest
 
 from flowpool.nucleo.tipos import Conta, Modelo, Modo, Tier
-from flowpool.transporte.base import Pedido, SaldoInsuficiente, SessaoMorta, Estado
+from flowpool.transporte.base import (
+    ErroTransporte, Estado, Pedido, ProjetoRemoto, SaldoInsuficiente, SessaoMorta,
+)
 from flowpool.transporte.falso import TransporteFalso
 
 
@@ -1545,6 +1758,50 @@ async def test_morre_ao_gerar_levanta_sessao_morta_sem_cobrar():
         await t.gerar(s, pedido())
     assert await t.saldo(s) == 50
     assert t.geracoes == {}
+
+
+async def test_conta_nova_nao_tem_projeto_nenhum():
+    t = TransporteFalso(saldos={1: 50})
+    s = await t.abrir_sessao(conta())
+    assert await t.listar_projetos(s) == []
+
+
+async def test_criar_projeto_devolve_id_e_conta_as_chamadas():
+    t = TransporteFalso(saldos={1: 50})
+    s = await t.abrir_sessao(conta())
+    assert await t.criar_projeto(s, "Panelas Monaco") == "proj-1"
+    assert await t.criar_projeto(s, "Video Roupa") == "proj-2"
+    assert t.criacoes_projeto == 2
+    assert await t.listar_projetos(s) == [
+        ProjetoRemoto(id_remoto="proj-1", nome="Panelas Monaco"),
+        ProjetoRemoto(id_remoto="proj-2", nome="Video Roupa"),
+    ]
+
+
+async def test_projeto_de_uma_conta_nao_aparece_na_outra():
+    # e a restricao que define o desenho: projeto pertence a UMA conta
+    t = TransporteFalso(saldos={1: 50, 2: 50})
+    g1 = await t.abrir_sessao(conta())
+    g2 = await t.abrir_sessao(Conta(id=2, email="g2@b.com", tier=Tier.FREE, perfil="p"))
+    await t.criar_projeto(g1, "Moda")
+    assert await t.listar_projetos(g2) == []
+
+
+async def test_abrir_projeto_registra_o_aberto():
+    t = TransporteFalso(saldos={1: 50})
+    s = await t.abrir_sessao(conta())
+    id_remoto = await t.criar_projeto(s, "Moda")
+    await t.abrir_projeto(s, id_remoto)
+    assert t.abertos[1] == id_remoto
+
+
+async def test_abrir_projeto_de_outra_conta_levanta():
+    t = TransporteFalso(saldos={1: 50, 2: 50})
+    g1 = await t.abrir_sessao(conta())
+    g2 = await t.abrir_sessao(Conta(id=2, email="g2@b.com", tier=Tier.FREE, perfil="p"))
+    alheio = await t.criar_projeto(g1, "Moda")
+    with pytest.raises(ErroTransporte):
+        await t.abrir_projeto(g2, alheio)
 ```
 
 - [ ] **Step 2: Rodar e ver falhar**
@@ -1573,7 +1830,7 @@ from flowpool.nucleo.tipos import Conta, Modelo, Modo
 # `transporte.base` continuar funcionando. Duas classes com o mesmo nome fariam o
 # `except` do orquestrador pegar uma e deixar a outra passar como falha de rede.
 __all__ = [
-    "Estado", "Pedido", "Sessao", "FlowTransport",
+    "Estado", "Pedido", "ProjetoRemoto", "Sessao", "FlowTransport",
     "ErroTransporte", "SaldoInsuficiente", "SessaoMorta", "GeracaoFalhou",
 ]
 
@@ -1592,6 +1849,18 @@ class Pedido:
     referencias: list[str] = field(default_factory=list)
     frame_inicial: str | None = None
     frame_final: str | None = None
+
+
+@dataclass
+class ProjetoRemoto:
+    """Projeto como o Flow o mostra: um id na URL e um nome na lista.
+
+    Sempre lido de DENTRO de uma sessao. Nao existe lista global de projetos: cada
+    conta enxerga so os seus.
+    """
+
+    id_remoto: str
+    nome: str
 
 
 @dataclass
@@ -1615,6 +1884,12 @@ class GeracaoFalhou(ErroTransporte):
 class FlowTransport(Protocol):
     async def abrir_sessao(self, conta: Conta) -> Sessao: ...
     async def saldo(self, s: Sessao) -> int: ...
+    # Toda geracao no Flow acontece DENTRO de um projeto, e o projeto tem id na URL
+    # (`labs.google/fx/tools/flow/[id]`). Sem essas tres, cada geracao criaria um
+    # projeto novo e a conta viraria um lixao de projetos orfaos.
+    async def listar_projetos(self, s: Sessao) -> list[ProjetoRemoto]: ...
+    async def criar_projeto(self, s: Sessao, nome: str) -> str: ...
+    async def abrir_projeto(self, s: Sessao, id_remoto: str) -> None: ...
     async def gerar(self, s: Sessao, p: Pedido) -> str: ...
     async def consultar(self, s: Sessao, id_remoto: str) -> Estado: ...
     async def baixar(self, s: Sessao, id_remoto: str, destino: Path) -> Path: ...
@@ -1636,7 +1911,8 @@ from pathlib import Path
 from flowpool.nucleo.custos import custo_de
 from flowpool.nucleo.tipos import Conta
 from flowpool.transporte.base import (
-    Estado, Pedido, SaldoInsuficiente, Sessao, SessaoMorta,
+    ErroTransporte, Estado, Pedido, ProjetoRemoto, SaldoInsuficiente, Sessao,
+    SessaoMorta,
 )
 
 
@@ -1648,12 +1924,15 @@ class TransporteFalso:
     - `falha_em`: a geracao e aceita e volta `FALHOU`.
     - `passos_rodando`: as N primeiras consultas de cada geracao voltam `RODANDO`.
     - `nunca_termina`: a geracao fica `RODANDO` para sempre, para exercitar timeout.
+    - `projetos`: nomes de projeto que ja existem em cada conta, como se tivessem sido
+      criados na mao pelo site. E o que exercita a adocao.
     """
 
     def __init__(self, saldos: dict[int, int], mortas: set[int] | None = None,
                  falha_em: set[int] | None = None, latencia: float = 0.0,
                  passos_rodando: int = 0, nunca_termina: set[int] | None = None,
-                 morre_ao_gerar: set[int] | None = None) -> None:
+                 morre_ao_gerar: set[int] | None = None,
+                 projetos: dict[int, list[str]] | None = None) -> None:
         self.saldos = dict(saldos)
         self.mortas = mortas or set()
         self.falha_em = falha_em or set()
@@ -1664,6 +1943,16 @@ class TransporteFalso:
         self.geracoes: dict[str, tuple[int, Estado]] = {}
         self.consultas: dict[str, int] = {}
         self._seq = 0
+        # projetos por conta: nenhuma conta enxerga os projetos da outra
+        self.projetos: dict[int, list[ProjetoRemoto]] = {}
+        self.abertos: dict[int, str] = {}
+        # quantas vezes `criar_projeto` foi chamado; e o contador que denuncia
+        # duplicacao quando o reuso ou a adocao param de funcionar
+        self.criacoes_projeto = 0
+        self._seq_projeto = 0
+        for conta_id, nomes in (projetos or {}).items():
+            for nome in nomes:
+                self._novo_projeto(conta_id, nome)
 
     async def abrir_sessao(self, conta: Conta) -> Sessao:
         if conta.id in self.mortas:
@@ -1672,6 +1961,28 @@ class TransporteFalso:
 
     async def saldo(self, s: Sessao) -> int:
         return self.saldos.get(s.conta.id, 0)
+
+    def _novo_projeto(self, conta_id: int, nome: str) -> ProjetoRemoto:
+        self._seq_projeto += 1
+        p = ProjetoRemoto(id_remoto=f"proj-{self._seq_projeto}", nome=nome)
+        self.projetos.setdefault(conta_id, []).append(p)
+        return p
+
+    async def listar_projetos(self, s: Sessao) -> list[ProjetoRemoto]:
+        return list(self.projetos.get(s.conta.id, []))
+
+    async def criar_projeto(self, s: Sessao, nome: str) -> str:
+        self.criacoes_projeto += 1
+        return self._novo_projeto(s.conta.id, nome).id_remoto
+
+    async def abrir_projeto(self, s: Sessao, id_remoto: str) -> None:
+        # a conta so abre projeto seu: o Flow devolve erro para id de outra conta, e o
+        # falso precisa reproduzir isso ou o motor passaria no teste e falharia no real
+        meus = {p.id_remoto for p in self.projetos.get(s.conta.id, [])}
+        if id_remoto not in meus:
+            raise ErroTransporte(
+                f"projeto {id_remoto} nao pertence a conta {s.conta.email}")
+        self.abertos[s.conta.id] = id_remoto
 
     async def gerar(self, s: Sessao, p: Pedido) -> str:
         await asyncio.sleep(self.latencia)
@@ -1714,7 +2025,7 @@ class TransporteFalso:
 - [ ] **Step 5: Rodar e ver passar**
 
 Run: `.venv/Scripts/pytest tests/test_transporte_falso.py -q`
-Expected: `9 passed`
+Expected: `14 passed`
 
 - [ ] **Step 6: Commit**
 
@@ -1737,7 +2048,15 @@ A regra que não pode escapar daqui: **toda reserva que não virou geração tem
 
 Isso vale para **todos** os ramos de falha, `SessaoMorta` inclusive. A sessão não morre só em `abrir_sessao`: no transporte real ela cai durante `gerar`, `consultar` ou `baixar`. Como `SessaoMorta` é o primeiro `except`, sem estorno ali o caso nunca chega ao ramo genérico e o crédito reservado some do saldo local para sempre. `_estornar` é no-op depois que o Flow aceitou (`id_remoto is not None`), então isso não infla saldo — e devolve `True` só quando crédito voltou de fato, que é como o ramo sabe se ainda precisa persistir a conta antes de `marcar_sessao`.
 
-Seis outras decisões desta task, cada uma com um modo de falha real por trás:
+Oito outras decisões desta task, cada uma com um modo de falha real por trás:
+
+**O projeto é resolvido antes de gerar, e a ordem tem três passos.** `_resolver_projeto` roda logo depois de `abrir_sessao`: (1) procura a dupla `(conta, produto)` no banco local e, se achou, só abre; (2) não achou — lista os projetos da conta e procura por **nome igual ao produto**; se achou, **adota**: grava no banco e abre, sem criar; (3) não achou nem remotamente — cria com o nome do produto, grava e abre. Cada caminho vira evento (`projeto_adotado`, `projeto_criado`).
+
+O passo do meio é o que não pode ser cortado. Sem ele, apagar o `flowpool.db` ou criar um projeto na mão pelo site faz o app duplicar tudo — e projeto duplicado no Flow é bagunça que ninguém limpa depois, porque o app não apaga projeto nenhum. É também por isso que o teste de reuso afirma sobre `criacoes_projeto == 1`, e não só sobre o estado final do banco: o estado final não distingue "reusou" de "criou de novo e regravou por cima".
+
+Job sem `produto` (criado direto pelo repo) não resolve projeto nenhum: criar um projeto chamado `""` seria pior do que não criar nada.
+
+**`escolher` que levanta não pode deixar o job travado.** Com a reivindicação atômica, quando `passo()` chama `_conta_para` o job **já está `rodando`** no banco. Uma exceção subindo dali o deixava nesse estado até o próximo boot, e só `recuperar()` o destravava — o `try/except` de `rodar()` mantém a fila viva, mas não devolve o job. `ModeloSemCusto` é exatamente o caso que chega ali: `custo_de` roda dentro de `apta()`, para cada conta do pool. Agora a escolha vai dentro de `try/except Exception`, a falha vira evento `escolha_falhou` e o job volta para `pendente` **gastando uma tentativa** — é erro de configuração, e reprocessar para sempre um modelo sem custo cadastrado não conserta o cadastro.
 
 **Recusa de saldo marca a conta seca com prazo.** No ramo `SaldoInsuficiente`: `conta.seca_ate = agora + ESPERA_RESET`, `saldo_confiavel = False`, `job.reavaliar_em = conta.seca_ate`. Sem prazo o job volta para a fila no mesmo instante, cai na mesma conta e o motor gira em laço quente — reproduzido em 50 iterações, 0 tentativas consumidas e 100 eventos gravados.
 
@@ -1778,9 +2097,9 @@ def repo(tmp_path):
     return r
 
 
-def job_fast(nome="c1", modelo=Modelo.VEO_FAST):
+def job_fast(nome="c1", modelo=Modelo.VEO_FAST, produto=""):
     return Job(id=0, modo=Modo.T2V, modelo=modelo, prompt="uma gata",
-               destino="clipes", nome=nome)
+               destino="clipes", nome=nome, produto=produto)
 
 
 async def test_job_roda_e_fica_pronto(repo, tmp_path):
@@ -2106,6 +2425,95 @@ async def test_workers_simultaneos_nao_pegam_o_mesmo_job(repo, tmp_path):
     assert len(t.geracoes) == 2
     assert repo.job(j1).estado is EstadoJob.PRONTO
     assert repo.job(j2).estado is EstadoJob.PRONTO
+
+
+async def test_projeto_e_criado_na_primeira_geracao_e_reusado_na_segunda(repo, tmp_path):
+    # sem reuso, cada geracao criaria um projeto novo e a conta viraria um lixao
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 500; repo.salvar_conta(c)
+    repo.criar_job(job_fast(nome="c1", produto="Panelas Monaco"))
+    repo.criar_job(job_fast(nome="c2", produto="Panelas Monaco"))
+
+    t = TransporteFalso(saldos={cid: 500})
+    orq = Orquestrador(repo, t, raiz=tmp_path)
+    await orq.passo()
+    await orq.passo()
+
+    assert t.criacoes_projeto == 1
+    assert len(repo.projetos(cid)) == 1
+    assert repo.projeto_de(cid, "Panelas Monaco").id_remoto == t.abertos[cid]
+
+
+async def test_mesmo_produto_em_duas_contas_gera_dois_projetos(repo, tmp_path):
+    # nao existe "o projeto do Vestido Vermelho": existe um em cada conta que gerou
+    g1 = repo.criar_conta("g1@b.com", Tier.FREE, "p/1")
+    g2 = repo.criar_conta("g2@b.com", Tier.FREE, "p/2")
+    for cid in (g1, g2):
+        c = repo.conta(cid); c.saldo = 20; repo.salvar_conta(c)   # cada uma paga 1 Fast
+    repo.criar_job(job_fast(nome="c1", produto="Vestido Vermelho"))
+    repo.criar_job(job_fast(nome="c2", produto="Vestido Vermelho"))
+
+    t = TransporteFalso(saldos={g1: 20, g2: 20})
+    orq = Orquestrador(repo, t, raiz=tmp_path)
+    await orq.passo()
+    await orq.passo()
+
+    assert t.criacoes_projeto == 2
+    remotos = {p.conta_id: p.id_remoto for p in repo.projetos()}
+    assert set(remotos) == {g1, g2}
+    assert remotos[g1] != remotos[g2]
+
+
+async def test_projeto_que_existe_no_remoto_e_adotado_sem_criar(repo, tmp_path):
+    # apagar o flowpool.db ou criar o projeto na mao pelo site nao pode duplicar tudo
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 50; repo.salvar_conta(c)
+    jid = repo.criar_job(job_fast(produto="Moda"))
+
+    t = TransporteFalso(saldos={cid: 50}, projetos={cid: ["Moda"]})
+    orq = Orquestrador(repo, t, raiz=tmp_path)
+    await orq.passo()
+
+    assert t.criacoes_projeto == 0
+    assert repo.projeto_de(cid, "Moda").id_remoto == "proj-1"
+    assert "projeto_adotado" in [e["tipo"] for e in repo.eventos(jid)]
+
+
+async def test_job_sem_produto_nao_mexe_em_projeto(repo, tmp_path):
+    # job criado direto pelo repo, sem produto: nao ha projeto a resolver
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 50; repo.salvar_conta(c)
+    jid = repo.criar_job(job_fast())
+
+    t = TransporteFalso(saldos={cid: 50})
+    orq = Orquestrador(repo, t, raiz=tmp_path)
+    await orq.passo()
+
+    assert repo.job(jid).estado is EstadoJob.PRONTO
+    assert t.criacoes_projeto == 0
+    assert repo.projetos() == []
+
+
+async def test_modelo_sem_custo_na_escolha_devolve_o_job_e_gasta_tentativa(
+        repo, tmp_path, monkeypatch):
+    # regressao: com a reivindicacao atomica o job ja esta `rodando` quando `escolher`
+    # levanta. Sem tratar aqui ele so seria destravado no proximo boot.
+    from flowpool.nucleo import custos
+
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 50; repo.salvar_conta(c)
+    jid = repo.criar_job(job_fast())
+
+    monkeypatch.setattr(custos, "_CUSTO", {})   # nenhum modelo tem custo cadastrado
+
+    orq = Orquestrador(repo, TransporteFalso(saldos={cid: 50}), raiz=tmp_path)
+    assert await orq.passo() is True
+
+    j = repo.job(jid)
+    assert j.estado is EstadoJob.PENDENTE
+    assert j.tentativas == 1          # erro de configuracao nao reprocessa para sempre
+    assert "escolha_falhou" in [e["tipo"] for e in repo.eventos(jid)]
+    assert repo.reivindicar(datetime.now(timezone.utc)) is not None   # ja destravado
 ```
 
 - [ ] **Step 2: Rodar e ver falhar**
@@ -2207,7 +2615,20 @@ class Orquestrador:
             if job is None:
                 return False
 
-            conta = self._conta_para(job, agora)
+            try:
+                conta = self._conta_para(job, agora)
+            except Exception as e:
+                # `reivindicar` ja marcou o job `rodando`. Deixar a excecao subir
+                # daqui o deixaria travado nesse estado ate o proximo boot — e
+                # `ModeloSemCusto`, que e erro de configuracao, e exatamente o caso
+                # que chega aqui. Gasta tentativa: reprocessar para sempre um modelo
+                # sem custo cadastrado nao conserta o cadastro.
+                erro = f"{type(e).__name__}: {e}"
+                self.repo.registrar_evento(job.id, None, "escolha_falhou",
+                                           json.dumps({"erro": erro}))
+                self._devolver(job, erro, gasta_tentativa=True)
+                return True
+
             if conta is None:
                 job.estado = EstadoJob.PENDENTE
                 job.reavaliar_em = agora + ESPERA_RESET
@@ -2247,6 +2668,7 @@ class Orquestrador:
         sessao = None
         try:
             sessao = await self.transporte.abrir_sessao(conta)
+            await self._resolver_projeto(sessao, job, conta)
             if not retomando:
                 # a conta mudou: a geracao anterior nao serve mais, comeca do zero
                 job.id_remoto = None
@@ -2340,6 +2762,44 @@ class Orquestrador:
                 except Exception as e:
                     self.repo.registrar_evento(job.id, conta.id, "fechar_falhou",
                                                json.dumps({"erro": str(e)}))
+
+    async def _resolver_projeto(self, sessao, job: Job, conta: Conta) -> None:
+        """Deixa a sessao dentro do projeto certo antes de gerar.
+
+        Toda geracao do Flow acontece dentro de um projeto, e o projeto tem id na URL.
+        A politica e um projeto por produto EM CADA CONTA — projeto pertence a uma
+        conta so, entao nao existe "o projeto do Vestido Vermelho", existe um em cada
+        conta que gerou algo dele.
+
+        Ordem: banco local, depois lista remota (adocao), depois criacao. O passo do
+        meio existe porque sem ele apagar o `flowpool.db` ou criar um projeto na mao
+        pelo site faria o app duplicar tudo, e projeto duplicado no Flow e bagunca que
+        ninguem limpa depois.
+
+        Job sem `produto` (criado direto pelo repo) nao tem projeto a resolver: criar
+        um chamado "" seria pior do que nao criar nada.
+        """
+        if not job.produto:
+            return
+
+        conhecido = self.repo.projeto_de(conta.id, job.produto)
+        if conhecido is not None:
+            await self.transporte.abrir_projeto(sessao, conhecido.id_remoto)
+            return
+
+        remotos = await self.transporte.listar_projetos(sessao)
+        achado = next((p for p in remotos if p.nome == job.produto), None)
+        if achado is not None:
+            id_remoto, nome, tipo = achado.id_remoto, achado.nome, "projeto_adotado"
+        else:
+            id_remoto = await self.transporte.criar_projeto(sessao, job.produto)
+            nome, tipo = job.produto, "projeto_criado"
+
+        self.repo.registrar_projeto(conta.id, job.produto, id_remoto, nome)
+        self.repo.registrar_evento(
+            job.id, conta.id, tipo,
+            json.dumps({"produto": job.produto, "id_remoto": id_remoto}))
+        await self.transporte.abrir_projeto(sessao, id_remoto)
 
     def _evento_de_falha(self, job: Job, conta: Conta, tipo: str,
                          extra: dict | None = None) -> None:
@@ -2439,12 +2899,12 @@ class Orquestrador:
 - [ ] **Step 4: Rodar e ver passar**
 
 Run: `.venv/Scripts/pytest tests/test_orquestrador.py -q`
-Expected: `19 passed`
+Expected: `24 passed`
 
 - [ ] **Step 5: Rodar a suíte inteira**
 
 Run: `.venv/Scripts/pytest -q`
-Expected: `100 passed` (6 tipos + 17 custos + 16 escolha + 15 credito + 3 pool + 15 repo + 9 transporte + 19 orquestrador)
+Expected: `119 passed` (8 tipos + 17 custos + 16 escolha + 15 credito + 3 pool + 22 repo + 14 transporte + 24 orquestrador)
 
 - [ ] **Step 6: Commit**
 
@@ -2460,6 +2920,19 @@ git commit -m "feat: orquestrador de fila com troca de conta e retry"
 **Files:**
 - Create: `flowpool/api/esquemas.py`, `flowpool/api/app.py`
 - Test: `tests/test_api.py`
+
+`PedidoJob.produto` é **obrigatório** e `destino` passa a ser opcional: um validador preenche `destino = f"{produto}/clipes"` quando o pedido vem sem ele. Motivo: na pasta do usuário cada produto já é uma pasta (`Video Roupa`, `Panelas Monaco`, `Furadeira Pnoeoce`), então mandar `produto: "Panelas Monaco"` deve bastar e repetir o caminho é ruído. `destino` explícito continua aceito, para quando o arquivo deve cair em outro lugar.
+
+`produto` é obrigatório e não opcional porque é ele que diz **em qual projeto do Flow** a geração acontece (Task 7). Um pedido sem produto não teria projeto a resolver, e cada geração abriria um projeto novo.
+
+Duas rotas novas:
+
+| método | rota | o que faz |
+|---|---|---|
+| `GET` | `/projetos` | lista os vínculos, com filtro opcional por `conta_id` e por `produto` |
+| `DELETE` | `/projetos/{id}` | esquece o vínculo **local**; não apaga nada no Flow |
+
+O `DELETE` diz isso na docstring da rota **e na resposta** (`aviso`), porque a leitura natural de um DELETE é a oposta. O projeto continua no Flow com tudo que já foi gerado dentro dele, e na próxima geração daquele produto naquela conta ele volta a ser adotado pelo nome.
 
 O lifespan chama `orq.recuperar()` **antes** de `rodar()`. É o único ponto do sistema que roda uma vez por boot, e é onde um job deixado em `rodando` por um crash anterior — com crédito reservado que nunca voltou — precisa ser resolvido antes de o motor puxar qualquer coisa nova.
 
@@ -2488,7 +2961,7 @@ def cliente(tmp_path):
 def test_criar_job_devolve_id_e_estado_pendente(cliente):
     c, _ = cliente
     r = c.post("/jobs", json={"modo": "t2v", "modelo": "veo-fast", "prompt": "uma gata",
-                              "destino": "clipes", "nome": "c1"})
+                              "produto": "Video Roupa", "nome": "c1"})
     assert r.status_code == 201
     assert r.json()["estado"] == "pendente"
     assert isinstance(r.json()["id"], int)
@@ -2502,8 +2975,8 @@ def test_consultar_job_inexistente_da_404(cliente):
 def test_lote_cria_varios_jobs(cliente):
     c, _ = cliente
     corpo = {"jobs": [
-        {"modo": "t2v", "modelo": "veo-fast", "prompt": "a", "destino": "d", "nome": "c1"},
-        {"modo": "t2v", "modelo": "veo-lite", "prompt": "b", "destino": "d", "nome": "c2"},
+        {"modo": "t2v", "modelo": "veo-fast", "prompt": "a", "produto": "Moda", "nome": "c1"},
+        {"modo": "t2v", "modelo": "veo-lite", "prompt": "b", "produto": "Moda", "nome": "c2"},
     ]}
     r = c.post("/jobs/lote", json=corpo)
     assert r.status_code == 201
@@ -2513,7 +2986,7 @@ def test_lote_cria_varios_jobs(cliente):
 def test_ingredients2v_recusa_mais_de_tres_referencias(cliente):
     c, _ = cliente
     r = c.post("/jobs", json={"modo": "ingredients2v", "modelo": "veo-fast",
-                              "prompt": "p", "destino": "d", "nome": "n",
+                              "prompt": "p", "produto": "Moda", "nome": "n",
                               "referencias": ["1.png", "2.png", "3.png", "4.png"]})
     assert r.status_code == 422
 
@@ -2521,14 +2994,40 @@ def test_ingredients2v_recusa_mais_de_tres_referencias(cliente):
 def test_frames2v_exige_frame_inicial(cliente):
     c, _ = cliente
     r = c.post("/jobs", json={"modo": "frames2v", "modelo": "veo-fast", "prompt": "p",
+                              "produto": "Moda", "nome": "n"})
+    assert r.status_code == 422
+
+
+def test_produto_e_obrigatorio(cliente):
+    # sem produto nao ha projeto a resolver: cada geracao criaria um projeto novo
+    c, _ = cliente
+    r = c.post("/jobs", json={"modo": "t2v", "modelo": "veo-fast", "prompt": "p",
                               "destino": "d", "nome": "n"})
     assert r.status_code == 422
+
+
+def test_destino_deriva_do_produto_quando_ausente(cliente):
+    # na pasta do usuario cada produto ja e uma pasta; repetir o caminho e ruido
+    c, repo = cliente
+    jid = c.post("/jobs", json={"modo": "t2v", "modelo": "veo-fast", "prompt": "p",
+                                "produto": "Panelas Monaco", "nome": "n"}).json()["id"]
+    j = repo.job(jid)
+    assert j.produto == "Panelas Monaco"
+    assert j.destino == "Panelas Monaco/clipes"
+
+
+def test_destino_explicito_e_respeitado(cliente):
+    c, repo = cliente
+    jid = c.post("/jobs", json={"modo": "t2v", "modelo": "veo-fast", "prompt": "p",
+                                "produto": "Panelas Monaco", "nome": "n",
+                                "destino": "Benchmark Roupa/brutos"}).json()["id"]
+    assert repo.job(jid).destino == "Benchmark Roupa/brutos"
 
 
 def test_cancelar_job_pendente(cliente):
     c, _ = cliente
     jid = c.post("/jobs", json={"modo": "t2v", "modelo": "veo-fast", "prompt": "p",
-                                "destino": "d", "nome": "n"}).json()["id"]
+                                "produto": "Moda", "nome": "n"}).json()["id"]
     assert c.delete(f"/jobs/{jid}").status_code == 200
     assert c.get(f"/jobs/{jid}").json()["estado"] == "cancelado"
 
@@ -2551,11 +3050,41 @@ def test_saude_resume_o_pool(cliente):
     cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
     conta = repo.conta(cid); conta.saldo = 40; repo.salvar_conta(conta)
     c.post("/jobs", json={"modo": "t2v", "modelo": "veo-fast", "prompt": "p",
-                          "destino": "d", "nome": "n"})
+                          "produto": "Moda", "nome": "n"})
     s = c.get("/saude").json()
     assert s["contas_vivas"] == 1
     assert s["credito_total"] == 40
     assert s["fila_pendente"] == 1
+
+
+def test_listar_projetos_e_filtrar(cliente):
+    c, repo = cliente
+    g1 = repo.criar_conta("g1@b.com", Tier.FREE, "p/1")
+    g2 = repo.criar_conta("g2@b.com", Tier.FREE, "p/2")
+    repo.registrar_projeto(g1, "Moda", "rem-1", "Moda")
+    repo.registrar_projeto(g1, "Vestir", "rem-2", "Vestir")
+    repo.registrar_projeto(g2, "Moda", "rem-3", "Moda")
+
+    assert len(c.get("/projetos").json()) == 3
+    assert len(c.get("/projetos", params={"conta_id": g1}).json()) == 2
+    por_produto = c.get("/projetos", params={"produto": "Moda"}).json()
+    assert {p["id_remoto"] for p in por_produto} == {"rem-1", "rem-3"}
+
+
+def test_esquecer_projeto_avisa_que_o_flow_nao_e_tocado(cliente):
+    c, repo = cliente
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    pid = repo.registrar_projeto(cid, "Moda", "rem-1", "Moda")
+
+    r = c.delete(f"/projetos/{pid}")
+    assert r.status_code == 200
+    assert "Flow" in r.json()["aviso"]
+    assert repo.projeto_de(cid, "Moda") is None
+
+
+def test_esquecer_projeto_inexistente_da_404(cliente):
+    c, _ = cliente
+    assert c.delete("/projetos/999").status_code == 404
 ```
 
 - [ ] **Step 2: Rodar e ver falhar**
@@ -2579,12 +3108,24 @@ class PedidoJob(BaseModel):
     modo: Modo
     modelo: Modelo
     prompt: str
-    destino: str
+    # Nome da pasta do produto e, ao mesmo tempo, nome do projeto no Flow. Obrigatorio:
+    # e ele que diz em qual projeto a geracao acontece.
+    produto: str = Field(min_length=1)
+    # Opcional porque na pasta do usuario cada produto ja e uma pasta. Continua aceito
+    # explicito para quando o arquivo deve cair em outro lugar.
+    destino: str | None = None
     nome: str
     referencias: list[str] = Field(default_factory=list, max_length=3)
     frame_inicial: str | None = None
     frame_final: str | None = None
     prioridade: int = 0
+
+    @model_validator(mode="after")
+    def destino_deriva_do_produto(self) -> PedidoJob:
+        """`produto: "Panelas Monaco"` basta; repetir o caminho e ruido."""
+        if not self.destino:
+            self.destino = f"{self.produto}/clipes"
+        return self
 
     @model_validator(mode="after")
     def coerente_com_o_modo(self) -> PedidoJob:
@@ -2605,10 +3146,19 @@ class RespostaJob(BaseModel):
     modo: Modo
     modelo: Modelo
     nome: str
+    produto: str = ""
     conta_id: int | None = None
     arquivo: str | None = None
     tentativas: int = 0
     erro: str | None = None
+
+
+class RespostaProjeto(BaseModel):
+    id: int
+    conta_id: int
+    produto: str
+    id_remoto: str
+    nome_remoto: str
 
 
 class RespostaConta(BaseModel):
@@ -2653,7 +3203,8 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 
 from flowpool.api.esquemas import (
-    NovaConta, PatchConta, PedidoJob, PedidoLote, RespostaConta, RespostaJob, Saude,
+    NovaConta, PatchConta, PedidoJob, PedidoLote, RespostaConta, RespostaJob,
+    RespostaProjeto, Saude,
 )
 from flowpool.dados.repo import Repo
 from flowpool.motor.orquestrador import Orquestrador
@@ -2662,15 +3213,18 @@ from flowpool.transporte.base import FlowTransport
 
 
 def _job_de(p: PedidoJob) -> Job:
+    # `destino` nunca chega None aqui: o validador de `PedidoJob` ja o derivou do
+    # produto quando o pedido veio sem ele.
     return Job(id=0, modo=p.modo, modelo=p.modelo, prompt=p.prompt, destino=p.destino,
-               nome=p.nome, referencias=p.referencias, frame_inicial=p.frame_inicial,
-               frame_final=p.frame_final, prioridade=p.prioridade)
+               nome=p.nome, produto=p.produto, referencias=p.referencias,
+               frame_inicial=p.frame_inicial, frame_final=p.frame_final,
+               prioridade=p.prioridade)
 
 
 def _resposta(j: Job) -> RespostaJob:
     return RespostaJob(id=j.id, estado=j.estado, modo=j.modo, modelo=j.modelo,
-                       nome=j.nome, conta_id=j.conta_id, arquivo=j.arquivo,
-                       tentativas=j.tentativas, erro=j.erro)
+                       nome=j.nome, produto=j.produto, conta_id=j.conta_id,
+                       arquivo=j.arquivo, tentativas=j.tentativas, erro=j.erro)
 
 
 def criar_app(repo: Repo, transporte: FlowTransport, raiz: Path | str,
@@ -2722,6 +3276,36 @@ def criar_app(repo: Repo, transporte: FlowTransport, raiz: Path | str,
         repo.salvar_job(j)
         return _resposta(j)
 
+    @app.get("/projetos", response_model=list[RespostaProjeto])
+    def listar_projetos(conta_id: int | None = None,
+                        produto: str | None = None) -> list[RespostaProjeto]:
+        """Projetos do Flow ja vinculados a cada conta.
+
+        Um produto aparece uma vez por conta que gerou algo dele: projeto pertence a
+        uma conta so, e a `g2` nao abre o projeto da `g1`.
+        """
+        achados = repo.projetos(conta_id)
+        if produto is not None:
+            achados = [p for p in achados if p.produto == produto]
+        return [RespostaProjeto(id=p.id, conta_id=p.conta_id, produto=p.produto,
+                                id_remoto=p.id_remoto, nome_remoto=p.nome_remoto)
+                for p in achados]
+
+    @app.delete("/projetos/{id_}")
+    def esquecer_projeto(id_: int) -> dict:
+        """Esquece o vinculo LOCAL. NAO apaga o projeto no Flow.
+
+        O projeto continua la, com tudo que ja foi gerado dentro dele. Na proxima
+        geracao daquele produto naquela conta ele volta a ser adotado pelo nome.
+        """
+        alvo = next((p for p in repo.projetos() if p.id == id_), None)
+        if alvo is None:
+            raise HTTPException(404, "projeto nao existe")
+        repo.esquecer_projeto(id_)
+        return {"id": id_, "esquecido": True,
+                "aviso": "o vinculo local foi apagado; o projeto continua existindo "
+                         "no Flow e sera readotado pelo nome na proxima geracao"}
+
     @app.get("/contas", response_model=list[RespostaConta])
     def listar_contas() -> list[RespostaConta]:
         return [RespostaConta(id=c.id, email=c.email, tier=c.tier, saldo=c.saldo,
@@ -2761,7 +3345,7 @@ A rota `POST /contas` fica de fora deste task porque ela precisa abrir navegador
 - [ ] **Step 5: Rodar e ver passar**
 
 Run: `.venv/Scripts/pytest tests/test_api.py -q`
-Expected: `9 passed`
+Expected: `15 passed`
 
 - [ ] **Step 6: Commit**
 
@@ -2778,6 +3362,8 @@ git commit -m "feat: api http de jobs e contas"
 - Create: `flowpool/transporte/pw/seletores.py`, `flowpool/transporte/pw/mapear.py`
 
 Este task é **manual e assistido** — não tem teste automatizado porque depende do site do Google. O produto dele é um arquivo de seletores preenchido com valores reais. Todos os seletores moram aqui e em nenhum outro lugar: quando o Google mexer no layout, só este arquivo muda.
+
+Observação de campo (20/08): a app vive em `labs.google/fx/tools/flow/[id]` — o `[id]` é o **projeto**, e toda geração acontece dentro de um. Por isso o mapeamento também precisa cobrir a tela de projetos: lista, botão de novo projeto e campo de nome. Sem esses três, o transporte real não consegue cumprir o `listar_projetos`/`criar_projeto`/`abrir_projeto` que o motor já chama (Tasks 6 e 7), e cada geração abriria um projeto novo.
 
 - [ ] **Step 1: Instalar o Chromium do Playwright e confirmar o Chrome real**
 
@@ -2862,6 +3448,12 @@ Com o Inspector aberto, use o modo *Pick locator* e anote o localizador de cada 
 8. Botão de download do resultado
 9. O aviso de "créditos insuficientes"
 10. A tela de login (para detectar sessão caída)
+11. A lista de projetos na tela inicial, e o card/link de **um** projeto dentro dela (o localizador precisa dar tanto o nome visível quanto o id/href)
+12. O botão de **novo projeto**
+13. O campo de **nome do projeto** e o botão que confirma a criação
+14. O padrão da URL com o projeto aberto — anote uma URL real e confira onde o id cai
+
+Nos itens 11 a 13, anote também **de onde sai o id do projeto**: do `href` do card, da URL após abrir, ou de um atributo. É esse id que vai para `projeto.id_remoto` no banco, e um id errado faz o app abrir o projeto de outro produto — ou, pior, tentar abrir um que a conta da vez nem enxerga.
 
 - [ ] **Step 5: Preencher o arquivo de seletores**
 
@@ -2876,6 +3468,9 @@ do Playwright (CSS, texto ou role).
 
 URL_FLOW = "https://labs.google/fx/tools/flow"
 URL_PROJETO = "https://labs.google/fx/tools/flow/project"
+# A app vive dentro de um projeto: `labs.google/fx/tools/flow/[id]`. Formate com o
+# id_remoto guardado no banco para abrir o projeto de um produto.
+URL_PROJETO_ABERTO = "https://labs.google/fx/tools/flow/{id_remoto}"
 
 # --- sessao ---
 LOGIN_VISIVEL = "..."          # algo que so aparece deslogado, ex: botao "Sign in"
@@ -2902,9 +3497,20 @@ CARD_GERANDO = "..."
 CARD_PRONTO = "..."
 BOTAO_DOWNLOAD = "..."
 
+# --- projetos ---
+# Toda geracao acontece DENTRO de um projeto. Sem estes cinco, cada geracao criaria
+# um projeto novo e a conta viraria um lixao de projetos orfaos.
+LISTA_PROJETOS = "..."         # container da lista na tela inicial
+CARD_PROJETO = "..."           # um item da lista; dele saem o nome e o id/href
+BOTAO_NOVO_PROJETO = "..."
+CAMPO_NOME_PROJETO = "..."
+BOTAO_CRIAR_PROJETO = "..."    # o que confirma a criacao depois do nome
+
 # --- erros ---
 AVISO_SEM_CREDITO = "..."
 ```
+
+Os cinco de projeto ficam `"..."` como os outros: só a sessão de mapeamento os preenche. O que **não** pode ficar em aberto é de onde sai o id — anote isso no comentário de `CARD_PROJETO` junto com o localizador.
 
 - [ ] **Step 6: Commit**
 
@@ -3086,7 +3692,7 @@ from flowpool.transporte.pw.sessao import cadastrar, caminho_perfil
 - [ ] **Step 6: Rodar a suíte**
 
 Run: `.venv/Scripts/pytest -q`
-Expected: `113 passed` (100 + 9 da api + 4 da sessão)
+Expected: `138 passed` (119 + 15 da api + 4 da sessão)
 
 - [ ] **Step 7: Commit**
 
@@ -3105,6 +3711,10 @@ git commit -m "feat: sessao real com chrome e cadastro de conta"
 
 Os quatro modos compartilham o mesmo esqueleto: preencher prompt → escolher modelo → (subir arquivos) → gerar → esperar → baixar. Este task fecha o esqueleto e o modo mais simples.
 
+Antes do esqueleto vem o projeto: `listar_projetos`, `criar_projeto` e `abrir_projeto` fecham o contrato que o motor já usa desde a Task 7. `abrir_projeto` é navegação pura (`URL_PROJETO_ABERTO.format(...)`); `criar_projeto` é botão → nome → confirmar, e **devolve o id lido da URL depois que o projeto abre** — é esse id que vai para o banco. Se a URL não mudar, a criação falhou: devolver um id inventado gravaria no banco um vínculo que nunca abre.
+
+`gerar` passa a assumir que a página **já está dentro do projeto certo** — quem colocou foi `_resolver_projeto`, no orquestrador. O transporte não decide projeto: ele só lista, cria e abre.
+
 - [ ] **Step 1: Implementar**
 
 `flowpool/transporte/pw/transporte.py`:
@@ -3121,7 +3731,7 @@ from pathlib import Path
 
 from flowpool.nucleo.tipos import Conta, Modo
 from flowpool.transporte.base import (
-    Estado, GeracaoFalhou, Pedido, SaldoInsuficiente, Sessao, SessaoMorta,
+    Estado, GeracaoFalhou, Pedido, ProjetoRemoto, SaldoInsuficiente, Sessao, SessaoMorta,
 )
 from flowpool.transporte.pw import seletores as sel
 from flowpool.transporte.pw.sessao import abrir_contexto
@@ -3149,7 +3759,51 @@ class TransportePlaywright:
             raise GeracaoFalhou(f"nao achei numero em {texto!r}")
         return int(re.sub(r"[.,]", "", numeros[0]))
 
+    async def listar_projetos(self, s: Sessao) -> list[ProjetoRemoto]:
+        """Projetos DESTA conta. Nao existe lista global: cada conta ve so os seus."""
+        _, _, pagina = s.handle
+        await pagina.goto(sel.URL_FLOW, wait_until="domcontentloaded")
+        await pagina.locator(sel.LISTA_PROJETOS).wait_for(timeout=30_000)
+        achados = []
+        for card in await pagina.locator(sel.CARD_PROJETO).all():
+            href = await card.get_attribute("href") or ""
+            nome = (await card.inner_text()).strip()
+            id_remoto = href.rstrip("/").split("/")[-1]
+            if id_remoto:
+                achados.append(ProjetoRemoto(id_remoto=id_remoto, nome=nome))
+        return achados
+
+    async def criar_projeto(self, s: Sessao, nome: str) -> str:
+        """Cria e devolve o id lido DA URL depois que o projeto abre.
+
+        Inventar o id (ou devolver o nome) gravaria no banco um vinculo que nunca abre,
+        e na geracao seguinte o app criaria outro projeto do mesmo produto.
+        """
+        _, _, pagina = s.handle
+        await pagina.goto(sel.URL_FLOW, wait_until="domcontentloaded")
+        await pagina.locator(sel.BOTAO_NOVO_PROJETO).click()
+        campo = pagina.locator(sel.CAMPO_NOME_PROJETO)
+        await campo.wait_for(timeout=15_000)
+        await campo.fill(nome)
+        await pagina.locator(sel.BOTAO_CRIAR_PROJETO).click()
+        await pagina.wait_for_url(re.compile(r"/flow/[^/]+$"), timeout=30_000)
+        id_remoto = pagina.url.rstrip("/").split("/")[-1]
+        if not id_remoto or id_remoto == "flow":
+            raise GeracaoFalhou(f"projeto {nome!r} nao abriu depois de criado")
+        return id_remoto
+
+    async def abrir_projeto(self, s: Sessao, id_remoto: str) -> None:
+        _, _, pagina = s.handle
+        await pagina.goto(sel.URL_PROJETO_ABERTO.format(id_remoto=id_remoto),
+                          wait_until="domcontentloaded")
+        # projeto de outra conta nao carrega: cai no login ou em erro. Deixar passar
+        # faria a geracao seguinte acontecer no projeto errado, ou em nenhum.
+        if await pagina.locator(sel.LOGIN_VISIVEL).is_visible(timeout=5000):
+            raise SessaoMorta(f"sessao de {s.conta.email} caiu ao abrir projeto")
+        await pagina.locator(sel.CAMPO_PROMPT).wait_for(timeout=30_000)
+
     async def gerar(self, s: Sessao, p: Pedido) -> str:
+        # a pagina ja esta dentro do projeto certo: quem colocou foi o orquestrador
         _, _, pagina = s.handle
 
         await pagina.locator(sel.SELETOR_MODELO).click()
@@ -3230,8 +3884,23 @@ import sys
 from pathlib import Path
 
 from flowpool.nucleo.tipos import Conta, Modelo, Modo, Tier
-from flowpool.transporte.base import Estado, Pedido
+from flowpool.transporte.base import Estado, Pedido, Sessao
 from flowpool.transporte.pw.transporte import TransportePlaywright
+
+PRODUTO_FUMACA = "Fumaca"
+
+
+async def entrar_no_projeto(t: TransportePlaywright, s: Sessao, produto: str) -> str:
+    """Adota o projeto pelo nome, e so cria se nao existir.
+
+    E a mesma ordem do orquestrador (`_resolver_projeto`), de proposito: rodar a
+    fumaca duas vezes nao pode deixar dois projetos "Fumaca" na conta.
+    """
+    achado = next((p for p in await t.listar_projetos(s) if p.nome == produto), None)
+    id_remoto = achado.id_remoto if achado else await t.criar_projeto(s, produto)
+    print("adotado" if achado else "criado", "projeto:", id_remoto)
+    await t.abrir_projeto(s, id_remoto)
+    return id_remoto
 
 
 async def main(perfil: str, modelo: str, prompt: str) -> None:
@@ -3240,6 +3909,8 @@ async def main(perfil: str, modelo: str, prompt: str) -> None:
     s = await t.abrir_sessao(conta)
     try:
         print("saldo antes:", await t.saldo(s))
+        # a fumaca tambem passa pelo projeto: gerar fora de um nao existe no Flow
+        await entrar_no_projeto(t, s, PRODUTO_FUMACA)
         id_remoto = await t.gerar(s, Pedido(modo=Modo.T2V, modelo=Modelo(modelo),
                                             prompt=prompt))
         print("gerando:", id_remoto)
@@ -3302,6 +3973,7 @@ async def main(perfil: str, modo: str, modelo: str, prompt: str,
     s = await t.abrir_sessao(conta)
     try:
         print("saldo antes:", await t.saldo(s))
+        await entrar_no_projeto(t, s, PRODUTO_FUMACA)
         id_remoto = await t.gerar(s, pedido)
         while await t.consultar(s, id_remoto) is Estado.RODANDO:
             await asyncio.sleep(5)
@@ -3343,11 +4015,17 @@ Expected: `scratch/fumaca.mp4` existe e o primeiro frame é a foto da Clara.
 
 Expected: `scratch/fumaca.mp4` existe e o rosto é o da Clara. Três referências é o teto do Flow — o quarto arquivo é ignorado pelo `[:3]` no transporte, e a API já recusa com 422.
 
-- [ ] **Step 5: Corrigir os seletores que falharam**
+- [ ] **Step 5: Fumaça de projeto — reuso e adoção**
+
+Rode qualquer uma das fumaças acima **duas vezes seguidas** e olhe a tela inicial do Flow depois.
+
+Expected: a segunda execução imprime `adotado projeto: <mesmo id>`, e a lista de projetos da conta contém **um** único "Fumaca". Dois projetos com o mesmo nome significam que `listar_projetos` não está devolvendo nome ou id direito — corrija `CARD_PROJETO` em `seletores.py`, nunca o transporte. Apague o duplicado na mão antes de seguir: o app não apaga projeto nenhum, de propósito.
+
+- [ ] **Step 6: Corrigir os seletores que falharam**
 
 Toda correção vai em `seletores.py`. Se um modo exigir um passo extra na UI (por exemplo, abrir uma aba antes de aparecer o campo de upload), acrescente o seletor e o passo em `_subir_arquivos`, mantendo a regra: seletor no `seletores.py`, sequência no `transporte.py`.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
 git add flowpool/transporte/pw
@@ -3385,24 +4063,24 @@ def cliente(tmp_path):
 
 
 def test_gerar_devolve_o_id(cliente):
-    assert isinstance(cliente.gerar(prompt="p", destino="d", nome="n"), int)
+    assert isinstance(cliente.gerar(prompt="p", produto="Moda", nome="n"), int)
 
 
 def test_lote_devolve_todos_os_ids(cliente):
     ids = cliente.lote([
-        {"prompt": "a", "destino": "d", "nome": "c1"},
-        {"prompt": "b", "destino": "d", "nome": "c2"},
+        {"prompt": "a", "produto": "Moda", "nome": "c1"},
+        {"prompt": "b", "produto": "Moda", "nome": "c2"},
     ])
     assert len(ids) == 2
 
 
 def test_estado_devolve_o_dicionario_do_job(cliente):
-    jid = cliente.gerar(prompt="p", destino="d", nome="n")
+    jid = cliente.gerar(prompt="p", produto="Moda", nome="n")
     assert cliente.estado(jid)["estado"] == "pendente"
 
 
 def test_padroes_sao_t2v_e_veo_fast(cliente):
-    jid = cliente.gerar(prompt="p", destino="d", nome="n")
+    jid = cliente.gerar(prompt="p", produto="Moda", nome="n")
     j = cliente.estado(jid)
     assert j["modo"] == "t2v"
     assert j["modelo"] == "veo-fast"
@@ -3422,7 +4100,7 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'flowpool.cliente'`
 
     from flowpool.cliente import FlowPool
     fp = FlowPool()
-    jid = fp.gerar(prompt=texto, destino="Video Roupa/clipes", nome="c3-take1")
+    jid = fp.gerar(prompt=texto, produto="Video Roupa", nome="c3-take1")
     caminho = fp.esperar(jid)
 """
 
@@ -3440,15 +4118,19 @@ class FlowPool:
     def __init__(self, base: str = BASE, transporte_http: Any = None) -> None:
         self.http = transporte_http or httpx.Client(base_url=base, timeout=30)
 
-    def gerar(self, prompt: str, destino: str, nome: str, modo: str = "t2v",
-              modelo: str = "veo-fast", referencias: list[str] | None = None,
+    def gerar(self, prompt: str, produto: str, nome: str, modo: str = "t2v",
+              modelo: str = "veo-fast", destino: str | None = None,
+              referencias: list[str] | None = None,
               frame_inicial: str | None = None, frame_final: str | None = None,
               prioridade: int = 0) -> int:
+        # `destino` fica de fora quando e None: a API o deriva do produto
+        # (`{produto}/clipes`), e mandar null explicito seria a mesma coisa com ruido.
         r = self.http.post("/jobs", json={
-            "modo": modo, "modelo": modelo, "prompt": prompt, "destino": destino,
+            "modo": modo, "modelo": modelo, "prompt": prompt, "produto": produto,
             "nome": nome, "referencias": referencias or [],
             "frame_inicial": frame_inicial, "frame_final": frame_final,
             "prioridade": prioridade,
+            **({"destino": destino} if destino else {}),
         })
         r.raise_for_status()
         return r.json()["id"]
@@ -3529,7 +4211,7 @@ Expected: `4 passed`
 - [ ] **Step 6: Rodar a suíte inteira**
 
 Run: `.venv/Scripts/pytest -q`
-Expected: `117 passed` (113 + 4 do cliente)
+Expected: `142 passed` (138 + 4 do cliente)
 
 - [ ] **Step 7: Commit**
 
@@ -3566,7 +4248,7 @@ Expected: abre uma janela do Chrome; após o login manual, o comando devolve a c
 - [ ] **Step 3: Disparar um lote de três clipes**
 
 ```bash
-curl -X POST http://127.0.0.1:8777/jobs/lote -H "Content-Type: application/json" -d "{\"jobs\":[{\"modo\":\"t2v\",\"modelo\":\"veo-lite\",\"prompt\":\"a cat on a table\",\"destino\":\"scratch\",\"nome\":\"e1\"},{\"modo\":\"t2v\",\"modelo\":\"veo-lite\",\"prompt\":\"a dog in a park\",\"destino\":\"scratch\",\"nome\":\"e2\"},{\"modo\":\"t2v\",\"modelo\":\"veo-lite\",\"prompt\":\"rain on a window\",\"destino\":\"scratch\",\"nome\":\"e3\"}]}"
+curl -X POST http://127.0.0.1:8777/jobs/lote -H "Content-Type: application/json" -d "{\"jobs\":[{\"modo\":\"t2v\",\"modelo\":\"veo-lite\",\"prompt\":\"a cat on a table\",\"produto\":\"Fumaca\",\"destino\":\"scratch\",\"nome\":\"e1\"},{\"modo\":\"t2v\",\"modelo\":\"veo-lite\",\"prompt\":\"a dog in a park\",\"produto\":\"Fumaca\",\"destino\":\"scratch\",\"nome\":\"e2\"},{\"modo\":\"t2v\",\"modelo\":\"veo-lite\",\"prompt\":\"rain on a window\",\"produto\":\"Fumaca\",\"destino\":\"scratch\",\"nome\":\"e3\"}]}"
 ```
 
 Expected: `{"ids":[1,2,3]}`. Uma conta grátis com 50 créditos paga três Lite (30) e sobra 20.
@@ -3610,7 +4292,7 @@ Precisa ser o **Chrome instalado** — o Chromium do Playwright é recusado pelo
 
     from flowpool.cliente import FlowPool
     fp = FlowPool()
-    jid = fp.gerar(prompt="...", destino="Video Roupa/clipes", nome="c3-take1",
+    jid = fp.gerar(prompt="...", produto="Video Roupa", nome="c3-take1",
                    modelo="veo-fast")
     caminho = fp.esperar(jid)
 
@@ -3620,6 +4302,11 @@ Precisa ser o **Chrome instalado** — o Chromium do Playwright é recusado pelo
   para conta paga.
 - Job sem conta apta não falha: espera o reset e volta sozinho.
 - Sessão caída exige pessoa: `POST /contas/{id}/revalidar`.
+- `produto` é obrigatório: é a pasta de destino (`{produto}/clipes`, se você não mandar
+  `destino`) e o nome do projeto no Flow.
+- Um projeto por produto **em cada conta** — projeto do Flow pertence a uma conta só.
+  Veja em `GET /projetos`. `DELETE /projetos/{id}` esquece o vínculo local; o projeto
+  continua no Flow e é readotado pelo nome na próxima geração.
 - Quando o Google mexer no layout, o conserto é em `transporte/pw/seletores.py`.
 ```
 
