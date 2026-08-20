@@ -67,7 +67,7 @@ def checar_chrome() -> Path:
         if p.exists():
             return p
     raise ChromeAusente(
-        "Chrome nao encontrado. O Flow recusa o Chromium do Playwright — "
+        "Chrome nao encontrado. O Flow recusa o Chromium do Playwright - "
         "instale o Google Chrome ou ajuste _CANDIDATOS em sessao.py."
     )
 
@@ -155,7 +155,7 @@ def interpretar_sessao(dados: dict) -> datetime:
     depois, com a conta marcada por um erro que nao era dela.
     """
     if not dados.get("access_token"):
-        raise SessaoMorta("sessao sem access_token — a conta nao esta logada")
+        raise SessaoMorta("sessao sem access_token - a conta nao esta logada")
     bruto = str(dados.get("expires") or "")
     if not bruto:
         raise SessaoMorta("sessao sem campo `expires`")
@@ -225,7 +225,7 @@ async def cadastrar(raiz_perfis: Path, email: str,
     exe = checar_chrome()
     args = argumentos_chrome(exe, perfil, sel.URL_FLOW, proxy)
     if perfil_em_uso(perfil):
-        raise PerfilOcupado(f"{perfil} ja esta aberto em outro Chrome — feche antes")
+        raise PerfilOcupado(f"{perfil} ja esta aberto em outro Chrome - feche antes")
 
     proc = subprocess.Popen(args)
     print(INSTRUCOES)
@@ -238,7 +238,7 @@ async def cadastrar(raiz_perfis: Path, email: str,
         # o Chrome que subimos morreu na hora porque outro ja tinha o perfil e ficou
         # com a janela. Continuar daria TargetClosedError na validacao.
         raise PerfilOcupado(
-            f"{perfil} continua em uso depois de o Chrome de login sair — "
+            f"{perfil} continua em uso depois de o Chrome de login sair - "
             "outro Chrome pegou a janela. Feche tudo e repita.")
     await asyncio.to_thread(esperar_perfil_livre, perfil)
     return perfil, await validar_perfil(perfil, proxy)

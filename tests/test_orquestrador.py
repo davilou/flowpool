@@ -462,14 +462,17 @@ async def test_lote_pula_a_conta_que_so_comporta_uma_geracao(repo, tmp_path):
     # a free vence pela regra do credito que expira antes, mas nao paga o lote inteiro.
     # Se `passo` nao passasse a quantidade para `escolher`, ela seria escolhida, o Flow
     # recusaria e a conta seria marcada seca por erro de calculo.
+    # o lote era de IMAGEM ate a medicao de 2026-08-20 poe-la em custo ZERO: com zero,
+    # nenhuma conta viva deixa de comportar o lote e a mecanica de passar a quantidade
+    # para `escolher` sairia do alcance do teste.
     magra = repo.criar_conta("magra@b.com", Tier.FREE, "p/1")
-    c = repo.conta(magra); c.saldo = 6; repo.salvar_conta(c)
+    c = repo.conta(magra); c.saldo = 10; repo.salvar_conta(c)
     gorda = repo.criar_conta("gorda@b.com", Tier.PRO, "p/2")
     c = repo.conta(gorda); c.saldo = 1000; repo.salvar_conta(c)
-    jid = repo.criar_job(Job(id=0, modo=Modo.IMAGEM, modelo=Modelo.NANO_BANANA,
+    jid = repo.criar_job(Job(id=0, modo=Modo.T2V, modelo=Modelo.VEO_LITE,
                              prompt="p", destino="imgs", nome="i1", quantidade=4))
 
-    orq = Orquestrador(repo, TransporteFalso(saldos={magra: 6, gorda: 1000}),
+    orq = Orquestrador(repo, TransporteFalso(saldos={magra: 10, gorda: 1000}),
                        raiz=tmp_path)
     await orq.passo()
 

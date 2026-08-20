@@ -131,11 +131,16 @@ def test_conta_paga_que_sobe_ate_50_nao_e_reset():
 # --- quantidade ---
 
 def test_reservar_multiplica_pela_quantidade():
-    # quatro imagens custam quatro vezes uma; reservar so uma deixaria o Flow cobrar
-    # o que o saldo local nao previu
+    # reservar so uma geracao deixaria o Flow cobrar o que o saldo local nao previu.
+    # O veiculo era NANO_BANANA ate a medicao de 2026-08-20 mostrar que imagem custa
+    # ZERO — com custo zero a multiplicacao nao aparece, e a mecanica precisa continuar
+    # presa: o dia em que o Google passar a cobrar imagem nao vem com aviso.
+    # `reservar` nao conhece modo, entao qualquer modelo com custo serve de veiculo.
     c = conta(50)
-    assert reservar(c, Modelo.NANO_BANANA, quantidade=4) == 8
-    assert c.saldo == 42
+    assert reservar(c, Modelo.VEO_LITE, quantidade=4) == 40
+    assert c.saldo == 10
+    # e o lote de imagem, medido em zero, nao reserva nada
+    assert reservar(conta(50), Modelo.NANO_BANANA, quantidade=4) == 0
 
 
 def test_reservar_recusa_lote_que_o_saldo_nao_paga_inteiro():

@@ -20,8 +20,8 @@ def test_teto_diario_do_free():
         (Modelo.VEO_QUALITY, Tier.FREE, 100),
         (Modelo.VEO_QUALITY, Tier.PRO, 100),
         (Modelo.VEO_QUALITY, Tier.ULTRA, 100),
-        (Modelo.NANO_BANANA, Tier.FREE, 2),
-        (Modelo.NANO_BANANA, Tier.ULTRA, 2),
+        (Modelo.NANO_BANANA, Tier.FREE, 0),
+        (Modelo.NANO_BANANA, Tier.ULTRA, 0),
     ],
 )
 def test_custo_por_modelo_e_tier(modelo, tier, esperado):
@@ -47,14 +47,15 @@ def test_o_resto_cabe_em_conta_gratis(modelo):
     assert cabe_no_free(modelo) is True
 
 
-@pytest.mark.parametrize("tier,esperado", [(Tier.FREE, 20), (Tier.PRO, 20), (Tier.ULTRA, 10)])
+@pytest.mark.parametrize("tier,esperado", [(Tier.FREE, 12), (Tier.PRO, 12), (Tier.ULTRA, 6)])
 def test_omni_flash_tem_custo_nos_tres_tiers(tier, esperado):
-    # estimativa na faixa do Veo Fast; o numero real sai da reconciliacao
+    # MEDIDO 2026-08-20 no free: 720p / 8s / 9:16 / x1 tirou 12 creditos (50 -> 38)
     assert custo_de(Modelo.OMNI_FLASH, tier) == esperado
 
 
 def test_quatro_imagens_ainda_cabem_no_teto_do_free():
-    # 4 x 2 = 8 contra teto de 50 — cabe, mas o calculo tem que ser explicito
+    # imagem MEDIDA em zero: 4 x 0 = 0 contra teto de 50 — cabe, mas o calculo tem
+    # que ser explicito, porque o dia em que a imagem passar a custar nao avisa
     assert cabe_no_free(Modelo.NANO_BANANA, quantidade=4) is True
 
 

@@ -135,12 +135,14 @@ async def test_abrir_projeto_de_outra_conta_levanta():
 
 async def test_lote_de_quatro_debita_quatro_vezes():
     # o Flow cobra por geracao; o falso precisa cobrar igual, senao o motor passa no
-    # teste com uma contabilidade que o real desmente
+    # teste com uma contabilidade que o real desmente.
+    # Era um lote de IMAGEM ate a medicao de 2026-08-20 poe-la em custo ZERO: com zero,
+    # quatro geracoes e uma debitam o mesmo e o teste passaria sem mecanica nenhuma.
     t = TransporteFalso(saldos={1: 50})
     s = await t.abrir_sessao(conta())
-    await t.gerar(s, Pedido(modo=Modo.IMAGEM, modelo=Modelo.NANO_BANANA, prompt="p",
+    await t.gerar(s, Pedido(modo=Modo.T2V, modelo=Modelo.VEO_LITE, prompt="p",
                             quantidade=4))
-    assert t.saldos[1] == 42
+    assert t.saldos[1] == 10
 
 
 async def test_lote_que_nao_cabe_no_saldo_e_recusado():

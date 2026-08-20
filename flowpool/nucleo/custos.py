@@ -14,13 +14,15 @@ from flowpool.nucleo.tipos import Modelo, Tier
 TETO_DIARIO_FREE = 50
 
 _CUSTO: dict[tuple[Modelo, Tier], int] = {
-    # ESTIMATIVA, a confirmar pela reconciliacao: o Omni Flash e o padrao de video do
-    # Flow e ninguem mediu o custo dele ainda. Usa a faixa do Veo Fast enquanto isso —
-    # errar por alto so reserva credito a mais, e o valor lido corrige na primeira
-    # execucao real.
-    (Modelo.OMNI_FLASH, Tier.FREE): 20,
-    (Modelo.OMNI_FLASH, Tier.PRO): 20,
-    (Modelo.OMNI_FLASH, Tier.ULTRA): 10,
+    # MEDIDO 2026-08-20, conta FREE, 720p / 8s / 9:16 / x1: saldo 50 -> 38.
+    # ATENCAO: o custo do video depende da CONFIGURACAO, nao so do modelo — pelo agente
+    # conversacional, a mesma familia de pedido anunciou 7 e 15 creditos em ajustes
+    # diferentes. Esta tabela e por modelo porque e so uma RESERVA anterior ao
+    # despacho; quem manda e a reconciliacao (`nucleo/credito.py`).
+    (Modelo.OMNI_FLASH, Tier.FREE): 12,
+    (Modelo.OMNI_FLASH, Tier.PRO): 12,
+    (Modelo.OMNI_FLASH, Tier.ULTRA): 6,   # EXTRAPOLADO: Ultra paga metade em Lite/Fast
+    # ESTIMATIVA — nenhum Veo foi medido ainda.
     (Modelo.VEO_LITE, Tier.FREE): 10,
     (Modelo.VEO_LITE, Tier.PRO): 10,
     (Modelo.VEO_LITE, Tier.ULTRA): 5,
@@ -30,9 +32,11 @@ _CUSTO: dict[tuple[Modelo, Tier], int] = {
     (Modelo.VEO_QUALITY, Tier.FREE): 100,
     (Modelo.VEO_QUALITY, Tier.PRO): 100,
     (Modelo.VEO_QUALITY, Tier.ULTRA): 100,
-    (Modelo.NANO_BANANA, Tier.FREE): 2,
-    (Modelo.NANO_BANANA, Tier.PRO): 2,
-    (Modelo.NANO_BANANA, Tier.ULTRA): 2,
+    # MEDIDO 2026-08-20: imagem custa ZERO. Saldo 50 antes e 50 depois, e o Flow nem
+    # pede confirmacao. Desempata a divergencia que o spec carregava (1-2 vs zero).
+    (Modelo.NANO_BANANA, Tier.FREE): 0,
+    (Modelo.NANO_BANANA, Tier.PRO): 0,
+    (Modelo.NANO_BANANA, Tier.ULTRA): 0,
 }
 
 

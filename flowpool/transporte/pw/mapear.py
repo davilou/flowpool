@@ -21,6 +21,8 @@ from pathlib import Path
 
 from playwright.async_api import async_playwright
 
+from flowpool.transporte.pw.dom import sem_segredo
+
 FLOW = "https://labs.google/fx/pt/tools/flow"
 
 # Coletado do DOM ao vivo. Serve de ponto de partida para seletores.py.
@@ -81,7 +83,10 @@ async def main(perfil: str) -> None:
                 print(f"[sonda] {type(e).__name__}: {e}")
                 await asyncio.sleep(5)
                 continue
-            saida.write_text(json.dumps(dados, ensure_ascii=False, indent=2), encoding="utf-8")
+            bruto = json.dumps(dados, ensure_ascii=False, indent=2)
+            # regra 2, aplicada onde doi: sonda.json vai para disco e sobrevive a
+            # sessao. Mascarar aqui e o que impede o vazamento de virar arquivo.
+            saida.write_text(sem_segredo(bruto), encoding="utf-8")
             d = dados.get("dialogo")
             print(f"[{dados['visivel']}] {dados['url']}"
                   f" | botoes={len(dados['botoes'])}"

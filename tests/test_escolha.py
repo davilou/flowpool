@@ -95,28 +95,39 @@ def test_conta_seca_volta_ao_pool_depois_do_prazo():
     assert escolher([seca], Modelo.VEO_FAST, AGORA).id == 1
 
 
-def test_conta_que_paga_uma_imagem_nao_e_escolhida_para_um_lote_de_quatro():
+def test_conta_que_paga_uma_geracao_nao_e_escolhida_para_um_lote_de_quatro():
     # Se so a reserva multiplicasse, o app escolheria esta conta, tentaria gerar quatro,
     # o Flow recusaria, o job voltaria pra fila e a conta seria marcada seca — por um
     # problema que era de calculo, nao de credito.
-    magra = conta(1, Tier.FREE, 2)   # paga exatamente uma imagem
-    assert escolher([magra], Modelo.NANO_BANANA, AGORA) is not None
-    assert escolher([magra], Modelo.NANO_BANANA, AGORA, quantidade=4) is None
+    # O veiculo deixou de ser imagem porque a medicao de 2026-08-20 poe imagem em ZERO:
+    # com custo zero nao existe conta que nao comporte o lote. `escolher` nao conhece
+    # modo, entao qualquer modelo com custo prende a mesma mecanica.
+    magra = conta(1, Tier.FREE, 10)   # paga exatamente uma geracao
+    assert escolher([magra], Modelo.VEO_LITE, AGORA) is not None
+    assert escolher([magra], Modelo.VEO_LITE, AGORA, quantidade=4) is None
+
+
+def test_lote_de_imagem_cabe_em_qualquer_conta_viva():
+    # a consequencia de dominio da medicao: imagem custa zero, entao a escolha de conta
+    # deixa de discriminar por saldo em job de imagem. Vale prender — se um dia a
+    # imagem voltar a custar, este teste cai e a conta magra volta a ser recusada.
+    magra = conta(1, Tier.FREE, 0)
+    assert escolher([magra], Modelo.NANO_BANANA, AGORA, quantidade=4) is not None
 
 
 def test_lote_grande_pula_a_free_e_cai_na_paga():
     # com quantidade 1 a free vence pela regra do credito que expira antes;
     # com quantidade 4 ela nao comporta o total e sai da escolha
-    free = conta(1, Tier.FREE, 6)    # paga tres imagens, nao quatro
+    free = conta(1, Tier.FREE, 30)   # paga tres geracoes, nao quatro
     pro = conta(2, Tier.PRO, 1000)
-    assert escolher([free, pro], Modelo.NANO_BANANA, AGORA).id == 1
-    assert escolher([free, pro], Modelo.NANO_BANANA, AGORA, quantidade=4).id == 2
+    assert escolher([free, pro], Modelo.VEO_LITE, AGORA).id == 1
+    assert escolher([free, pro], Modelo.VEO_LITE, AGORA, quantidade=4).id == 2
 
 
 def test_apta_avalia_o_custo_total_do_lote():
-    c = conta(1, Tier.FREE, 6)
-    assert apta(c, Modelo.NANO_BANANA, AGORA, quantidade=3) is True
-    assert apta(c, Modelo.NANO_BANANA, AGORA, quantidade=4) is False
+    c = conta(1, Tier.FREE, 30)
+    assert apta(c, Modelo.VEO_LITE, AGORA, quantidade=3) is True
+    assert apta(c, Modelo.VEO_LITE, AGORA, quantidade=4) is False
 
 
 def test_omni_flash_cabe_em_conta_gratis():
