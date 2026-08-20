@@ -607,3 +607,135 @@ async def test_pedido_leva_a_duracao_ao_transporte(repo, tmp_path):
     await Orquestrador(repo, t, raiz=tmp_path).passo()
 
     assert [p.duracao for p in vistos] == ["10s"]
+
+
+async def test_conta_recem_cadastrada_com_saldo_zero_nao_trava_a_fila(repo, tmp_path):
+    # O IMPASSE. `Conta.saldo` nasce 0, `apta` exige `custo <= saldo`, e o saldo so era
+    # escrito na reconciliacao — que roda no `finally` de `_executar`, ou seja DEPOIS de
+    # um job. Fechava o ciclo: o saldo so atualiza rodando job, o job so roda se houver
+    # saldo. E nada quebrava: sem erro, sem alerta, o job so ficava pendente para sempre.
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")   # saldo 0, confiavel False
+    jid = repo.criar_job(job_fast())
+
+    orq = Orquestrador(repo, TransporteFalso(saldos={cid: 50}), raiz=tmp_path)
+    for _ in range(3):
+        await orq.passo()
+        if repo.job(jid).estado is EstadoJob.PRONTO:
+            break
+
+    j = repo.job(jid)
+    assert j.estado is EstadoJob.PRONTO, "o job ficou pendente para sempre"
+    assert j.conta_id == cid
+    assert repo.conta(cid).saldo_confiavel is True
+
+
+async def test_motor_semeia_uma_conta_por_passo(repo, tmp_path):
+    # abrir navegador e caro e o motor roda em laco: semear o pool inteiro num passo
+    # so abriria vinte Chromes de uma vez para despachar UM job.
+    a = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    b = repo.criar_conta("b@b.com", Tier.FREE, "p/2")
+    repo.criar_job(job_fast())
+
+    t = TransporteFalso(saldos={a: 50, b: 50})
+    await Orquestrador(repo, t, raiz=tmp_path).passo()
+
+    semeadas = [e for e in repo.eventos() if e["tipo"] == "saldo_semeado"]
+    assert len(semeadas) == 1
+    assert repo.conta(b).saldo == 0 and repo.conta(b).saldo_confiavel is False
+
+
+async def test_semeadura_prefere_a_conta_de_leitura_mais_antiga(repo, tmp_path):
+    # nunca lida vem antes de lida ha muito tempo, que vem antes de lida ha pouco
+    velha = repo.criar_conta("velha@b.com", Tier.FREE, "p/1")
+    nunca = repo.criar_conta("nunca@b.com", Tier.FREE, "p/2")
+    c = repo.conta(velha)
+    c.saldo_lido_em = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    repo.salvar_conta(c)
+    repo.criar_job(job_fast())
+
+    t = TransporteFalso(saldos={velha: 50, nunca: 50})
+    await Orquestrador(repo, t, raiz=tmp_path).passo()
+
+    semeadas = [e["conta_id"] for e in repo.eventos() if e["tipo"] == "saldo_semeado"]
+    assert semeadas == [nunca]
+
+
+async def test_pool_seco_de_verdade_nao_abre_navegador(repo, tmp_path):
+    # o contrapeso da semeadura. Sem ele, um pool legitimamente seco viraria um laco de
+    # abrir e fechar Chrome: conta com saldo lido e confiavel nao precisa ser relida.
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid)
+    c.saldo = 5                     # nao paga um Fast
+    c.saldo_confiavel = True
+    c.saldo_lido_em = datetime.now(timezone.utc)
+    repo.salvar_conta(c)
+    jid = repo.criar_job(job_fast())
+
+    t = TransporteFalso(saldos={cid: 5})
+    await Orquestrador(repo, t, raiz=tmp_path).passo()
+
+    assert t.aberturas == 0
+    assert repo.job(jid).estado is EstadoJob.PENDENTE
+    assert [e["tipo"] for e in repo.eventos() if e["tipo"] == "saldo_semeado"] == []
+
+
+async def test_conta_seca_nao_e_relida_antes_do_prazo(repo, tmp_path):
+    # `seca_ate` no futuro significa que o Flow ja recusou gerar apesar do saldo. Reler
+    # o saldo nao muda isso, e relê-lo a cada volta e o mesmo laco quente de sempre.
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid)
+    c.saldo = 50
+    c.saldo_confiavel = False
+    c.seca_ate = datetime.now(timezone.utc) + timedelta(hours=1)
+    repo.salvar_conta(c)
+    repo.criar_job(job_fast())
+
+    t = TransporteFalso(saldos={cid: 50})
+    await Orquestrador(repo, t, raiz=tmp_path).passo()
+
+    assert t.aberturas == 0
+
+
+async def test_semeadura_com_sessao_morta_expira_a_conta_e_nao_trava_o_laco(repo, tmp_path):
+    # a leitura falhou; o passo tem que terminar mesmo assim, com a conta marcada para
+    # quem olhar o painel entender que ali falta uma pessoa
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    jid = repo.criar_job(job_fast())
+
+    t = TransporteFalso(saldos={cid: 50}, mortas={cid})
+    assert await Orquestrador(repo, t, raiz=tmp_path).passo() is True
+
+    assert repo.conta(cid).saude is SaudeSessao.EXPIRADA
+    j = repo.job(jid)
+    assert j.estado is EstadoJob.PENDENTE
+    assert j.tentativas == 0          # nao foi o job que falhou
+    tipos = [e["tipo"] for e in repo.eventos()]
+    assert "saldo_nao_semeado" in tipos
+
+
+async def test_semeadura_registra_o_que_leu(repo, tmp_path):
+    # quem olhar o banco depois precisa entender por que um navegador abriu sem job
+    # associado — e conferir que a abertura nao gastou credito nenhum
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    repo.criar_job(job_fast())
+
+    t = TransporteFalso(saldos={cid: 50})
+    await Orquestrador(repo, t, raiz=tmp_path).passo()
+
+    ev = next(e for e in repo.eventos() if e["tipo"] == "saldo_semeado")
+    assert ev["conta_id"] == cid
+    assert ev["job_id"] is None
+    assert json.loads(ev["payload"]) == {"antes": 0, "lido": 50}
+
+
+async def test_semear_saldo_sozinho_nao_gera_nada(repo, tmp_path):
+    # ler saldo e abrir o menu do avatar: nao ha geracao, logo nao ha credito gasto
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    t = TransporteFalso(saldos={cid: 50})
+    orq = Orquestrador(repo, t, raiz=tmp_path)
+
+    assert await orq.semear_saldo(repo.conta(cid)) is True
+
+    assert repo.conta(cid).saldo == 50
+    assert t.geracoes == {}
+    assert t.saldos[cid] == 50

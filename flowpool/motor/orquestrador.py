@@ -89,6 +89,11 @@ class Orquestrador:
 
             try:
                 conta = self._conta_para(job, agora)
+                if conta is None and await self._semear_uma_conta(agora):
+                    # A leitura pode ter revelado credito que a escolha nao enxergava.
+                    # `agora` continua o mesmo de proposito: o relogio do passo nao
+                    # anda no meio dele, e a semeadura demora segundos, nao horas.
+                    conta = self._conta_para(job, agora)
             except Exception as e:
                 # `reivindicar` ja marcou o job `rodando`. Deixar a excecao subir
                 # daqui o deixaria travado nesse estado ate o proximo boot — e
@@ -126,6 +131,95 @@ class Orquestrador:
                                              job.quantidade, job.duracao):
                 return anterior
         return escolher(contas, job.modelo, agora, job.quantidade, job.duracao)
+
+    async def _semear_uma_conta(self, agora: datetime) -> bool:
+        """Le o saldo de UMA conta que ainda nao tem numero em que confiar.
+
+        Existe por causa de um impasse fechado: `Conta.saldo` nasce 0, `apta` exige
+        `custo <= saldo`, e o saldo so era escrito na reconciliacao — que roda depois
+        de um job. O saldo so atualizava rodando job, e o job so rodava se houvesse
+        saldo. Nada quebrava e nada aparecia: o job ficava pendente para sempre.
+
+        Ler o saldo no cadastro resolve o caso comum, mas nao todos: banco recriado,
+        conta inserida por fora, reset diario que ninguem observou — cada um reintroduz
+        o impasse numa variante. Por isso o motor tambem se cura sozinho.
+
+        UMA conta por passo, nao todas: abrir navegador e caro e o motor roda em laco.
+        Isto nao vira laco quente porque a semeadura so acontece com um job JA
+        reivindicado, e o job que nao acha conta sai da fila por `ESPERA_RESET`.
+
+        Devolve True quando alguma leitura entrou no banco — e so entao vale reescolher.
+        """
+        alvo = self._proxima_a_semear(self.repo.contas(), agora)
+        if alvo is None:
+            return False
+        return await self.semear_saldo(alvo)
+
+    @staticmethod
+    def _proxima_a_semear(contas: list[Conta], agora: datetime) -> Conta | None:
+        """Conta cujo saldo mais precisa ser lido, ou None se nenhuma precisa.
+
+        Fica de fora quem ja tem saldo confiavel: sem esse corte, um pool
+        legitimamente seco viraria um laco de abrir e fechar navegador a cada volta.
+        Fica de fora tambem a conta seca com prazo em aberto — o Flow ja recusou gerar
+        nela apesar do saldo, e reler o numero nao muda isso ate o reset.
+        """
+        candidatas = [
+            c for c in contas
+            if c.ativa and c.saude == SaudeSessao.VIVA and not c.saldo_confiavel
+            and (c.seca_ate is None or c.seca_ate <= agora)
+        ]
+        if not candidatas:
+            return None
+        # nunca lida primeiro, depois a de leitura mais antiga; o id so desempata
+        return min(candidatas, key=lambda c: (
+            c.saldo_lido_em is not None,
+            c.saldo_lido_em.timestamp() if c.saldo_lido_em else 0.0,
+            c.id,
+        ))
+
+    async def semear_saldo(self, conta: Conta) -> bool:
+        """Abre sessao SO para ler o saldo e reconciliar. Devolve True se leu.
+
+        Nao gasta credito: ler saldo e abrir o menu do avatar, nao gerar nada.
+
+        Registra evento sempre, nos dois desfechos. Uma abertura de navegador sem job
+        associado precisa ter explicacao no banco, senao quem for auditar depois vai
+        procurar a geracao que a pagou e nao vai achar.
+
+        Falha nao propaga: quem chama esta no meio de um passo do motor ou de uma rota
+        de cadastro, e nos dois lugares travar seria pior do que ficar sem o numero.
+        """
+        sessao = None
+        try:
+            sessao = await self.transporte.abrir_sessao(conta)
+            lido = await self.transporte.saldo(sessao)
+            antes = conta.saldo
+            reconciliar(conta, lido, datetime.now(timezone.utc))
+            self.repo.salvar_conta(conta)
+            self.repo.registrar_evento(None, conta.id, "saldo_semeado",
+                                       json.dumps({"antes": antes, "lido": lido}))
+            return True
+        except SessaoMorta as e:
+            # campo a campo, como no resto do motor: `salvar_conta` grava a linha
+            # inteira a partir de uma copia velha e ressuscitaria a sessao
+            conta.saude = SaudeSessao.EXPIRADA
+            self.repo.marcar_sessao(conta.id, SaudeSessao.EXPIRADA)
+            self.repo.registrar_evento(None, conta.id, "saldo_nao_semeado",
+                                       json.dumps({"erro": str(e), "sessao": "morta"}))
+            return False
+        except Exception as e:
+            self.repo.registrar_evento(
+                None, conta.id, "saldo_nao_semeado",
+                json.dumps({"erro": f"{type(e).__name__}: {e}"}))
+            return False
+        finally:
+            if sessao is not None:
+                try:
+                    await self.transporte.fechar(sessao)
+                except Exception as e:
+                    self.repo.registrar_evento(None, conta.id, "fechar_falhou",
+                                               json.dumps({"erro": str(e)}))
 
     async def _executar(self, job: Job, conta: Conta) -> None:
         # retomada: a geracao ja existe e e da mesma conta. Gerar de novo pagaria duas

@@ -37,6 +37,9 @@ class TransporteFalso:
         self.passos_rodando = passos_rodando
         self.nunca_termina = nunca_termina or set()
         self.morre_ao_gerar = morre_ao_gerar or set()
+        # quantas sessoes foram abertas. E o contador que denuncia navegador aberto
+        # sem necessidade — o laco de semeadura de saldo num pool legitimamente seco
+        self.aberturas = 0
         self.geracoes: dict[str, tuple[int, Estado]] = {}
         self.consultas: dict[str, int] = {}
         self._seq = 0
@@ -52,6 +55,7 @@ class TransporteFalso:
                 self._novo_projeto(conta_id, nome)
 
     async def abrir_sessao(self, conta: Conta) -> Sessao:
+        self.aberturas += 1
         if conta.id in self.mortas:
             raise SessaoMorta(f"sessao da conta {conta.email} expirou")
         return Sessao(conta=conta)

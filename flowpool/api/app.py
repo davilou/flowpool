@@ -189,6 +189,18 @@ def criar_app(repo: Repo, transporte: FlowTransport, raiz: Path | str,
         # numa coluna exigiria migracao para uma informacao que ninguem consulta.
         repo.registrar_evento(None, c.id, "sessao_validada",
                               json.dumps({"expira_em": expira_em.isoformat()}))
+        # A conta NASCE COM O SALDO LIDO. Sem isto o pool nasce morto: `Conta.saldo`
+        # comeca em 0, `escolher` exige `custo <= saldo`, e o saldo so era escrito na
+        # reconciliacao — que roda depois de um job. O saldo so atualizava rodando job,
+        # e o job so rodava se houvesse saldo; o job ficava pendente para sempre, sem
+        # erro e sem alerta.
+        #
+        # Custa uma abertura de navegador a mais, uma vez por conta, logo depois de a
+        # sessao ja ter sido provada boa. Falhar aqui NAO desfaz o cadastro: a sessao e
+        # a parte cara (login manual, pessoa na frente), o saldo e recuperavel — pelo
+        # motor, pelo botao do painel ou pela proxima revalidacao. A conta entra com
+        # `saldo_confiavel=False`, que e o `~` do painel.
+        await orq.semear_saldo(c)
         return _resposta_conta(c)
 
     @app.post("/contas/{id_}/revalidar", response_model=RespostaConta)
@@ -206,6 +218,29 @@ def criar_app(repo: Repo, transporte: FlowTransport, raiz: Path | str,
         repo.salvar_conta(c)
         repo.registrar_evento(None, c.id, "sessao_revalidada",
                               json.dumps({"expira_em": expira_em.isoformat()}))
+        # Pelo mesmo motivo do cadastro, e com um agravante: a sessao caiu ha horas ou
+        # dias, e o saldo guardado envelheceu junto — conta gratuita reseta todo dia.
+        await orq.semear_saldo(c)
+        return _resposta_conta(c)
+
+    @app.post("/contas/{id_}/saldo", response_model=RespostaConta)
+    async def reler_saldo(id_: int) -> RespostaConta:
+        """Rele o saldo daquela conta no Flow, agora.
+
+        O motor ja rele sozinho quando precisa despachar e nao acha conta apta; este
+        botao e para quem quer conferir sem esperar a fila andar. Abre navegador e nao
+        gasta credito: ler saldo e abrir o menu do avatar.
+        """
+        c = repo.conta(id_)
+        if c is None:
+            raise HTTPException(404, "conta nao existe")
+        if not await orq.semear_saldo(c):
+            # 409 em vez de 200 com o numero velho: o botao existe justamente para
+            # conferir, e devolver o valor antigo como se fosse fresco seria pior do
+            # que nao ter botao. O evento `saldo_nao_semeado` guarda o motivo real.
+            raise HTTPException(
+                409, f"nao deu para ler o saldo de {c.email}; "
+                     "a sessao pode ter caido — revalide a conta")
         return _resposta_conta(c)
 
     @app.patch("/contas/{id_}", response_model=RespostaConta)

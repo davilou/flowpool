@@ -1,9 +1,14 @@
+from datetime import datetime, timezone
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
 from flowpool.api.app import criar_app
 from flowpool.dados.repo import Repo
-from flowpool.nucleo.tipos import Modelo, Tier
+from flowpool.nucleo.escolha import escolher
+from flowpool.nucleo.tipos import Modelo, SaudeSessao, Tier
+from flowpool.transporte.base import ErroTransporte
 from flowpool.transporte.falso import TransporteFalso
 
 
@@ -377,3 +382,112 @@ def test_css_e_js_saem_com_o_tipo_certo(cliente):
     c, _ = cliente
     assert c.get("/painel.css").headers["content-type"].startswith("text/css")
     assert c.get("/painel.js").headers["content-type"].startswith("text/javascript")
+
+
+# ---------- saldo lido no cadastro, na revalidacao e sob demanda ----------
+#
+# Sem isto o pool nasce morto: a conta entra com saldo 0, `escolher` exige
+# `custo <= saldo` e nenhum job roda — sem erro, sem alerta, para sempre.
+
+class TransporteSemContador(TransporteFalso):
+    """Sessao viva, leitura de saldo quebrada. E o caso que nao pode recusar cadastro."""
+
+    async def saldo(self, s):
+        raise ErroTransporte("nao achei o contador de credito no menu do avatar")
+
+
+def _fingir_cadastro(monkeypatch):
+    """Troca o cadastro por Chrome real por um que so devolve perfil e validade.
+
+    `cadastrar` sobe um `chrome.exe` de verdade e espera uma pessoa logar. O que estas
+    rotas precisam provar e o que acontece DEPOIS disso.
+    """
+    async def falso(raiz_perfis, email, proxy=None):
+        return Path(raiz_perfis) / email, datetime(2026, 8, 22, tzinfo=timezone.utc)
+
+    monkeypatch.setattr("flowpool.api.app.cadastrar", falso)
+
+
+def _cliente_com(tmp_path, monkeypatch, transporte):
+    repo = Repo(tmp_path / "t.db")
+    repo.criar_esquema()
+    _fingir_cadastro(monkeypatch)
+    app = criar_app(repo=repo, transporte=transporte, raiz=tmp_path)
+    return TestClient(app), repo
+
+
+def test_cadastro_devolve_o_saldo_lido_do_flow(tmp_path, monkeypatch):
+    # a primeira conta do banco recebe id 1 — e e ela que o transporte falso conhece
+    c, repo = _cliente_com(tmp_path, monkeypatch, TransporteFalso(saldos={1: 50}))
+    r = c.post("/contas", json={"email": "a@b.com", "tier": "free"})
+
+    assert r.status_code == 201
+    assert r.json()["saldo"] == 50
+    assert r.json()["saldo_confiavel"] is True
+    assert repo.conta(1).saldo == 50
+
+
+def test_conta_cadastrada_ja_pode_rodar_job(tmp_path, monkeypatch):
+    # o impasse visto da porta de entrada: cadastrar e enfileirar tem que bastar
+    c, repo = _cliente_com(tmp_path, monkeypatch, TransporteFalso(saldos={1: 50}))
+    c.post("/contas", json={"email": "a@b.com", "tier": "free"})
+
+    conta = repo.conta(1)
+    assert escolher([conta], Modelo.VEO_FAST, datetime.now(timezone.utc),
+                    duracao="8s") is conta
+
+
+def test_cadastro_sobrevive_a_leitura_de_saldo_quebrada(tmp_path, monkeypatch):
+    # a sessao e a parte cara (login manual); o saldo e recuperavel. Recusar o cadastro
+    # por causa do saldo jogaria fora o trabalho que so uma pessoa consegue fazer.
+    c, repo = _cliente_com(tmp_path, monkeypatch, TransporteSemContador(saldos={1: 50}))
+    r = c.post("/contas", json={"email": "a@b.com", "tier": "free"})
+
+    assert r.status_code == 201
+    assert r.json()["saldo"] == 0
+    assert r.json()["saldo_confiavel"] is False
+    assert repo.conta(1) is not None
+    assert "saldo_nao_semeado" in [e["tipo"] for e in repo.eventos()]
+
+
+def test_revalidar_relê_o_saldo(tmp_path, monkeypatch):
+    # sessao caida e ~48h sem leitura: o saldo guardado nao vale mais nada
+    c, repo = _cliente_com(tmp_path, monkeypatch, TransporteFalso(saldos={1: 42}))
+    cid = repo.criar_conta("a@b.com", Tier.FREE, str(tmp_path / "p" / "a@b.com"))
+    con = repo.conta(cid); con.saude = SaudeSessao.EXPIRADA; repo.salvar_conta(con)
+
+    r = c.post(f"/contas/{cid}/revalidar")
+
+    assert r.status_code == 200
+    assert r.json()["saldo"] == 42
+    assert r.json()["saude"] == "viva"
+    assert repo.conta(cid).saldo == 42
+
+
+def test_rota_de_saldo_atualiza_a_conta_sob_demanda(tmp_path, monkeypatch):
+    c, repo = _cliente_com(tmp_path, monkeypatch, TransporteFalso(saldos={1: 31}))
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+
+    r = c.post(f"/contas/{cid}/saldo")
+
+    assert r.status_code == 200
+    assert r.json()["saldo"] == 31
+    assert repo.conta(cid).saldo_confiavel is True
+    assert "saldo_semeado" in [e["tipo"] for e in repo.eventos()]
+
+
+def test_rota_de_saldo_em_conta_inexistente_da_404(tmp_path, monkeypatch):
+    c, _ = _cliente_com(tmp_path, monkeypatch, TransporteFalso(saldos={}))
+    assert c.post("/contas/999/saldo").status_code == 404
+
+
+def test_rota_de_saldo_que_nao_conseguiu_ler_avisa_em_vez_de_mentir(tmp_path, monkeypatch):
+    # 409 e nao 200 com o numero velho: o botao existe justamente para conferir, e
+    # devolver o valor antigo como se fosse fresco seria pior do que nao ter botao
+    c, repo = _cliente_com(tmp_path, monkeypatch, TransporteSemContador(saldos={1: 50}))
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+
+    r = c.post(f"/contas/{cid}/saldo")
+
+    assert r.status_code == 409
+    assert "a@b.com" in r.json()["detail"]
