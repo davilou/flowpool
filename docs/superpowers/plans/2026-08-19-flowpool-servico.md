@@ -140,6 +140,15 @@ class ModeloSemCusto(Exception):
     """Modelo/tier sem custo cadastrado. Erro de configuracao, nao de execucao."""
 
 
+class DuracaoSemCusto(Exception):
+    """Duracao sem custo cadastrado. Irma de `ModeloSemCusto`, e pelo mesmo motivo.
+
+    Chutar um preco para uma duracao que a tabela nao conhece mandaria reservar um
+    numero inventado, e o erro so reapareceria mais tarde como conta seca — longe da
+    causa. Erro de configuracao, nao de execucao.
+    """
+
+
 class ProxyInvalido(Exception):
     """A conta tem proxy configurado, mas a URL nao da para usar.
 
@@ -160,8 +169,8 @@ Mora em `nucleo/` porque as camadas de cima dependem de `nucleo`, nunca o contr�
 from datetime import datetime, timezone
 
 from flowpool.nucleo.tipos import (
-    PROPORCOES, Conta, EstadoJob, Job, Modelo, Modo, Projeto, SaudeSessao, Tier,
-    quantidade_maxima,
+    DURACAO_PADRAO, DURACOES, PROPORCOES, Conta, EstadoJob, Job, Modelo, Modo, Projeto,
+    SaudeSessao, Tier, duracao_valida, quantidade_maxima,
 )
 
 
@@ -272,6 +281,40 @@ def test_conta_nasce_sem_proxy():
     assert c.proxy is None
     c.proxy = "http://1.2.3.4:8080"
     assert c.proxy == "http://1.2.3.4:8080"
+
+
+def test_job_nasce_com_clipe_de_quatro_segundos():
+    # 4s custa 7 creditos e 8s custa 12: fixar 8s desperdicava 70% do credito por
+    # video. Numa conta gratuita de 50/dia isso e a diferenca entre 4 e 7 videos.
+    j = Job(id=1, modo=Modo.T2V, modelo=Modelo.OMNI_FLASH, prompt="p", destino="x", nome="c1")
+    assert j.duracao == "4s"
+
+
+def test_duracao_explicita_sobrescreve_o_padrao():
+    j = Job(id=1, modo=Modo.T2V, modelo=Modelo.OMNI_FLASH, prompt="p", destino="x",
+            nome="c1", duracao="10s")
+    assert j.duracao == "10s"
+
+
+def test_duracoes_aceitas_sao_as_quatro_do_painel():
+    assert DURACOES == ("4s", "6s", "8s", "10s")
+    assert DURACAO_PADRAO == "4s"
+
+
+def test_imagem_nao_aceita_duracao():
+    # nao existe grupo de duracao no painel em modo imagem: pedir "4s" ali nao teria
+    # onde ser clicado. `None` e o unico valor coerente.
+    assert duracao_valida(Modo.IMAGEM, None) is True
+    for d in DURACOES:
+        assert duracao_valida(Modo.IMAGEM, d) is False
+
+
+def test_video_aceita_so_as_quatro_duracoes():
+    for modo in (Modo.T2V, Modo.FRAMES2V, Modo.INGREDIENTS2V):
+        for d in DURACOES:
+            assert duracao_valida(modo, d) is True
+        assert duracao_valida(modo, "5s") is False
+        assert duracao_valida(modo, None) is False
 ```
 
 - [ ] **Step 2: Rodar e ver falhar**
@@ -340,6 +383,33 @@ def quantidade_maxima(modo: Modo) -> int:
     return MAX_QUANTIDADE_IMAGEM if modo is Modo.IMAGEM else 1
 
 
+# As quatro do grupo de duracao do chip, medidas ao vivo. Imagem nao tem grupo de
+# duracao: nao existe botao onde clicar.
+DURACOES = ("4s", "6s", "8s", "10s")
+
+# Padrao 4s, e nao os 8s que o transporte fixava enquanto o campo nao existia. Sao os
+# dois motivos:
+#   1. PRECO. No Omni Flash, 4s custa 7 creditos e 8s custa 12 — fixar 8s desperdicava
+#      70% do credito em todo video. Numa conta gratuita de 50 creditos por dia, e a
+#      diferenca entre 4 e 7 videos.
+#   2. USO. O pipeline do Davi monta os clipes em ~5s; o clipe curto e o caso comum,
+#      nao a excecao.
+# Continua sendo escolha por pedido — o padrao so precisa servir ao caso comum.
+DURACAO_PADRAO = "4s"
+
+
+def duracao_valida(modo: Modo, duracao: str | None) -> bool:
+    """Se aquele modo aceita aquela duracao.
+
+    `None` significa "sem duracao", e e o UNICO valor coerente em imagem: o painel do
+    Flow nao oferece o grupo de duracao em modo imagem, entao "4s" ali nao teria onde
+    ser clicado. Nos tres modos de video valem so os quatro valores de `DURACOES`.
+    """
+    if modo is Modo.IMAGEM:
+        return duracao is None
+    return duracao in DURACOES
+
+
 class EstadoJob(str, Enum):
     PENDENTE = "pendente"
     RODANDO = "rodando"
@@ -393,6 +463,12 @@ class Job:
     # Saidas por geracao. MULTIPLICA O CUSTO: quatro imagens custam quatro vezes uma,
     # e por isso a quantidade atravessa `escolher` e `reservar`, nao so a reserva.
     quantidade: int = 1
+    # Tamanho do clipe, um dos `DURACOES`. MUDA O CUSTO — 4s custa 7 creditos e 8s
+    # custa 12 no Omni Flash —, e por isso atravessa `escolher` e `reservar` pelo mesmo
+    # caminho da quantidade. Em modo imagem o campo fica com o padrao e NAO significa
+    # nada: nao ha grupo de duracao no painel, o transporte nao o aplica e o custo o
+    # ignora. Quem impede o usuario de pedir duracao em imagem e a API.
+    duracao: str = DURACAO_PADRAO
     prioridade: int = 0
     estado: EstadoJob = EstadoJob.PENDENTE
     conta_id: int | None = None
@@ -803,7 +879,7 @@ função pura de texto e ganha teste sem subir servidor. Quem a consome é a Tas
 - [ ] **Step 7: Rodar e ver passar**
 
 Run: `.venv/Scripts/pytest tests/test_tipos.py tests/test_proxy.py -q`
-Expected: `38 passed` (15 tipos + 23 proxy)
+Expected: `43 passed` (20 tipos + 23 proxy)
 
 - [ ] **Step 8: Commit**
 
@@ -821,11 +897,13 @@ git commit -m "feat: tipos do dominio do flowpool"
 - Create: `flowpool/nucleo/custos.py`
 - Test: `tests/test_custos.py`
 
-O custo depende do par (modelo, tier): conta Ultra paga menos por Lite e Fast. O teto diário do free é o que impede Quality de rodar em conta grátis.
+O custo depende de (modelo, tier, duração): conta Ultra paga menos por Lite e Fast, e clipe curto custa menos que clipe longo. O teto diário do free é o que impede Quality de rodar em conta grátis.
 
-> **Nota de revisão (2026-08-20).** Este task já foi executado com os números **estimados**. A medição ao vivo desempatou duas linhas: **imagem custa 0** (saldo 50 → 50, e o Flow nem pede confirmação) e **Omni Flash custa 12** em conta grátis a 720p/8s/9:16/x1 (saldo 50 → 38). A tabela abaixo já está corrigida; a correção do código e dos valores esperados em `tests/test_custos.py` acontece no **Step 6 da Task 11**, junto da medição que a justifica. A **contagem de casos de teste não muda** — só os valores.
+> **Nota de revisão (2026-08-20).** Este task já foi executado com os números **estimados**. A medição ao vivo desempatou duas linhas: **imagem custa 0** (saldo 50 → 50, e o Flow nem pede confirmação) e **Omni Flash custa 12** em conta grátis a 720p/8s/9:16/x1 (saldo 50 → 38). A correção do código chegou no **Step 6 da Task 11**, junto da medição que a justifica; naquele momento a **contagem de casos não mudou** — só os valores. Os listings abaixo, tanto o do código quanto o dos testes, estão na forma **final**, já com a duração da Task 15.
 >
-> Uma limitação que a medição expôs e que esta tabela **não** modela: o custo de vídeo depende da **configuração** (duração, proporção), não só do modelo — pelo agente conversacional, a mesma família de pedido anunciou 7 e 15 créditos em ajustes diferentes. Modelar isso exigiria `duracao` no domínio, o que é um task próprio. Enquanto não for, a tabela continua sendo o que sempre foi: uma **reserva** anterior ao despacho, corrigida pela reconciliação.
+> **Nota de revisão 2 (2026-08-20) — duração.** A limitação que a medição expôs (o custo de vídeo depende da **configuração**, não só do modelo) deixou de ser limitação: a **Task 15** acrescentou `duracao` ao domínio, e a tabela de vídeo passou a ser por **(modelo, tier, duração)**. O listing abaixo já está na forma final. Os dois pontos conhecidos são `8s = 12` (MEDIDO por saldo, 50 → 38) e `4s = 7` (ANUNCIADO pelo agente na confirmação); 6s, 10s e os três Veo são **extrapolados** por proporção. Continua valendo o de sempre: a tabela é **reserva** anterior ao despacho, e a reconciliação corrige.
+>
+> O que isso muda no contrato: `custo_de(modelo, tier)` **sem duração** passa a valer o custo do clipe **padrão (4s)**, não mais o de 8s. Os testes que conferem número de crédito dizem agora, explicitamente, de qual clipe falam.
 
 `custo_de` recusa par desconhecido com `ModeloSemCusto` em vez de deixar vazar um `KeyError`. Motivo: `custo_de` roda dentro de `apta()`, que roda para CADA conta dentro de `escolher()` — um `KeyError` cru não derruba um job, derruba a avaliação do pool inteiro e trava a fila. E o spec já promete acomodar um modelo novo (Gemini Omni) sem migração, então o dia em que alguém acrescenta um modelo e esquece o custo vai chegar. `ModeloSemCusto` vem de `flowpool/nucleo/erros.py`, criado no Step 0 da Task 1.
 
@@ -837,7 +915,12 @@ O custo depende do par (modelo, tier): conta Ultra paga menos por Lite e Fast. O
 import pytest
 
 from flowpool.nucleo.custos import TETO_DIARIO_FREE, cabe_no_free, custo_de
-from flowpool.nucleo.tipos import Modelo, Tier
+from flowpool.nucleo.erros import DuracaoSemCusto
+from flowpool.nucleo.tipos import DURACAO_PADRAO, DURACOES, Modelo, Tier
+
+# Os quatro modelos que tem duracao. Imagem nao entra: nao ha grupo de duracao no
+# painel do Flow em modo imagem.
+VIDEO = [Modelo.OMNI_FLASH, Modelo.VEO_LITE, Modelo.VEO_FAST, Modelo.VEO_QUALITY]
 
 
 def test_teto_diario_do_free():
@@ -856,13 +939,17 @@ def test_teto_diario_do_free():
         (Modelo.VEO_QUALITY, Tier.FREE, 100),
         (Modelo.VEO_QUALITY, Tier.PRO, 100),
         (Modelo.VEO_QUALITY, Tier.ULTRA, 100),
-        # MEDIDO: imagem sai de graca (saldo 50 -> 50)
-        (Modelo.NANO_BANANA, Tier.FREE, 0),
-        (Modelo.NANO_BANANA, Tier.ULTRA, 0),
     ],
 )
-def test_custo_por_modelo_e_tier(modelo, tier, esperado):
-    assert custo_de(modelo, tier) == esperado
+def test_custo_de_video_por_modelo_e_tier_em_oito_segundos(modelo, tier, esperado):
+    # 8s e a duracao de referencia da tabela: e nela que esta o unico ponto MEDIDO
+    # (Omni Flash, 12). Estes tres Veo continuam sendo ESTIMATIVA.
+    assert custo_de(modelo, tier, "8s") == esperado
+
+
+@pytest.mark.parametrize("tier", [Tier.FREE, Tier.PRO, Tier.ULTRA])
+def test_imagem_custa_zero_em_qualquer_tier(tier):
+    assert custo_de(Modelo.NANO_BANANA, tier) == 0
 
 
 def test_tabela_cobre_todos_os_pares():
@@ -872,8 +959,17 @@ def test_tabela_cobre_todos_os_pares():
             assert isinstance(custo_de(m, t), int)
 
 
+def test_tabela_cobre_todas_as_duracoes_dos_modelos_de_video():
+    # duracao sem custo cadastrado tem o mesmo efeito de modelo sem custo: o job morre
+    # na escolha de conta, nao na geracao
+    for m in VIDEO:
+        for t in Tier:
+            for d in DURACOES:
+                assert isinstance(custo_de(m, t, d), int)
+
+
 def test_quality_nao_cabe_em_conta_gratis():
-    # 100 creditos contra teto diario de 50 — nunca cabe
+    # 59 creditos ja no clipe mais curto, contra teto diario de 50 — nunca cabe
     assert cabe_no_free(Modelo.VEO_QUALITY) is False
 
 
@@ -884,24 +980,79 @@ def test_o_resto_cabe_em_conta_gratis(modelo):
     assert cabe_no_free(modelo) is True
 
 
-@pytest.mark.parametrize("tier,esperado", [(Tier.FREE, 12), (Tier.PRO, 12), (Tier.ULTRA, 6)])
-def test_omni_flash_tem_custo_nos_tres_tiers(tier, esperado):
-    # FREE e PRO sao MEDIDOS (50 -> 38 em 720p/8s/9:16/x1); ULTRA e extrapolado da
-    # razao de Lite e Fast. O numero verdadeiro de cada configuracao sai da
-    # reconciliacao — esta tabela e reserva, nao preco de tabela.
-    assert custo_de(Modelo.OMNI_FLASH, tier) == esperado
+# --- custo por duracao ---
 
+def test_omni_flash_de_oito_segundos_custa_doze():
+    # MEDIDO 2026-08-20, conta FREE, 720p / 8s / 9:16 / x1: saldo 50 -> 38
+    assert custo_de(Modelo.OMNI_FLASH, Tier.FREE, "8s") == 12
+    assert custo_de(Modelo.OMNI_FLASH, Tier.PRO, "8s") == 12
+    assert custo_de(Modelo.OMNI_FLASH, Tier.ULTRA, "8s") == 6
+
+
+def test_omni_flash_de_quatro_segundos_custa_sete():
+    # ANUNCIADO pelo agente conversacional do Flow na confirmacao do pedido. NAO foi
+    # medido por saldo, ao contrario dos 12 do clipe de 8s.
+    assert custo_de(Modelo.OMNI_FLASH, Tier.FREE, "4s") == 7
+    assert custo_de(Modelo.OMNI_FLASH, Tier.PRO, "4s") == 7
+
+
+def test_quatro_segundos_custa_menos_que_oito_em_todo_modelo_de_video():
+    # e o numero que justifica a mudanca inteira: fixar 8s pagava a mais em todo job
+    for m in VIDEO:
+        for t in Tier:
+            assert custo_de(m, t, "4s") < custo_de(m, t, "8s")
+
+
+def test_custo_nunca_cai_quando_a_duracao_cresce():
+    # nao da para exigir crescimento ESTRITO: nos tiers baratos o arredondamento
+    # empata dois degraus vizinhos (Veo Lite ultra: 3, 5, 5, 7)
+    for m in VIDEO:
+        for t in Tier:
+            valores = [custo_de(m, t, d) for d in DURACOES]
+            assert valores == sorted(valores)
+
+
+def test_duracao_omitida_vale_o_padrao_do_dominio():
+    # o default nao e o 8s da tabela: e o 4s que todo job nasce pedindo. Um default
+    # diferente do padrao do dominio faria a reserva de um job comum sair errada.
+    assert DURACAO_PADRAO == "4s"
+    assert custo_de(Modelo.OMNI_FLASH, Tier.FREE) == 7
+    assert custo_de(Modelo.OMNI_FLASH, Tier.FREE) == custo_de(
+        Modelo.OMNI_FLASH, Tier.FREE, DURACAO_PADRAO)
+
+
+def test_imagem_ignora_a_duracao():
+    # imagem nao tem duracao. O parametro existe para as chamadas de video; passa-lo
+    # numa de imagem nao pode mudar preco nenhum, hoje que e zero nem no dia em que
+    # deixar de ser.
+    for d in DURACOES:
+        assert custo_de(Modelo.NANO_BANANA, Tier.FREE, d) == 0
+
+
+def test_duracao_fora_da_lista_e_erro_de_configuracao():
+    # mesma familia de `ModeloSemCusto`: chutar um preco para "5s" mandaria reservar
+    # um numero inventado, e o erro so apareceria como conta seca depois
+    with pytest.raises(DuracaoSemCusto):
+        custo_de(Modelo.OMNI_FLASH, Tier.FREE, "5s")
+
+
+# --- teto do free ---
 
 def test_quatro_imagens_ainda_cabem_no_teto_do_free():
-    # 4 x 0 = 0 contra teto de 50. O caso continua valendo justamente porque a
-    # multiplicacao tem que ser explicita: se o custo da imagem deixar de ser zero,
-    # e este teste que precisa mudar junto — nao o comportamento em producao.
+    # imagem MEDIDA em zero: 4 x 0 = 0 contra teto de 50 — cabe, mas o calculo tem
+    # que ser explicito, porque o dia em que a imagem passar a custar nao avisa
     assert cabe_no_free(Modelo.NANO_BANANA, quantidade=4) is True
 
 
 def test_lote_que_estoura_o_teto_diario_nao_cabe_no_free():
-    # 3 x 20 = 60 contra teto de 50
-    assert cabe_no_free(Modelo.VEO_FAST, quantidade=3) is False
+    # 3 x 20 = 60 contra teto de 50, no clipe de 8s
+    assert cabe_no_free(Modelo.VEO_FAST, quantidade=3, duracao="8s") is False
+
+
+def test_o_mesmo_lote_cabe_no_free_quando_o_clipe_e_de_quatro_segundos():
+    # 3 x 12 = 36 contra os mesmos 50. A duracao tem que entrar aqui tambem, senao o
+    # teto do free recusaria um lote que o Flow aceitaria.
+    assert cabe_no_free(Modelo.VEO_FAST, quantidade=3, duracao="4s") is True
 ```
 
 - [ ] **Step 2: Rodar e ver falhar**
@@ -914,30 +1065,34 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'flowpool.nucleo.custos
 `flowpool/nucleo/custos.py`:
 
 ```python
-"""Custo em creditos por (modelo, tier), e o teto diario da conta gratuita.
+"""Custo em creditos por (modelo, tier, duracao), e o teto diario da conta gratuita.
 
-Duas linhas sao MEDIDAS (2026-08-20, conta gratuita, ao vivo no Flow); o resto e
-ESTIMATIVA vinda do suporte do Flow e de medicao publica. Cada entrada diz qual e.
+Os numeros vem do suporte do Flow, de medicao publica e de duas medicoes proprias
+(ver o spec). Nada aqui e preco final: e uma ESTIMATIVA para reservar saldo antes de
+despachar — quem manda e a leitura real, reconciliada em `nucleo/credito.py`.
 
-Mesmo as medidas continuam sendo so uma RESERVA anterior ao despacho: o custo de
-video depende da configuracao (duracao, proporcao), nao so do modelo — pelo agente
-conversacional, a mesma familia de pedido anunciou 7 e 15 creditos em ajustes
-diferentes. Quem manda e a leitura real, reconciliada em `nucleo/credito.py`.
+Video tem tres dimensoes (modelo, tier, duracao); imagem tem duas. Duracao nao entra
+em imagem porque nao existe grupo de duracao no painel do Flow em modo imagem.
 """
 
 from __future__ import annotations
 
-from flowpool.nucleo.erros import ModeloSemCusto
-from flowpool.nucleo.tipos import Modelo, Tier
+from flowpool.nucleo.erros import DuracaoSemCusto, ModeloSemCusto
+from flowpool.nucleo.tipos import DURACAO_PADRAO, Modelo, Tier
 
 TETO_DIARIO_FREE = 50
 
-_CUSTO: dict[tuple[Modelo, Tier], int] = {
+# Duracao de referencia da tabela de video: e nela que esta o unico numero MEDIDO por
+# saldo. Todas as outras saem daqui reescaladas por `_ESCALA_DURACAO`.
+_DURACAO_BASE = "8s"
+
+# Custo de UM clipe de 8s, por (modelo, tier).
+_CUSTO_VIDEO: dict[tuple[Modelo, Tier], int] = {
     # MEDIDO 2026-08-20, conta FREE, 720p / 8s / 9:16 / x1: saldo 50 -> 38.
     (Modelo.OMNI_FLASH, Tier.FREE): 12,
     (Modelo.OMNI_FLASH, Tier.PRO): 12,
     (Modelo.OMNI_FLASH, Tier.ULTRA): 6,   # EXTRAPOLADO: Ultra paga metade em Lite/Fast
-    # ESTIMATIVA — nenhum Veo foi medido ainda.
+    # ESTIMATIVA — nenhum Veo foi medido ainda, em duracao nenhuma.
     (Modelo.VEO_LITE, Tier.FREE): 10,
     (Modelo.VEO_LITE, Tier.PRO): 10,
     (Modelo.VEO_LITE, Tier.ULTRA): 5,
@@ -947,48 +1102,103 @@ _CUSTO: dict[tuple[Modelo, Tier], int] = {
     (Modelo.VEO_QUALITY, Tier.FREE): 100,
     (Modelo.VEO_QUALITY, Tier.PRO): 100,
     (Modelo.VEO_QUALITY, Tier.ULTRA): 100,
-    # MEDIDO 2026-08-20: imagem custa ZERO. Saldo 50 antes e 50 depois, e o Flow nem
-    # pede confirmacao. Desempata a divergencia que o spec carregava (1-2 vs zero).
-    # Consequencia de dominio: job de imagem deixa de discriminar conta por saldo.
+}
+
+# Imagem. Duracao nao entra: o painel nao tem o grupo, e o transporte nao o toca.
+# MEDIDO 2026-08-20: imagem custa ZERO. Saldo 50 antes e 50 depois, e o Flow nem pede
+# confirmacao. Desempata a divergencia que o spec carregava (1-2 vs zero).
+_CUSTO_IMAGEM: dict[tuple[Modelo, Tier], int] = {
     (Modelo.NANO_BANANA, Tier.FREE): 0,
     (Modelo.NANO_BANANA, Tier.PRO): 0,
     (Modelo.NANO_BANANA, Tier.ULTRA): 0,
 }
 
+# Escala do custo por duracao, na moeda do Omni Flash free/pro — que e onde estao os
+# unicos dois pontos conhecidos:
+#
+#   8s = 12   MEDIDO 2026-08-20 por saldo (50 -> 38), 720p / 9:16 / x1.
+#   4s =  7   ANUNCIADO pelo agente conversacional do Flow na confirmacao do pedido.
+#             NAO foi medido por saldo — e um numero que o Flow disse, nao um que o
+#             app viu sair da conta.
+#
+# 6s e 10s sao EXTRAPOLADOS: a reta que passa pelos dois pontos e 2 + 1,25 por segundo,
+# o que da 9,5 e 14,5, arredondados para cima em 10 e 15. O 15 tem um apoio a mais —
+# e o outro numero que o agente ja anunciou para esta familia de pedido.
+#
+# Os tres Veo herdam a MESMA forma a partir do seu proprio 8s, e ali a extrapolacao e
+# dupla: nenhum Veo foi medido em duracao nenhuma.
+#
+# Arredondamento para CIMA, sempre. Reserva curta demais aprova uma conta que nao paga
+# o job: o Flow recusa, o job volta pra fila e a conta e marcada seca por erro de
+# calculo. Reserva folgada so custa um pouco de saldo ate a reconciliacao — que e
+# quem, no fim, corrige tudo isto.
+_ESCALA_DURACAO = {"4s": 7, "6s": 10, "8s": 12, "10s": 15}
 
-def custo_de(modelo: Modelo, tier: Tier) -> int:
-    """Custo estimado em creditos de uma geracao."""
+
+def _escalar(custo_base: int, duracao: str) -> int:
+    """Custo de `duracao` a partir do custo de 8s. Arredonda para cima."""
     try:
-        return _CUSTO[(modelo, tier)]
+        fator = _ESCALA_DURACAO[duracao]
+    except KeyError:
+        raise DuracaoSemCusto(
+            f"sem custo cadastrado para duracao {duracao!r}; "
+            f"use uma de {list(_ESCALA_DURACAO)}") from None
+    base = _ESCALA_DURACAO[_DURACAO_BASE]
+    return -(-custo_base * fator // base)   # divisao inteira com teto
+
+
+def custo_de(modelo: Modelo, tier: Tier, duracao: str | None = None) -> int:
+    """Custo estimado em creditos de UMA geracao.
+
+    `duracao` so tem efeito nos modelos de video. `None` vale `DURACAO_PADRAO`, que e
+    o mesmo padrao com que todo `Job` nasce — nao o 8s da tabela. Um default divergente
+    do padrao do dominio faria a reserva do job comum sair errada em silencio.
+
+    O default existe tambem para as chamadas de IMAGEM, que nao tem duracao nenhuma
+    para informar.
+    """
+    if (modelo, tier) in _CUSTO_IMAGEM:
+        return _CUSTO_IMAGEM[(modelo, tier)]
+    try:
+        base = _CUSTO_VIDEO[(modelo, tier)]
     except KeyError:
         raise ModeloSemCusto(f"sem custo cadastrado para {modelo.value} em {tier.value}") from None
+    return _escalar(base, duracao or DURACAO_PADRAO)
 
 
-def cabe_no_free(modelo: Modelo, quantidade: int = 1) -> bool:
+def cabe_no_free(modelo: Modelo, quantidade: int = 1,
+                 duracao: str | None = None) -> bool:
     """Se uma conta gratuita consegue, no melhor dia possivel, rodar este pedido.
 
-    A quantidade entra no calculo porque ela multiplica o custo. Quatro imagens ainda
-    cabem em 50 creditos, mas isso precisa ser conta feita, nao sorte: um lote que
-    estoura o teto diario nunca vai caber em conta gratuita, e descobrir isso so na
-    hora de gerar custaria uma geracao recusada.
+    Quantidade e duracao entram no calculo porque as duas mexem no custo total. Um
+    lote que estoura o teto diario nunca vai caber em conta gratuita, e descobrir isso
+    so na hora de gerar custaria uma geracao recusada. A duracao entra pelo mesmo
+    motivo, na direcao oposta: sem ela, o teto recusaria um lote de clipes curtos que
+    o Flow aceitaria de bom grado.
     """
-    return custo_de(modelo, Tier.FREE) * quantidade <= TETO_DIARIO_FREE
+    return custo_de(modelo, Tier.FREE, duracao) * quantidade <= TETO_DIARIO_FREE
 ```
 
-O custo do **Omni Flash** entra como estimativa declarada, do mesmo jeito que o da
-imagem: ninguém mediu ainda, e ele é o padrão de vídeo do Flow — ficar sem custo
-cadastrado levantaria `ModeloSemCusto` no caminho mais usado do app. 20/20/10 é a faixa
-do Veo Fast; errar por alto só reserva crédito a mais, e a reconciliação de saldo
-(Task 4) corrige na primeira execução real. `test_tabela_cobre_todos_os_pares` já
-garante que nenhum modelo novo escape sem custo.
+Vídeo e imagem moram em **dicionários separados** de propósito: vídeo tem a dimensão
+duração, imagem não tem — não existe grupo de duração no painel em modo imagem. A
+estrutura da tabela diz isso sozinha, em vez de depender de um `if` escondido.
 
-`cabe_no_free` recebe `quantidade` porque o teto diário é sobre o **total**: quatro
-imagens ainda cabem em 50 créditos, mas isso precisa ser conta feita, não sorte.
+A escala por duração é ancorada em dois pontos e **extrapolada** no resto, e o código
+marca qual é qual. O arredondamento é sempre **para cima**: reserva curta demais aprova
+uma conta que não paga o job, o Flow recusa, o job volta pra fila e a conta é marcada
+seca por erro de cálculo. Reserva folgada só custa um pouco de saldo até a
+reconciliação. `test_tabela_cobre_todos_os_pares` garante que nenhum modelo novo escape
+sem custo, e `test_tabela_cobre_todas_as_duracoes_dos_modelos_de_video` faz o mesmo pelas
+quatro durações.
+
+`cabe_no_free` recebe `quantidade` **e** `duracao` porque o teto diário é sobre o
+**total**: quatro imagens ainda cabem em 50 créditos, e três clipes de 4s (36) cabem
+onde três de 8s (60) não caberiam. Isso precisa ser conta feita, não sorte.
 
 - [ ] **Step 4: Rodar e ver passar**
 
 Run: `.venv/Scripts/pytest tests/test_custos.py -q`
-Expected: `23 passed`
+Expected: `30 passed`
 
 - [ ] **Step 5: Commit**
 
@@ -1000,6 +1210,8 @@ git commit -m "feat: tabela de custo por modelo e tier"
 ---
 
 ### Task 3: Escolha de conta
+
+> **Nota de revisão (Task 15) — duração.** `apta` e `escolher` ganharam o parâmetro `duracao`, que segue exatamente o caminho de `quantidade` e existe pelo mesmo motivo: as duas mexem no custo **total** do pedido, e uma escolha que não sabe o custo total aprova uma conta que o Flow depois recusa. O listing do `escolha.py` abaixo já está na forma final. O de `tests/test_escolha.py` **não**: ele é o da primeira passada (imagem ainda a 2 créditos, corrigida na Task 11) e não traz os 4 casos de duração — os principais são `test_conta_que_paga_um_clipe_de_4s_nao_e_escolhida_para_o_de_8s` e `test_apta_olha_a_duracao`, descritos na Task 15.
 
 **Files:**
 - Create: `flowpool/nucleo/escolha.py`
@@ -1173,7 +1385,8 @@ from flowpool.nucleo.tipos import Conta, Modelo, SaudeSessao, Tier
 _ORDEM_TIER = {Tier.FREE: 1, Tier.PRO: 0, Tier.ULTRA: 0}
 
 
-def apta(c: Conta, modelo: Modelo, agora: datetime, quantidade: int = 1) -> bool:
+def apta(c: Conta, modelo: Modelo, agora: datetime, quantidade: int = 1,
+         duracao: str | None = None) -> bool:
     # Comparacao por valor, nao por identidade: `Tier` e `SaudeSessao` herdam de
     # `str, Enum`, e um valor cru vindo do SQLite quebraria `is` em silencio.
     if not c.ativa or c.saude != SaudeSessao.VIVA:
@@ -1182,22 +1395,22 @@ def apta(c: Conta, modelo: Modelo, agora: datetime, quantidade: int = 1) -> bool
     # prazo devolve o job a fila na hora e o motor vira laco quente.
     if c.seca_ate is not None and c.seca_ate > agora:
         return False
-    if c.tier == Tier.FREE and not cabe_no_free(modelo, quantidade):
+    if c.tier == Tier.FREE and not cabe_no_free(modelo, quantidade, duracao):
         return False
     # Custo TOTAL do pedido, nao de uma geracao. Se so a reserva multiplicasse, o app
     # escolheria uma conta que comporta uma geracao e tentaria gerar quatro: o Flow
     # recusa, o job volta pra fila e a conta e marcada seca por um problema que era de
     # calculo.
-    return custo_de(modelo, c.tier) * quantidade <= c.saldo
+    return custo_de(modelo, c.tier, duracao) * quantidade <= c.saldo
 
 
 def escolher(contas: Sequence[Conta], modelo: Modelo, agora: datetime,
-             quantidade: int = 1) -> Conta | None:
+             quantidade: int = 1, duracao: str | None = None) -> Conta | None:
     """Melhor conta para rodar `quantidade` geracoes de `modelo` em `agora`.
 
     None se nenhuma serve.
     """
-    aptas = [c for c in contas if apta(c, modelo, agora, quantidade)]
+    aptas = [c for c in contas if apta(c, modelo, agora, quantidade, duracao)]
     if not aptas:
         return None
     return max(aptas, key=lambda c: (_ORDEM_TIER[c.tier], c.saldo, -c.id))
@@ -1206,7 +1419,7 @@ def escolher(contas: Sequence[Conta], modelo: Modelo, agora: datetime,
 - [ ] **Step 4: Rodar e ver passar**
 
 Run: `.venv/Scripts/pytest tests/test_escolha.py -q`
-Expected: `20 passed`
+Expected: `27 passed`
 
 - [ ] **Step 5: Commit**
 
@@ -1218,6 +1431,8 @@ git commit -m "feat: politica de escolha de conta"
 ---
 
 ### Task 4: Contabilidade de crédito
+
+> **Nota de revisão (Task 15) — duração.** `reservar` ganhou o parâmetro `duracao`. Reservar sempre o clipe de 8s tirava do saldo local crédito que o Flow não ia cobrar, e a conta saía do pool antes da hora. O listing do `credito.py` abaixo já está na forma final; o de `tests/test_credito.py` é o da primeira passada, sem os 3 casos de duração da Task 15.
 
 **Files:**
 - Create: `flowpool/nucleo/credito.py`
@@ -1423,7 +1638,8 @@ from flowpool.nucleo.tipos import Conta, Modelo, Tier
 LIMIAR_DIVERGENCIA = 5
 
 
-def reservar(conta: Conta, modelo: Modelo, quantidade: int = 1) -> int:
+def reservar(conta: Conta, modelo: Modelo, quantidade: int = 1,
+             duracao: str | None = None) -> int:
     """Desconta o custo previsto antes de despachar. Devolve o custo reservado.
 
     Recusa em vez de zerar: chegar aqui sem saldo significa que quem chamou ignorou
@@ -1434,7 +1650,7 @@ def reservar(conta: Conta, modelo: Modelo, quantidade: int = 1) -> int:
     cobrou — e a escolha seguinte mandaria job para uma conta mais magra do que o app
     pensa.
     """
-    custo = custo_de(modelo, conta.tier) * quantidade
+    custo = custo_de(modelo, conta.tier, duracao) * quantidade
     if custo > conta.saldo:
         raise SaldoInsuficiente(
             f"conta {conta.email}: saldo {conta.saldo} < custo {custo}"
@@ -1483,7 +1699,7 @@ def _parece_reset(conta: Conta, lido: int, delta: int) -> bool:
 - [ ] **Step 4: Rodar e ver passar**
 
 Run: `.venv/Scripts/pytest tests/test_credito.py -q`
-Expected: `18 passed`
+Expected: `21 passed`
 
 - [ ] **Step 5: Teste de integração do núcleo**
 
@@ -1584,7 +1800,7 @@ Expected: `3 passed`
 - [ ] **Step 7: Rodar o núcleo inteiro**
 
 Run: `.venv/Scripts/pytest -q`
-Expected: `102 passed` (15 tipos + 23 proxy + 23 custos + 20 escolha + 18 credito + 3 pool)
+Expected: `122 passed` (20 tipos + 23 proxy + 30 custos + 25 escolha + 21 credito + 3 pool)
 
 - [ ] **Step 8: Commit**
 
@@ -1596,6 +1812,8 @@ git commit -m "feat: reserva, estorno e reconciliacao de credito"
 ---
 
 ### Task 5: Esquema e repositório SQLite
+
+> **Nota de revisão (Task 15) — duração.** A tabela `job` ganhou `duracao TEXT NOT NULL DEFAULT '4s'`, lida e gravada pelo repo. Como em `proporcao` e `quantidade`, **não há migração**: o esquema é `CREATE TABLE IF NOT EXISTS`, e um `flowpool.db` anterior à coluna precisa ser recriado à mão. Os listings de código abaixo já estão na forma final; `tests/test_repo.py` ganhou 2 casos de ida e volta descritos na Task 15.
 
 **Files:**
 - Create: `flowpool/dados/esquema.sql`, `flowpool/dados/repo.py`
@@ -1917,6 +2135,7 @@ CREATE TABLE IF NOT EXISTS job (
     frame_final    TEXT,
     proporcao      TEXT    NOT NULL DEFAULT '9:16',
     quantidade     INTEGER NOT NULL DEFAULT 1,
+    duracao        TEXT    NOT NULL DEFAULT '4s',
     prioridade     INTEGER NOT NULL DEFAULT 0,
     estado         TEXT    NOT NULL DEFAULT 'pendente',
     conta_id       INTEGER REFERENCES conta(id),
@@ -2085,7 +2304,7 @@ class Repo:
                    referencias, frame_inicial, frame_final, proporcao, quantidade,
                    prioridade, estado, custo_estimado, reavaliar_em, criado_em,
                    atualizado_em)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (j.modo.value, j.modelo.value, j.prompt, j.destino, j.nome, j.produto,
              json.dumps(j.referencias), j.frame_inicial, j.frame_final, j.proporcao,
              j.quantidade, j.prioridade, j.estado.value, j.custo_estimado,
@@ -2149,6 +2368,7 @@ class Repo:
             produto=r["produto"], referencias=json.loads(r["referencias"]),
             frame_inicial=r["frame_inicial"], frame_final=r["frame_final"],
             proporcao=r["proporcao"], quantidade=r["quantidade"],
+            duracao=r["duracao"],
             prioridade=r["prioridade"], estado=EstadoJob(r["estado"]),
             conta_id=r["conta_id"], id_remoto=r["id_remoto"], arquivo=r["arquivo"],
             tentativas=r["tentativas"], custo_estimado=r["custo_estimado"],
@@ -2252,6 +2472,8 @@ git commit -m "feat: esquema sqlite e repositorio"
 ---
 
 ### Task 6: Interface de transporte e transporte falso
+
+> **Nota de revisão (Task 15) — duração.** `Pedido` ganhou `duracao: str = DURACAO_PADRAO`, e o `TransporteFalso` passou a cobrar por (modelo, tier, **duração**) — se ele não cobrasse igual ao Flow, o motor passaria no teste com uma contabilidade que o real desmente. Os listings de código abaixo já estão na forma final; `tests/test_transporte_falso.py` ganhou 2 casos e teve o helper `pedido()` fixado em `8s`, para os testes que conferem número de crédito dizerem de qual clipe falam.
 
 **Files:**
 - Create: `flowpool/transporte/base.py`, `flowpool/transporte/falso.py`
@@ -2497,6 +2719,9 @@ class Pedido:
     # parece certa.
     proporcao: str = PROPORCAO_PADRAO
     quantidade: int = 1
+    # So vale em video: em imagem o painel nao tem grupo de duracao, e o transporte
+    # nao toca nele.
+    duracao: str = DURACAO_PADRAO
 
 
 @dataclass
@@ -2638,7 +2863,7 @@ class TransporteFalso:
         if s.conta.id in self.morre_ao_gerar:
             raise SessaoMorta(f"sessao da conta {s.conta.email} caiu ao gerar")
         # o Flow cobra por geracao: um lote de quatro custa quatro vezes
-        custo = custo_de(p.modelo, s.conta.tier) * p.quantidade
+        custo = custo_de(p.modelo, s.conta.tier, p.duracao) * p.quantidade
         if self.saldos.get(s.conta.id, 0) < custo:
             raise SaldoInsuficiente(f"conta {s.conta.email} sem credito")
         self.saldos[s.conta.id] -= custo
@@ -2674,7 +2899,7 @@ class TransporteFalso:
 - [ ] **Step 5: Rodar e ver passar**
 
 Run: `.venv/Scripts/pytest tests/test_transporte_falso.py -q`
-Expected: `17 passed`
+Expected: `19 passed`
 
 - [ ] **Step 6: Commit**
 
@@ -2686,6 +2911,8 @@ git commit -m "feat: interface de transporte e implementacao falsa"
 ---
 
 ### Task 7: Orquestrador
+
+> **Nota de revisão (Task 15) — duração.** `_conta_para` passa `job.duracao` a `apta` e `escolher`, `_executar` a passa a `reservar`, e `_pedido` a leva ao transporte. É o mesmo trio de pontos por onde `quantidade` já passava. Os listings de código abaixo já estão na forma final; `tests/test_orquestrador.py` ganhou 4 casos e teve o helper `job_fast()` fixado em `8s`, pelo mesmo motivo do task anterior.
 
 **Files:**
 - Create: `flowpool/motor/orquestrador.py`
@@ -3405,7 +3632,7 @@ class Orquestrador:
             if anterior is not None and apta(anterior, job.modelo, agora,
                                              job.quantidade):
                 return anterior
-        return escolher(contas, job.modelo, agora, job.quantidade)
+        return escolher(contas, job.modelo, agora, job.quantidade, job.duracao)
 
     async def _executar(self, job: Job, conta: Conta) -> None:
         # retomada: a geracao ja existe e e da mesma conta. Gerar de novo pagaria duas
@@ -3429,7 +3656,8 @@ class Orquestrador:
                 # inclusive depois de um restart, por isso vai para o banco na hora
                 # o total do lote, nao o de uma geracao: e este numero que o estorno
                 # devolve depois
-                job.custo_estimado = reservar(conta, job.modelo, job.quantidade)
+                job.custo_estimado = reservar(conta, job.modelo, job.quantidade,
+                                              job.duracao)
                 self.repo.salvar_conta(conta)
                 self.repo.salvar_job(job)
 
@@ -3626,7 +3854,7 @@ class Orquestrador:
         return Pedido(modo=job.modo, modelo=job.modelo, prompt=job.prompt,
                       referencias=job.referencias, frame_inicial=job.frame_inicial,
                       frame_final=job.frame_final, proporcao=job.proporcao,
-                      quantidade=job.quantidade)
+                      quantidade=job.quantidade, duracao=job.duracao)
 
     async def rodar(self, intervalo: float = 2.0) -> None:
         """Laco eterno, usado pela API. Para com `parar()`.
@@ -3655,12 +3883,12 @@ class Orquestrador:
 - [ ] **Step 4: Rodar e ver passar**
 
 Run: `.venv/Scripts/pytest tests/test_orquestrador.py -q`
-Expected: `28 passed`
+Expected: `38 passed`
 
 - [ ] **Step 5: Rodar a suíte inteira**
 
 Run: `.venv/Scripts/pytest -q`
-Expected: `172 passed` (15 tipos + 23 proxy + 23 custos + 20 escolha + 18 credito + 3 pool + 25 repo + 17 transporte + 28 orquestrador)
+Expected: `200 passed` (20 tipos + 23 proxy + 30 custos + 25 escolha + 21 credito + 3 pool + 27 repo + 19 transporte + 32 orquestrador)
 
 - [ ] **Step 6: Commit**
 
@@ -3987,6 +4215,59 @@ def test_quantidade_zero_da_422(cliente):
     assert r.status_code == 422
 
 
+# --- duracao ---
+
+def test_duracao_padrao_e_de_quatro_segundos(cliente):
+    # 4s custa 7 creditos e 8s custa 12: fixar 8s desperdicava 70% do credito por
+    # video, e numa conta gratuita de 50/dia isso e a diferenca entre 4 e 7 videos
+    c, repo = cliente
+    jid = c.post("/jobs", json={"modo": "t2v", "modelo": "omni-flash", "prompt": "p",
+                                "produto": "Moda", "nome": "n"}).json()["id"]
+    assert repo.job(jid).duracao == "4s"
+
+
+def test_duracao_explicita_e_respeitada(cliente):
+    c, repo = cliente
+    jid = c.post("/jobs", json={"modo": "t2v", "modelo": "omni-flash", "prompt": "p",
+                                "produto": "Moda", "nome": "n",
+                                "duracao": "10s"}).json()["id"]
+    assert repo.job(jid).duracao == "10s"
+
+
+def test_duracao_fora_da_lista_da_422(cliente):
+    # o painel do Flow so tem quatro botoes de duracao; "5s" nao teria onde clicar
+    c, _ = cliente
+    r = c.post("/jobs", json={"modo": "t2v", "modelo": "omni-flash", "prompt": "p",
+                              "produto": "Moda", "nome": "n", "duracao": "5s"})
+    assert r.status_code == 422
+
+
+def test_imagem_com_duracao_da_422(cliente):
+    # nao existe grupo de duracao no painel em modo imagem: aceitar o campo seria
+    # prometer uma configuracao que o transporte nao tem onde aplicar
+    c, _ = cliente
+    r = c.post("/jobs", json={"modo": "imagem", "modelo": "nano-banana", "prompt": "p",
+                              "produto": "Moda", "nome": "n", "duracao": "4s"})
+    assert r.status_code == 422
+    assert "duracao" in r.text or "duração" in r.text
+
+
+def test_imagem_sem_duracao_passa(cliente):
+    # o campo tem default no dominio ("4s"); se a recusa olhasse o VALOR em vez de o
+    # campo ter vindo no corpo, todo pedido de imagem seria recusado
+    c, _ = cliente
+    r = c.post("/jobs", json={"modo": "imagem", "modelo": "nano-banana", "prompt": "p",
+                              "produto": "Moda", "nome": "n"})
+    assert r.status_code == 201
+
+
+def test_resposta_do_job_mostra_a_duracao(cliente):
+    c, _ = cliente
+    r = c.post("/jobs", json={"modo": "t2v", "modelo": "omni-flash", "prompt": "p",
+                              "produto": "Moda", "nome": "n", "duracao": "6s"})
+    assert r.json()["duracao"] == "6s"
+
+
 # --- modelo padrao ---
 
 def test_job_de_video_sem_modelo_sai_com_omni_flash(cliente):
@@ -4028,8 +4309,8 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from flowpool.nucleo.erros import ProxyInvalido
 from flowpool.nucleo.proxy import analisar
 from flowpool.nucleo.tipos import (
-    PROPORCAO_PADRAO, PROPORCOES, EstadoJob, Modelo, Modo, SaudeSessao, Tier,
-    quantidade_maxima,
+    DURACAO_PADRAO, DURACOES, PROPORCAO_PADRAO, PROPORCOES, EstadoJob, Modelo, Modo,
+    SaudeSessao, Tier, duracao_valida, quantidade_maxima,
 )
 
 
@@ -4083,6 +4364,9 @@ class PedidoJob(BaseModel):
     # Saidas por geracao. MULTIPLICA O CUSTO — o teto depende do modo, ver
     # `quantidade_coerente_com_o_modo`.
     quantidade: int = Field(default=1, ge=1)
+    # Tamanho do clipe. MUDA O CUSTO: 7 creditos em 4s contra 12 em 8s no Omni Flash.
+    # So existe em video — ver `duracao_coerente_com_o_modo`.
+    duracao: str = DURACAO_PADRAO
     prioridade: int = 0
 
     @field_validator("proporcao")
@@ -4116,6 +4400,32 @@ class PedidoJob(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def duracao_coerente_com_o_modo(self) -> PedidoJob:
+        """Imagem nao tem duracao; video so aceita os quatro valores do painel.
+
+        O teste do lado da imagem e pelo campo TER VINDO no corpo (`model_fields_set`),
+        e nao pelo valor: o padrao do dominio e "4s", entao comparar valor recusaria
+        todo pedido de imagem que nao falasse de duracao — ou seja, todos eles. E o
+        mesmo criterio que `PatchConta` usa para o proxy, e pelo mesmo motivo: ausencia
+        e valor sao coisas diferentes.
+
+        Recusar aqui e melhor do que aceitar calado: nao ha grupo de duracao no painel
+        em modo imagem, entao a configuracao nunca seria aplicada e o usuario receberia
+        o arquivo achando que foi.
+        """
+        if self.modo is Modo.IMAGEM:
+            pedida = self.duracao if "duracao" in self.model_fields_set else None
+            if not duracao_valida(self.modo, pedida):
+                raise ValueError(
+                    f"modo imagem nao tem duracao: o painel do Flow nao oferece o "
+                    f"grupo em imagem, e {pedida!r} nao teria onde ser clicado")
+            return self
+        if not duracao_valida(self.modo, self.duracao):
+            raise ValueError(
+                f"duracao {self.duracao!r} nao existe; use uma de {list(DURACOES)}")
+        return self
+
+    @model_validator(mode="after")
     def destino_deriva_do_produto(self) -> PedidoJob:
         """`produto: "Panelas Monaco"` basta; repetir o caminho e ruido."""
         if not self.destino:
@@ -4144,6 +4454,7 @@ class RespostaJob(BaseModel):
     produto: str = ""
     proporcao: str = PROPORCAO_PADRAO
     quantidade: int = 1
+    duracao: str = DURACAO_PADRAO
     conta_id: int | None = None
     arquivo: str | None = None
     tentativas: int = 0
@@ -4237,14 +4548,15 @@ def _job_de(p: PedidoJob) -> Job:
     return Job(id=0, modo=p.modo, modelo=p.modelo, prompt=p.prompt, destino=p.destino,
                nome=p.nome, produto=p.produto, referencias=p.referencias,
                frame_inicial=p.frame_inicial, frame_final=p.frame_final,
-               proporcao=p.proporcao, quantidade=p.quantidade,
+               proporcao=p.proporcao, quantidade=p.quantidade, duracao=p.duracao,
                prioridade=p.prioridade)
 
 
 def _resposta(j: Job) -> RespostaJob:
     return RespostaJob(id=j.id, estado=j.estado, modo=j.modo, modelo=j.modelo,
                        nome=j.nome, produto=j.produto, proporcao=j.proporcao,
-                       quantidade=j.quantidade, conta_id=j.conta_id,
+                       quantidade=j.quantidade, duracao=j.duracao,
+                       conta_id=j.conta_id,
                        arquivo=j.arquivo, tentativas=j.tentativas, erro=j.erro)
 
 
@@ -5377,7 +5689,7 @@ Expected: uma data ~48 h à frente, por exemplo `2026-08-22 15:04:05+00:00`. Se 
 - [ ] **Step 8: Rodar a suíte**
 
 Run: `.venv/Scripts/pytest -q`
-Expected: `219 passed` (204 das Tasks 0–8 + 15 da sessão)
+Expected: `253 passed` (238 das Tasks 0–8 + 15 da sessão)
 
 - [ ] **Step 9: Commit**
 
@@ -5447,7 +5759,7 @@ não é de graça.
 
 Três coisas ficam de fora **de propósito**, e ficam escritas aqui para não virarem surpresa:
 
-1. **`Pedido` não tem `duracao`.** O chip aceita 4s/6s/8s/10s; o domínio não modela isso. Até modelar, o transporte fixa `DURACAO_PADRAO = "8s"` e **verifica**. Acrescentar o campo depois toca `nucleo/tipos.py` (`Job`), `transporte/base.py` (`Pedido`), `dados/esquema.sql` + `repo.py`, `api/esquemas.py` e `cliente.py` — cinco arquivos e quatro arquivos de teste. É um task próprio, não um remendo aqui.
+1. ~~**`Pedido` não tem `duracao`.**~~ **RESOLVIDO na Task 15.** Enquanto durou, o transporte fixava `DURACAO_PADRAO = "8s"` e apenas **verificava** — e o preço disso só ficou visível quando a duração entrou no custo: 8s custa 12 créditos e 4s custa 7, ou seja, todo vídeo saía **70% mais caro** do que precisava. Numa conta grátis de 50 créditos/dia, a diferença entre 4 e 7 vídeos por dia. A constante saiu de `transporte/pw/transporte.py`; o lugar dela é `p.duracao`.
 2. **`id_remoto` é posicional** (`card-{n}`), porque a grade não expõe id na UI. Consequência honesta: a **retomada depois de restart** que o orquestrador implementa (`recuperado_com_geracao`) só funciona enquanto o processo vive. O Step 5 da Task 9 mede se o `src` da miniatura carrega um id estável; se carregar, trocar `_identificar` é uma mudança de dez linhas e a retomada passa a valer de verdade.
 3. **Vídeo só aceita 9:16 e 16:9**, e a API aceita as cinco proporções para qualquer modo. O transporte recusa cedo (antes de tocar no chip, com a reserva ainda estornável), mas o lugar certo de recusar é o 422 do `POST /jobs`. Fica para o mesmo task do item 1.
 
@@ -5475,8 +5787,6 @@ from flowpool.transporte.pw import dom
 from flowpool.transporte.pw import seletores as sel
 from flowpool.transporte.pw.sessao import abrir_contexto, interpretar_sessao
 
-# Fixa ate `Pedido` ganhar o campo — ver "Pendencias declaradas".
-DURACAO_PADRAO = "8s"
 # Chave de `sel.BAIXAR` por modo. 4K fica de fora dos dois: exige plano pago.
 RESOLUCAO = {
     Modo.IMAGEM: "1k",          # "1K Tamanho original"
@@ -5652,8 +5962,13 @@ class TransportePlaywright:
                                 f"esperado {esperado!r}")
 
         await self._clicar_unico(painel, sel.PROPORCAO[p.proporcao], "proporcao")
-        if p.modo is not Modo.IMAGEM:
-            await self._clicar_unico(painel, sel.DURACAO[DURACAO_PADRAO], "duracao")
+        # `None` em imagem: o painel nao tem grupo de duracao naquele modo, e procurar
+        # o botao ali derrubaria toda geracao de imagem. Nos tres modos de video vale a
+        # duracao DO PEDIDO — ate a Task 15 era uma constante de 8s aqui, e todo video
+        # saia 70% mais caro do que o de 4s sem ninguem ver.
+        duracao = None if p.modo is Modo.IMAGEM else p.duracao
+        if duracao:
+            await self._clicar_unico(painel, sel.DURACAO[duracao], "duracao")
         await self._clicar_unico(painel, sel.QUANTIDADE[p.quantidade], "quantidade")
 
         await pagina.keyboard.press("Escape")
@@ -5665,7 +5980,7 @@ class TransportePlaywright:
                 sel.ROTULO_MODO_NO_CHIP[modo],
                 sel.PROPORCAO[p.proporcao].split('"')[1],
                 f"x{p.quantidade}",
-                *(() if p.modo is Modo.IMAGEM else (DURACAO_PADRAO,)),
+                *(() if duracao is None else (duracao,)),
             ) if alvo not in chip
         ]
         if faltando:
@@ -5835,7 +6150,7 @@ GASTA CREDITO em video. Imagem e gratuita (MEDIDO em 2026-08-20: saldo 50 -> 50)
 
 Uso:
     python -m flowpool.transporte.pw.fumaca <perfil> <modo> <modelo> "<prompt>" \
-        [arquivos...] [--proporcao 9:16] [--quantidade 1]
+        [arquivos...] [--proporcao 9:16] [--quantidade 1] [--duracao 4s]
 """
 
 from __future__ import annotations
@@ -5902,6 +6217,9 @@ if __name__ == "__main__":
     p.add_argument("arquivos", nargs="*")
     p.add_argument("--proporcao", default="9:16")
     p.add_argument("--quantidade", type=int, default=1)
+    # a fumaca GASTA CREDITO em video, e a duracao e o que mais mexe na conta: 7
+    # creditos em 4s contra 12 em 8s no Omni Flash. Default no padrao do dominio.
+    p.add_argument("--duracao", choices=list(DURACOES), default=DURACAO_PADRAO)
     asyncio.run(main(p.parse_args()))
 ```
 
@@ -5932,7 +6250,7 @@ Repare em duas coisas: a extensão saiu **`.jpeg`**, não o `.mp4` que o comando
   t2v omni-flash "a slow push-in on a ceramic mug, soft window light"
 ```
 
-Expected: `adotado projeto:` com o **mesmo** id do Step 3 (a adoção funcionando), `scratch/fumaca.mp4`, e `custo real: 12`. O vídeo tem que sair **vertical** — abra o arquivo e confirme. Saída em 16:9 significa que o clique na proporção não pegou e o `_configurar` não pegou o erro; nesse caso o defeito está na verificação, não só no clique.
+Expected: `adotado projeto:` com o **mesmo** id do Step 3 (a adoção funcionando), `scratch/fumaca.mp4`, e `custo real: 7` — sete, e não doze, porque desde a Task 15 o padrão é o clipe de **4s**. Se sair 12, a duração não chegou ao chip: confira que `_configurar` usa `p.duracao` e não uma constante. Para medir o de 8s de propósito, `--duracao 8s`. O vídeo tem que sair **vertical** — abra o arquivo e confirme. Saída em 16:9 significa que o clique na proporção não pegou e o `_configurar` não pegou o erro; nesse caso o defeito está na verificação, não só no clique.
 
 - [ ] **Step 5: Provar que a verificação do chip morde**
 
@@ -5947,49 +6265,23 @@ Expected: `GeracaoFalhou: modo t2v aceita so ('9:16', '16:9'), e o job pediu 1:1
 
 - [ ] **Step 6: Corrigir a tabela de custos com o que foi medido**
 
-A Task 2 rodou com os números **estimados** e o texto dela já foi corrigido para os medidos — este step é onde a correção chega ao código. Em `flowpool/nucleo/custos.py`, troque as entradas medidas e marque o que continua estimativa:
+A Task 2 rodou com os números **estimados** e o texto dela já foi corrigido para os medidos — este step é onde a correção chega ao código. Duas linhas mudam em `flowpool/nucleo/custos.py`:
 
-```python
-_CUSTO: dict[tuple[Modelo, Tier], int] = {
-    # MEDIDO 2026-08-20, conta FREE, 720p / 8s / 9:16 / x1: saldo 50 -> 38.
-    # ATENCAO: o custo do video depende da CONFIGURACAO, nao so do modelo — pelo agente
-    # conversacional, a mesma familia de pedido anunciou 7 e 15 creditos em ajustes
-    # diferentes. Esta tabela e por modelo porque e so uma RESERVA anterior ao
-    # despacho; quem manda e a reconciliacao (`nucleo/credito.py`).
-    (Modelo.OMNI_FLASH, Tier.FREE): 12,
-    (Modelo.OMNI_FLASH, Tier.PRO): 12,
-    (Modelo.OMNI_FLASH, Tier.ULTRA): 6,   # EXTRAPOLADO: Ultra paga metade em Lite/Fast
-    # ESTIMATIVA — nenhum Veo foi medido ainda.
-    (Modelo.VEO_LITE, Tier.FREE): 10,
-    (Modelo.VEO_LITE, Tier.PRO): 10,
-    (Modelo.VEO_LITE, Tier.ULTRA): 5,
-    (Modelo.VEO_FAST, Tier.FREE): 20,
-    (Modelo.VEO_FAST, Tier.PRO): 20,
-    (Modelo.VEO_FAST, Tier.ULTRA): 10,
-    (Modelo.VEO_QUALITY, Tier.FREE): 100,
-    (Modelo.VEO_QUALITY, Tier.PRO): 100,
-    (Modelo.VEO_QUALITY, Tier.ULTRA): 100,
-    # MEDIDO 2026-08-20: imagem custa ZERO. Saldo 50 antes e 50 depois, e o Flow nem
-    # pede confirmacao. Desempata a divergencia que o spec carregava (1-2 vs zero).
-    (Modelo.NANO_BANANA, Tier.FREE): 0,
-    (Modelo.NANO_BANANA, Tier.PRO): 0,
-    (Modelo.NANO_BANANA, Tier.ULTRA): 0,
-}
-```
+- **Omni Flash 20/20/10 → 12/12/6.** MEDIDO 2026-08-20, conta FREE, 720p / 8s / 9:16 / x1: saldo 50 → 38.
+- **Nano Banana 2/2/1 → 0/0/0.** MEDIDO: imagem custa ZERO — saldo 50 antes e 50 depois, e o Flow nem pede confirmação. Desempata a divergência que o spec carregava (1-2 vs zero).
 
-E em `tests/test_custos.py`, os mesmos números — **a contagem de casos não muda**, só os valores esperados:
-
-- `(Modelo.NANO_BANANA, Tier.FREE, 2)` → `0` e `(Modelo.NANO_BANANA, Tier.ULTRA, 2)` → `0`
-- `test_omni_flash_tem_custo_nos_tres_tiers`: `(FREE, 20), (PRO, 20), (ULTRA, 10)` → `(FREE, 12), (PRO, 12), (ULTRA, 6)`
+E em `tests/test_custos.py`, os mesmos números — **a contagem de casos não muda**, só os valores esperados.
 
 `cabe_no_free` continua verdadeiro em todos os casos testados (0 × 4 = 0 ≤ 50; 12 ≤ 50), então nenhum outro teste muda.
 
 **Consequência de domínio, e ela é boa:** com imagem a **zero**, a escolha de conta deixa de discriminar por saldo em job de imagem — qualquer conta viva serve. Era exatamente o que o spec previa em *Notas de custo*, e agora está confirmado.
 
+> **Nota de revisão (Task 15).** O que este step **não** resolveu: a medição deu 12 créditos para uma configuração de **8s**, e o agente conversacional anunciou **7** para a mesma família em **4s**. Enquanto a tabela era por (modelo, tier), esses dois números não cabiam nela — e o app reservava 12 para todo vídeo, inclusive os que sairiam por 7. A Task 15 fecha isso: a tabela de vídeo passa a ser por **(modelo, tier, duração)**, e o listing final está na Task 2.
+
 - [ ] **Step 7: Rodar a suíte**
 
 Run: `.venv/Scripts/pytest -q`
-Expected: `219 passed` — o mesmo total do Task 10. Valores mudaram, casos não.
+Expected: `253 passed` — o mesmo total do Task 10. Valores mudaram, casos não.
 
 - [ ] **Step 8: Commit**
 
@@ -6034,7 +6326,7 @@ Se os três continuarem `"..."` depois da medição porque a UI realmente usa um
   imagem nano-banana "a red ceramic mug on a linen tablecloth"
 ```
 
-Expected: `scratch/fumaca.jpeg`, `custo real: 0`, e o chip confirmado com `imagem`, `crop_9_16`, `x1` — sem `8s`, porque imagem não tem duração.
+Expected: `scratch/fumaca.jpeg`, `custo real: 0`, e o chip confirmado com `imagem`, `crop_9_16`, `x1` — sem duração nenhuma, porque imagem não tem grupo de duração no painel. E `POST /jobs` com `modo=imagem` e `duracao` no corpo é **422** desde a Task 15.
 
 - [ ] **Step 3: Fumaça do modo Frames (`crop_free`)**
 
@@ -6191,9 +6483,14 @@ class FlowPool:
               referencias: list[str] | None = None,
               frame_inicial: str | None = None, frame_final: str | None = None,
               proporcao: str = "9:16", quantidade: int = 1,
-              prioridade: int = 0) -> int:
+              duracao: str | None = None, prioridade: int = 0) -> int:
         # `destino` fica de fora quando e None: a API o deriva do produto
         # (`{produto}/clipes`), e mandar null explicito seria a mesma coisa com ruido.
+        #
+        # `duracao` fica de fora pelo motivo OPOSTO, e ele importa: em `modo=imagem` a
+        # API devolve 422 se o campo vier, porque nao existe grupo de duracao no painel
+        # do Flow em imagem. Mandar sempre "4s" faria todo pedido de imagem falhar. Sem
+        # o campo, video herda o padrao do dominio, que ja e 4s.
         #
         # `modelo="omni-flash"` e o padrao de video do Flow, nao Veo. `proporcao="9:16"`
         # porque o canal e TikTok — e porque video so aceita 9:16 e 16:9 no chip.
@@ -6205,6 +6502,7 @@ class FlowPool:
             "proporcao": proporcao, "quantidade": quantidade,
             "prioridade": prioridade,
             **({"destino": destino} if destino else {}),
+            **({"duracao": duracao} if duracao else {}),
         })
         r.raise_for_status()
         return r.json()["id"]
@@ -6314,7 +6612,9 @@ Expected: `4 passed`
 - [ ] **Step 6: Rodar a suíte inteira**
 
 Run: `.venv/Scripts/pytest -q`
-Expected: `223 passed` (219 + 4 do cliente)
+Expected: `257 passed` (253 + 4 do cliente)
+
+> **Nota (2026-08-20).** Esses totais somam só os arquivos de teste que este plano lista. `tests/test_transporte_pw.py` (37 casos) nasceu na execução ao vivo da Task 11, junto de `analise.py`, e nunca entrou nas somas acima. Com ele, e já com a Task 15 fechada, a suíte real é de **290**.
 
 - [ ] **Step 7: Commit**
 
@@ -6439,7 +6739,11 @@ que é o mesmo fluxo, com a mesma janela.
     caminho = fp.esperar(jid)
 
 Sem dizer o modelo, vídeo sai em **Omni Flash** (é o padrão do próprio Flow) e imagem
-em Nano Banana. Sem dizer a proporção, sai em **9:16**.
+em Nano Banana. Sem dizer a proporção, sai em **9:16**. Sem dizer a duração, o clipe
+sai com **4s** — o mais barato, e o que o pipeline usa.
+
+    # clipe mais longo, quando a cena pede: custa 12 em vez de 7
+    jid = fp.gerar(prompt="...", produto="Panelas Monaco", nome="c1", duracao="8s")
 
     # quatro variações de imagem para escolher (e imagem não custa crédito)
     jid = fp.gerar(prompt="...", produto="Panelas Monaco", nome="capa",
@@ -6456,8 +6760,10 @@ Use o caminho que `esperar` devolve — imagem sai em **.jpeg**, não em .png.
   reservar antes de despachar; o número verdadeiro vem da reconciliação de saldo.
 - **Vídeo só aceita 9:16 e 16:9.** As cinco proporções existem, mas as outras três só
   em modo imagem. Pedir 1:1 num vídeo é recusado antes de gastar crédito.
-- Duração de vídeo está **fixa em 8s**. O chip aceita 4s/6s/8s/10s; o campo ainda não
-  atravessa a API.
+- Duração de vídeo: **4s por padrão**, e o chip aceita `4s`, `6s`, `8s`, `10s`. É
+  `duracao` no `POST /jobs`. **Muda o preço**: no Omni Flash, 4s custa 7 créditos e 8s
+  custa 12 — numa conta grátis de 50/dia, a diferença entre 7 e 4 vídeos. Imagem não
+  tem duração: mandar o campo em `modo=imagem` é 422.
 - Vídeo sai sempre **uma** geração por job; `quantidade` acima de 1 só em `modo=imagem`
   (até 4) e é 422 no resto.
 - Job sem conta apta não falha: espera o reset e volta sozinho.
@@ -6484,6 +6790,95 @@ Use o caminho que `esperar` devolve — imagem sai em **.jpeg**, não em .png.
 git add flowpool/LEIA-ME.md flowpool/transporte/pw/seletores.py
 git commit -m "docs: leia-me do flowpool e aviso de saldo medido"
 ```
+
+---
+
+### Task 15: Duração de vídeo — o campo que faltava, e o crédito que ele economiza
+
+**Files:**
+- Modify: `flowpool/nucleo/tipos.py`, `flowpool/nucleo/erros.py`, `flowpool/nucleo/custos.py`, `flowpool/nucleo/escolha.py`, `flowpool/nucleo/credito.py`, `flowpool/dados/esquema.sql`, `flowpool/dados/repo.py`, `flowpool/transporte/base.py`, `flowpool/transporte/falso.py`, `flowpool/transporte/pw/transporte.py`, `flowpool/transporte/pw/fumaca.py`, `flowpool/motor/orquestrador.py`, `flowpool/api/esquemas.py`, `flowpool/api/app.py`
+- Test: `tests/test_tipos.py`, `tests/test_custos.py`, `tests/test_escolha.py`, `tests/test_credito.py`, `tests/test_pool.py`, `tests/test_repo.py`, `tests/test_transporte_falso.py`, `tests/test_orquestrador.py`, `tests/test_api.py`
+
+Fecha o item 1 das *Pendências declaradas* da Task 11. O chip do Flow oferece **4s, 6s, 8s e 10s** (medido ao vivo; imagem não tem duração), e o domínio não modelava isso: `Pedido` não tinha o campo e o transporte fixava `DURACAO_PADRAO = "8s"`.
+
+**Por que isso não era detalhe.** O custo depende da duração, e a diferença é grande:
+
+| configuração | créditos | origem |
+|---|---|---|
+| Omni Flash, 8s, 720p, 9:16, x1 | **12** | **MEDIDO** — saldo 50 → 38 |
+| Omni Flash, 4s | **7** | **ANUNCIADO** pelo agente na confirmação; não medido por saldo |
+
+Fixar 8s desperdiçava **70% do crédito em todo vídeo**. Numa conta grátis de 50 créditos por dia, é a diferença entre **4 e 7 vídeos**. E o usuário pediu clipes de 4 segundos explicitamente — o pipeline dele monta cenas de ~5s.
+
+- [ ] **Step 1: `duracao` no domínio**
+
+`flowpool/nucleo/tipos.py` ganha `DURACOES = ("4s", "6s", "8s", "10s")`, `DURACAO_PADRAO = "4s"`, a função pura `duracao_valida(modo, duracao)` e o campo `Job.duracao: str = DURACAO_PADRAO`. `flowpool/nucleo/erros.py` ganha `DuracaoSemCusto`. Os listings finais estão na **Task 1**.
+
+O padrão é **4s** porque é o mais barato e porque é o caso comum do usuário. Duração continua sendo escolha por pedido — o padrão só precisa servir a quem não escolhe.
+
+`duracao_valida` trata `None` como "sem duração", e `None` é o **único** valor válido em imagem. Isso é deliberado: o campo do `Job` sempre tem valor, e é o **modo** que decide se ele significa alguma coisa — o mesmo arranjo de `frame_inicial`, que só quer dizer algo em `frames2v`. Em imagem, o valor fica no padrão e ninguém o lê: o transporte anula, o custo ignora, e a API recusa que o usuário o informe.
+
+- [ ] **Step 2: coluna no banco**
+
+`duracao TEXT NOT NULL DEFAULT '4s'` em `job`, logo depois de `quantidade`, lida e gravada no `repo.py`. Os testes de ida e volta ficam em `tests/test_repo.py` (`test_job_gravado_sem_duracao_sai_com_quatro_segundos` e `test_duracao_sobrevive_ao_banco`) — sem eles, um restart no meio da fila reescreveria todo job pendente para o padrão e o usuário receberia clipes de outro tamanho.
+
+Como nas colunas `proporcao` e `quantidade`, não há passo de migração: o esquema é `CREATE TABLE IF NOT EXISTS`, e um `flowpool.db` anterior à coluna precisa ser recriado à mão. Vale dizer em voz alta, em vez de deixar descobrir por `sqlite3.OperationalError`.
+
+- [ ] **Step 3: `Pedido.duracao` e a constante que sai do transporte**
+
+`transporte/base.py` ganha `duracao: str = DURACAO_PADRAO`, e `transporte/pw/transporte.py` **perde** o `DURACAO_PADRAO = "8s"` e passa a usar `p.duracao`. A verificação do chip (`faltando_no_chip`) já recebia a duração — agora recebe a real, e não a fixa, o que é justamente o que a torna capaz de pegar um clique que não pegou.
+
+`fumaca.py` ganha `--duracao`, com default no padrão do domínio.
+
+- [ ] **Step 4: o custo passa a depender da duração**
+
+É a parte que mais importa. A tabela de vídeo vira `(modelo, tier)` → custo **do clipe de 8s**, e a duração reescala. Vídeo e imagem passam a morar em **dicionários separados**: imagem não tem a dimensão. O listing final está na **Task 2**.
+
+A escala sai dos dois pontos conhecidos do Omni Flash free/pro (`8s = 12` medido, `4s = 7` anunciado). A reta que passa pelos dois é `2 + 1,25` por segundo, o que dá 9,5 em 6s e 14,5 em 10s — arredondados para **cima**, 10 e 15. O 15 tem apoio extra: é o outro número que o agente já anunciou para essa mesma família de pedido. **6s, 10s e os três Veo são EXTRAPOLADOS**, e o código diz isso. Quem corrige é a reconciliação — a tabela nunca foi preço, é reserva.
+
+O arredondamento é sempre para cima, e não é preciosismo: reserva curta demais aprova uma conta que não paga o job, o Flow recusa, o job volta pra fila e a conta é marcada seca por erro de cálculo.
+
+**A duração propaga por `custo_de`, `cabe_no_free`, `apta`, `escolher` e `reservar`** — o mesmo caminho que `quantidade` já percorria, e pelo mesmo motivo: se só a reserva soubesse a duração, a escolha de conta aprovaria uma conta que não paga o job.
+
+> **Contrato substituído conscientemente.** `custo_de(modelo, tier)` **sem duração** passa a valer o custo do clipe **padrão (4s)**, não mais o de 8s. O default tinha que ser o padrão do domínio: um default divergente (8s) faria a reserva do job comum sair errada em silêncio. Consequência: os testes que conferem número de crédito passaram a dizer explicitamente de qual clipe falam — `custo_de(VEO_FAST, FREE, "8s") == 20`, `reservar(c, VEO_FAST, duracao="8s") == 20`, e assim por diante em `test_custos`, `test_escolha`, `test_credito`, `test_pool`, `test_transporte_falso` e `test_orquestrador`. Nenhum caso foi apagado; todos foram tornados explícitos.
+
+- [ ] **Step 5: API**
+
+`PedidoJob.duracao: str = DURACAO_PADRAO`, validado por `duracao_coerente_com_o_modo`: fora da lista → 422; duração em `modo=imagem` → 422, com a mensagem dizendo que imagem não tem duração. `RespostaJob` passa a mostrar o campo. Listings finais na **Task 8**.
+
+A recusa em imagem olha `model_fields_set`, e não o valor — o padrão do domínio é `"4s"`, então comparar valor recusaria **todo** pedido de imagem. É o mesmo critério que `PatchConta` já usa para o proxy, e pelo mesmo motivo: ausência e valor são coisas diferentes.
+
+- [ ] **Step 6: Rodar a suíte**
+
+Run: `.venv/Scripts/pytest -q`
+Expected: `290 passed` (257 → 290; +33 casos).
+
+Os que provam a mudança, e não só a acompanham:
+
+- `test_conta_que_paga_um_clipe_de_4s_nao_e_escolhida_para_o_de_8s` — com saldo 10, a conta paga o de 4s (7) e não paga o de 8s (12). É o teste que prova que a duração atravessou **`escolher`**, e não só `reservar`.
+- `test_job_longo_pula_a_conta_que_so_paga_o_curto` — o mesmo, ponta a ponta pelo orquestrador.
+- `test_quatro_segundos_custa_menos_que_oito_em_todo_modelo_de_video` — o número que justifica a mudança inteira.
+- `test_imagem_com_duracao_da_422` e `test_imagem_sem_duracao_passa` — os dois lados do `model_fields_set`.
+- `test_pedido_leva_a_duracao_ao_transporte` — sem isso, o transporte real cairia no default da UI e o pedido do usuário seria ignorado em silêncio.
+- `test_duracao_que_nao_pegou_e_apontada` (já existia em `test_transporte_pw.py`) — continua valendo, agora com o campo real por trás.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add flowpool tests
+git commit -m "feat: duracao de video no dominio, no custo e na escolha de conta"
+```
+
+- [ ] **Step 8: Medir de verdade, quando houver crédito para gastar**
+
+Os 7 créditos do clipe de 4s são **anunciados**, não medidos. Vale fechar a medição por saldo assim que houver crédito sobrando:
+
+```bash
+.venv/Scripts/python -m flowpool.transporte.pw.fumaca flowpool/perfis/mapeamento \
+  t2v omni-flash "a slow push-in on a ceramic mug" --duracao 4s
+```
+
+Expected: `custo real: 7`. Se sair diferente, o número da tabela muda e a escala inteira se move junto — é ela que sustenta 6s, 10s e os três Veo. **Não rodar sem decidir gastar o crédito**: a geração é real.
 
 ---
 
