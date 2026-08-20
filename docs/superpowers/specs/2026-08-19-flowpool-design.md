@@ -44,11 +44,15 @@ Python 3.13 (mesmo do pipeline), FastAPI + uvicorn, SQLite, Playwright async, ht
 
 ## Modelo de dados
 
-**conta** — id, email, tier (`free` | `pro` | `ultra`), caminho do perfil, saldo conhecido, timestamp da última leitura de saldo, timestamp do último reset observado, estado da sessão (`viva` | `expirada` | `bloqueada`), falhas consecutivas, ativa (bool).
+**conta** — id, email, tier (`free` | `pro` | `ultra`), caminho do perfil, saldo conhecido, timestamp da última leitura de saldo, timestamp do último reset observado, `seca_ate`, estado da sessão (`viva` | `expirada` | `bloqueada`), falhas consecutivas, ativa (bool).
+
+`seca_ate` é até quando a conta está fora do pool. O Flow às vezes mostra saldo e mesmo assim recusa gerar — cota diária, throttle, rate limit. Sem um prazo gravado, o job recusado volta para a fila no mesmo instante, é despachado para a mesma conta e o motor gira em laço quente: CPU a 100%, um Chrome aberto e fechado por iteração, tabela de eventos crescendo sem parar, nenhuma tentativa consumida e nada nunca desistindo. É a materialização do que a seção *Fila e execução* já pedia com "marca a conta seca até o reset estimado".
 
 **job** — id, modo, prompt, referências (caminhos), modelo, prioridade, estado (`pending` | `running` | `done` | `failed` | `cancelled`), conta usada, id remoto da geração, caminho do arquivo final, tentativas, `custo_estimado`, erro, timestamps.
 
-`custo_estimado` é quanto o job reservou da conta ao ser despachado, e fica gravado no banco. É o que permite estornar a reserva de um job que morreu antes de gerar — inclusive depois de um restart do serviço, quando não há mais nada em memória dizendo quanto aquele job tinha travado.
+`custo_estimado` é quanto o job reservou da conta ao ser despachado, e fica gravado no banco. É o que permite estornar a reserva de um job que morreu antes de gerar — inclusive depois de um restart do serviço, quando não há mais nada em memória dizendo quanto aquele job tinha travado. Quem consome esse campo depois do restart é a **recuperação no boot**, descrita em *Fila e execução*; sem ela o campo seria persistido e nunca lido por ninguém.
+
+Timestamps de datetime são gravados **sempre normalizados em UTC**. A fila compara `reavaliar_em` em SQL, e essa comparação é lexicográfica sobre texto: dois offsets diferentes na mesma coluna quebrariam a ordem em silêncio — um horário com `-03:00` ordenaria antes de um `+00:00` que é anterior de verdade.
 
 **evento** — id, job, conta, tipo, payload, timestamp. Trilha de auditoria; é o que permite descobrir por que um lote saiu torto três dias depois.
 
@@ -62,31 +66,48 @@ Três detalhes que a regra acima esconde e sem os quais o pool se estraga sozinh
 
 **Toda reserva que não vira geração é estornada** (`liberar`). Falha de rede, sessão que caiu, timeout — o Flow nunca chegou a cobrar, então o crédito volta. Sem estorno, três timeouts numa conta grátis de 50 créditos zeram o saldo local com os 50 créditos intactos no Flow, e a conta some do pool para sempre: ninguém despacha job para conta que parece seca. Pelo mesmo motivo, reservar sem saldo **recusa** (`SaldoInsuficiente`) em vez de zerar o saldo — zerar apagaria crédito real que ainda daria outra geração mais barata.
 
-**A divergência é medida com sinal, não em módulo.** Positivo significa que sobrou crédito (o custo real é menor que a tabela); negativo, que faltou (o Google cobrou mais). A distinção importa por dois motivos: é ela que responde a pergunta em aberto sobre imagem custar ou sair de graça, e só a direção pessimista derruba a confiança no saldo. Sobrar crédito é notícia boa, não sintoma de contabilidade furada.
+**A divergência é medida com sinal, não em módulo, e é gravada.** Positivo significa que sobrou crédito (o custo real é menor que a tabela); negativo, que faltou (o Google cobrou mais). A distinção importa por dois motivos: é ela que responde a pergunta em aberto sobre imagem custar ou sair de graça, e só a direção pessimista derruba a confiança no saldo. Sobrar crédito é notícia boa, não sintoma de contabilidade furada.
+
+Acima do limiar, o delta com sinal e o valor lido viram um evento `divergencia`. Calcular o número e descartá-lo apagaria a única medição real que o projeto tem sobre custo — justamente a que o desenho diz que vai desempatar a nota sobre custo de imagem. Pelo mesmo motivo, reconciliação que **falha** também vira evento (`reconciliacao_falhou`) em vez de ser engolida: esse silêncio escondia inclusive falha de gravação da conta.
 
 **O reset diário da conta grátis não é divergência.** Conta grátis que aparece de volta no teto de 50 não divergiu: ela resetou. O sistema registra o reset observado e mantém a confiança no saldo, em vez de tratar o salto como erro de contabilidade — o que derrubaria a confiança de todas as contas grátis uma vez por dia, todo dia.
 
 ## Escolha de conta
 
-Função pura: `escolher(contas, modelo) -> Conta | None`.
+Função pura: `escolher(contas, modelo, agora) -> Conta | None`.
 
 O parâmetro é o **modelo**, não um custo: o custo depende do tier (Ultra paga 10 por um Fast que custa 20 na grátis), então um número único não descreveria um pool misto — e é o modelo, não o custo, que diz se o job é Quality e portanto proibido em conta grátis.
+
+O **relógio entra por parâmetro**, nunca por `datetime.now()` dentro da função. É a única forma de manter pura a peça central do desenho, aquela que o spec promete ser testável sem navegador nenhum: com o `agora` injetado, a tabela de testes cobre prazo vencido e prazo futuro sem congelar o relógio do processo.
 
 (`prioridade` no job é outra coisa: ordena a **fila**, não influencia a conta. Inteiro, maior primeiro, empate resolvido por ordem de chegada.)
 
 Política, com o porquê:
 
 1. Descarta conta sem sessão viva, inativa, ou com saldo abaixo do custo.
-2. Descarta conta grátis quando o job é Quality (não cabe no teto diário).
-3. **Prefere crédito que expira antes.** Crédito de conta grátis morre em 24h; o de conta paga acumula até o fim do mês. Gastar grátis primeiro não é preferência, é aritmética.
-4. Entre contas do mesmo tier, a de maior saldo — espalha o uso e evita deixar sobras inúteis de 5 créditos espalhadas pelo pool.
-5. Nenhuma serve: o job volta para a fila com um horário de reavaliação (o próximo reset conhecido), em vez de falhar.
+2. Descarta conta com `seca_ate` no futuro — o Flow já recusou gerar nela apesar do saldo aparente, e insistir antes do prazo é o laço quente descrito em *Modelo de dados*.
+3. Descarta conta grátis quando o job é Quality (não cabe no teto diário).
+4. **Prefere crédito que expira antes.** Crédito de conta grátis morre em 24h; o de conta paga acumula até o fim do mês. Gastar grátis primeiro não é preferência, é aritmética.
+5. Entre contas do mesmo tier, a de maior saldo — espalha o uso e evita deixar sobras inúteis de 5 créditos espalhadas pelo pool.
+6. Nenhuma serve: o job volta para a fila com um horário de reavaliação (o próximo reset conhecido), em vez de falhar.
+
+Uma exceção antes de tudo isso: job que volta para a fila **com `id_remoto`** tem geração paga em curso no Flow, e ela só pode ser retomada de dentro da conta que a criou. Nesse caso a conta anterior tem preferência, e a política acima só entra se ela não servir mais.
 
 ## Fila e execução
 
 Um worker por conta viva, com teto global de simultâneos (configurável; começa em 3 — cada worker segura um navegador enquanto o transporte for A).
 
-Falha por saldo não é erro: marca a conta seca até o reset estimado e devolve o job para a fila, que ele reaparece em outra conta sozinho. Falha por sessão morta marca a conta `expirada` e emite alerta no painel — essa exige a pessoa. Falha de rede tem retry com backoff, teto de 3 tentativas, e a terceira troca de conta antes de desistir.
+**Puxar da fila é atômico.** O worker adquire o teto de simultâneos *antes* de puxar, e a leitura do job e a marcação de `rodando` acontecem numa instrução só (`UPDATE ... RETURNING`). Ler primeiro e marcar depois deixa entre os dois uma janela em que o job continua `pendente` e visível para todo mundo: com três workers e teto 1, dois jobs viraram três gerações e 60 créditos gastos em vez de 40, e o worker perdedor sobrescreveu o arquivo do vencedor.
+
+**Há recuperação no boot.** Antes de o motor puxar qualquer coisa nova, todo job deixado em `rodando` por um crash anterior é resolvido — a fila só olha para `pendente`, então sem isso ele nunca seria retomado nem falharia, e o crédito que ele reservou nunca voltaria. A diferença é o `id_remoto`: vazio significa que o Flow nunca aceitou o pedido, então a reserva é estornada e o job volta para `pendente` sem gastar tentativa (não foi ele que falhou, foi a máquina); preenchido significa que existe geração lá fora, já paga, e aí o job volta preservando `id_remoto` e conta, sem estorno. Cada caso vira evento (`recuperado_sem_gerar`, `recuperado_com_geracao`).
+
+**Falha por saldo não é erro:** marca a conta seca até o reset estimado — gravando `seca_ate` e adiando o `reavaliar_em` do job para o mesmo horário — e devolve o job para a fila, que ele reaparece em outra conta sozinho. Marcar sem prazo, ou adiar sem marcar, reproduz o laço quente.
+
+**Falha por sessão morta** marca a conta `expirada` e emite alerta no painel — essa exige a pessoa. A sessão não morre só ao abrir: no transporte real ela cai no meio de gerar, consultar ou baixar, então esse caminho também estorna a reserva. E a marcação de sessão é escrita **campo a campo**, não regravando a linha inteira da conta: com dois workers na mesma conta, a gravação de linha cheia a partir de uma cópia carregada antes ressuscita para `viva` a sessão que o outro acabou de expirar, e o pool volta a despachar para uma conta que exige login manual.
+
+**Falha de rede** tem retry com backoff, teto de 3 tentativas, e a terceira troca de conta antes de desistir. Quando a falha é **timeout de uma geração que o Flow já aceitou**, o job volta para a fila preservando `id_remoto` e conta, e a tentativa seguinte **retoma** aquela geração em vez de criar outra. Descartar o `id_remoto` faria pagar de novo enquanto a primeira geração termina no Flow, órfã, sem ninguém para baixar: um Quality de 11 minutos custa 200 créditos e não entrega nada; na terceira tentativa, 300.
+
+**O laço do motor não morre em silêncio.** Toda exceção que escapa de um passo vira evento (`passo_falhou`) e o laço continua. Sem isso a task do motor termina e ninguém observa: a API segue respondendo HTTP normalmente enquanto a fila nunca mais anda.
 
 ## API HTTP
 
