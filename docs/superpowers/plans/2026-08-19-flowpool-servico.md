@@ -145,6 +145,12 @@ def test_job_nasce_pendente_sem_tentativas():
     assert j.conta_id is None
 
 
+def test_job_nasce_sem_custo_estimado():
+    # sem registrar o reservado nao ha como estornar um job que morreu antes de gerar
+    j = Job(id=1, modo=Modo.T2V, modelo=Modelo.VEO_FAST, prompt="p", destino="x", nome="c1")
+    assert j.custo_estimado is None
+
+
 def test_enums_serializam_como_texto():
     assert Tier.ULTRA.value == "ultra"
     assert Modo.INGREDIENTS2V.value == "ingredients2v"
@@ -245,16 +251,20 @@ class Job:
     id_remoto: str | None = None
     arquivo: str | None = None
     tentativas: int = 0
+    custo_estimado: int | None = None
     erro: str | None = None
     reavaliar_em: datetime | None = None
     criado_em: datetime | None = None
     atualizado_em: datetime | None = None
 ```
 
+`custo_estimado` guarda quanto o job reservou. Sem esse número não há como estornar a
+reserva de um job que morreu antes de gerar — nem depois de um restart do serviço.
+
 - [ ] **Step 4: Rodar e ver passar**
 
 Run: `.venv/Scripts/pytest tests/test_tipos.py -q`
-Expected: `4 passed`
+Expected: `5 passed`
 
 - [ ] **Step 5: Commit**
 
@@ -272,6 +282,8 @@ git commit -m "feat: tipos do dominio do flowpool"
 - Test: `tests/test_custos.py`
 
 O custo depende do par (modelo, tier): conta Ultra paga menos por Lite e Fast. O teto diário do free é o que impede Quality de rodar em conta grátis.
+
+`custo_de` recusa par desconhecido com `ModeloSemCusto` em vez de deixar vazar um `KeyError`. Motivo: `custo_de` roda dentro de `apta()`, que roda para CADA conta dentro de `escolher()` — um `KeyError` cru não derruba um job, derruba a avaliação do pool inteiro e trava a fila. E o spec já promete acomodar um modelo novo (Gemini Omni) sem migração, então o dia em que alguém acrescenta um modelo e esquece o custo vai chegar. Depende da Task 4, que cria `flowpool/nucleo/erros.py`; se implementar as tasks fora de ordem, crie o `erros.py` antes.
 
 - [ ] **Step 1: Escrever o teste que falha**
 
@@ -308,6 +320,13 @@ def test_custo_por_modelo_e_tier(modelo, tier, esperado):
     assert custo_de(modelo, tier) == esperado
 
 
+def test_tabela_cobre_todos_os_pares():
+    # um modelo novo sem custo cadastrado travaria a fila inteira, nao so um job
+    for m in Modelo:
+        for t in Tier:
+            assert isinstance(custo_de(m, t), int)
+
+
 def test_quality_nao_cabe_em_conta_gratis():
     # 100 creditos contra teto diario de 50 — nunca cabe
     assert cabe_no_free(Modelo.VEO_QUALITY) is False
@@ -338,6 +357,7 @@ real, reconciliada em `nucleo/credito.py`.
 
 from __future__ import annotations
 
+from flowpool.nucleo.erros import ModeloSemCusto
 from flowpool.nucleo.tipos import Modelo, Tier
 
 TETO_DIARIO_FREE = 50
@@ -360,7 +380,10 @@ _CUSTO: dict[tuple[Modelo, Tier], int] = {
 
 def custo_de(modelo: Modelo, tier: Tier) -> int:
     """Custo estimado em creditos de uma geracao."""
-    return _CUSTO[(modelo, tier)]
+    try:
+        return _CUSTO[(modelo, tier)]
+    except KeyError:
+        raise ModeloSemCusto(f"sem custo cadastrado para {modelo.value} em {tier.value}") from None
 
 
 def cabe_no_free(modelo: Modelo) -> bool:
@@ -371,7 +394,7 @@ def cabe_no_free(modelo: Modelo) -> bool:
 - [ ] **Step 4: Rodar e ver passar**
 
 Run: `.venv/Scripts/pytest tests/test_custos.py -q`
-Expected: `16 passed`
+Expected: `17 passed`
 
 - [ ] **Step 5: Commit**
 
@@ -389,6 +412,8 @@ git commit -m "feat: tabela de custo por modelo e tier"
 - Test: `tests/test_escolha.py`
 
 Esta é a peça central e é função pura — merece teste de tabela cobrindo os casos reais do pool do Davi.
+
+Os enums são comparados com `==`, nunca com `is`. `Tier` e `SaudeSessao` herdam de `str, Enum`: se em qualquer caminho futuro um valor chegar como string crua vinda do SQLite, o `is` falha em silêncio — e falha nas duas direções erradas, descartando conta viva ou aprovando conta grátis para Veo Quality, que é a única regra que o spec chama de intransponível. O `==` custa zero e elimina o modo de falha.
 
 - [ ] **Step 1: Escrever o teste que falha**
 
@@ -464,6 +489,16 @@ def test_ultra_paga_menos_e_por_isso_consegue_onde_pro_nao_conseguiria():
 def test_desempate_entre_pagas_e_por_saldo():
     contas = [conta(1, Tier.PRO, 300), conta(2, Tier.ULTRA, 900)]
     assert escolher(contas, Modelo.VEO_QUALITY).id == 2
+
+
+def test_desempate_nao_depende_da_ordem_da_lista():
+    # a lista vem de um SELECT sem ORDER BY garantido; a escolha nao pode variar
+    a, b = conta(1, Tier.FREE, 50), conta(2, Tier.FREE, 50)
+    assert escolher([a, b], Modelo.VEO_FAST).id == escolher([b, a], Modelo.VEO_FAST).id
+
+
+def test_saldo_exatamente_igual_ao_custo_serve():
+    assert escolher([conta(1, Tier.FREE, 20)], Modelo.VEO_FAST).id == 1
 ```
 
 - [ ] **Step 2: Rodar e ver falhar**
@@ -490,9 +525,11 @@ _ORDEM_TIER = {Tier.FREE: 1, Tier.PRO: 0, Tier.ULTRA: 0}
 
 
 def apta(c: Conta, modelo: Modelo) -> bool:
-    if not c.ativa or c.saude is not SaudeSessao.VIVA:
+    # Comparacao por valor, nao por identidade: `Tier` e `SaudeSessao` herdam de
+    # `str, Enum`, e um valor cru vindo do SQLite quebraria `is` em silencio.
+    if not c.ativa or c.saude != SaudeSessao.VIVA:
         return False
-    if c.tier is Tier.FREE and not cabe_no_free(modelo):
+    if c.tier == Tier.FREE and not cabe_no_free(modelo):
         return False
     return custo_de(modelo, c.tier) <= c.saldo
 
@@ -508,7 +545,7 @@ def escolher(contas: Sequence[Conta], modelo: Modelo) -> Conta | None:
 - [ ] **Step 4: Rodar e ver passar**
 
 Run: `.venv/Scripts/pytest tests/test_escolha.py -q`
-Expected: `12 passed`
+Expected: `14 passed`
 
 - [ ] **Step 5: Commit**
 
@@ -522,19 +559,46 @@ git commit -m "feat: politica de escolha de conta"
 ### Task 4: Contabilidade de crédito
 
 **Files:**
-- Create: `flowpool/nucleo/credito.py`
-- Test: `tests/test_credito.py`
+- Create: `flowpool/nucleo/erros.py`, `flowpool/nucleo/credito.py`
+- Test: `tests/test_credito.py`, `tests/test_pool.py`
 
 O ponto que o spec insiste: descontar o previsto ao despachar (para dois jobs simultâneos não estourarem o mesmo saldo) e reconciliar com a leitura real ao terminar.
 
-- [ ] **Step 1: Escrever o teste que falha**
+Três coisas que o desenho ingênuo erra e esta task corrige de saída:
+
+1. **Reserva recusa, não zera.** Chegar em `reservar` sem saldo significa que quem chamou ignorou `escolher`; zerar silenciosamente apagaria crédito real que ainda daria outra geração mais barata.
+2. **Existe estorno (`liberar`).** Sem ele, três timeouts de rede numa conta de 50 créditos zeram o saldo local com os 50 créditos intactos no Flow — e a conta some do pool para sempre, porque ninguém despacha job para conta que parece seca.
+3. **A divergência é medida com sinal.** Sobrar crédito é notícia boa (é o que responde se a imagem custa ou sai de graça); só faltar crédito derruba a confiança. E o reset diário da conta grátis não é divergência nenhuma: é a conta voltando ao teto.
+
+- [ ] **Step 1: Criar os erros de domínio**
+
+`flowpool/nucleo/erros.py`:
+
+```python
+"""Erros de dominio. Camadas de cima importam daqui; nucleo nao importa de ninguem."""
+
+
+class SaldoInsuficiente(Exception):
+    """A conta nao tem credito para o custo pedido. Nao e falha: e hora de trocar de conta."""
+
+
+class ModeloSemCusto(Exception):
+    """Modelo/tier sem custo cadastrado. Erro de configuracao, nao de execucao."""
+```
+
+Fica em `nucleo/` porque as camadas de cima dependem de `nucleo`, nunca o contrário. `transporte/base.py` (Task 6) reexporta `SaldoInsuficiente` daqui em vez de definir a sua própria — duas classes com o mesmo nome fariam o `except` do orquestrador pegar uma e deixar a outra passar.
+
+- [ ] **Step 2: Escrever o teste que falha**
 
 `tests/test_credito.py`:
 
 ```python
 from datetime import datetime, timezone
 
-from flowpool.nucleo.credito import LIMIAR_DIVERGENCIA, reconciliar, reservar
+import pytest
+
+from flowpool.nucleo.credito import LIMIAR_DIVERGENCIA, liberar, reconciliar, reservar
+from flowpool.nucleo.erros import SaldoInsuficiente
 from flowpool.nucleo.tipos import Conta, Modelo, Tier
 
 
@@ -546,22 +610,56 @@ def conta(saldo, tier=Tier.FREE):
 AGORA = datetime(2026, 8, 19, 12, 0, tzinfo=timezone.utc)
 
 
+# --- reservar ---
+
 def test_reservar_desconta_o_custo_previsto():
     c = conta(50)
-    reservar(c, Modelo.VEO_FAST)
+    assert reservar(c, Modelo.VEO_FAST) == 20
     assert c.saldo == 30
 
 
-def test_reservar_nunca_deixa_saldo_negativo():
+def test_reservar_recusa_quando_o_custo_excede_o_saldo():
+    # zerar o saldo apagaria credito real que ainda daria outra geracao mais barata
     c = conta(5)
-    reservar(c, Modelo.VEO_FAST)
+    with pytest.raises(SaldoInsuficiente):
+        reservar(c, Modelo.VEO_FAST)
+
+
+def test_reservar_recusado_nao_altera_o_saldo():
+    c = conta(5)
+    with pytest.raises(SaldoInsuficiente):
+        reservar(c, Modelo.VEO_FAST)
+    assert c.saldo == 5
+
+
+def test_reservar_aceita_saldo_exatamente_igual_ao_custo():
+    c = conta(20)
+    assert reservar(c, Modelo.VEO_FAST) == 20
     assert c.saldo == 0
 
 
+# --- liberar ---
+
+def test_liberar_devolve_o_credito():
+    c = conta(30)
+    liberar(c, 20)
+    assert c.saldo == 50
+
+
+def test_reservar_e_liberar_voltam_ao_saldo_original():
+    # tres timeouts de rede nao podem sumir com a conta do pool
+    c = conta(50)
+    custo = reservar(c, Modelo.VEO_FAST)
+    liberar(c, custo)
+    assert c.saldo == 50
+
+
+# --- reconciliar ---
+
 def test_reconciliar_com_leitura_igual_mantem_confianca():
     c = conta(30)
-    div = reconciliar(c, lido=30, agora=AGORA)
-    assert div == 0
+    delta = reconciliar(c, lido=30, agora=AGORA)
+    assert delta == 0
     assert c.saldo == 30
     assert c.saldo_confiavel is True
     assert c.saldo_lido_em == AGORA
@@ -574,38 +672,69 @@ def test_reconciliar_sempre_adota_o_valor_lido():
     assert c.saldo == 42
 
 
-def test_divergencia_pequena_nao_derruba_confianca():
+def test_delta_positivo_quando_sobrou_credito():
+    # o custo real saiu menor que a tabela — e isso que responde se imagem sai de graca
     c = conta(30)
-    div = reconciliar(c, lido=32, agora=AGORA)
-    assert div == 2
+    assert reconciliar(c, lido=35, agora=AGORA) == 5
+
+
+def test_delta_negativo_quando_faltou_credito():
+    # o Google cobrou mais que a tabela
+    c = conta(30)
+    assert reconciliar(c, lido=28, agora=AGORA) == -2
+
+
+def test_divergencia_pequena_para_baixo_nao_derruba_confianca():
+    c = conta(30)
+    delta = reconciliar(c, lido=30 - LIMIAR_DIVERGENCIA, agora=AGORA)
+    assert delta == -LIMIAR_DIVERGENCIA
     assert c.saldo_confiavel is True
 
 
-def test_divergencia_grande_derruba_confianca():
-    c = conta(30)
-    div = reconciliar(c, lido=30 + LIMIAR_DIVERGENCIA + 1, agora=AGORA)
-    assert div > LIMIAR_DIVERGENCIA
-    assert c.saldo_confiavel is False
-
-
-def test_divergencia_e_em_modulo():
+def test_divergencia_grande_para_baixo_derruba_confianca():
     c = conta(100)
-    div = reconciliar(c, lido=100 - LIMIAR_DIVERGENCIA - 1, agora=AGORA)
-    assert div > LIMIAR_DIVERGENCIA
+    delta = reconciliar(c, lido=100 - LIMIAR_DIVERGENCIA - 1, agora=AGORA)
+    assert delta < -LIMIAR_DIVERGENCIA
     assert c.saldo_confiavel is False
+
+
+def test_divergencia_grande_para_cima_em_conta_paga_nao_derruba_confianca():
+    # sobrar credito e boa noticia, nao sintoma de contabilidade furada
+    c = conta(100, tier=Tier.PRO)
+    delta = reconciliar(c, lido=100 + LIMIAR_DIVERGENCIA + 10, agora=AGORA)
+    assert delta > LIMIAR_DIVERGENCIA
+    assert c.saldo_confiavel is True
+
+
+def test_reset_da_conta_gratis_nao_e_divergencia():
+    # 10 -> 50 e o reset diario, nao contabilidade furada
+    c = conta(10, tier=Tier.FREE)
+    delta = reconciliar(c, lido=50, agora=AGORA)
+    assert delta == 40
+    assert c.saldo == 50
+    assert c.reset_em == AGORA
+    assert c.saldo_confiavel is True
+
+
+def test_conta_paga_que_sobe_ate_50_nao_e_reset():
+    c = conta(10, tier=Tier.PRO)
+    reconciliar(c, lido=50, agora=AGORA)
+    assert c.reset_em is None
+    assert c.saldo_confiavel is True
 ```
 
-- [ ] **Step 2: Rodar e ver falhar**
+- [ ] **Step 3: Rodar e ver falhar**
 
 Run: `.venv/Scripts/pytest tests/test_credito.py -q`
 Expected: FAIL — `ModuleNotFoundError: No module named 'flowpool.nucleo.credito'`
 
-- [ ] **Step 3: Implementar**
+- [ ] **Step 4: Implementar**
 
 `flowpool/nucleo/credito.py`:
 
 ```python
-"""Contabilidade de credito: reservar o previsto, reconciliar com o lido.
+"""Contabilidade de credito: reservar o previsto, estornar o que nao foi usado,
+reconciliar com o lido.
 
 Descontar so localmente acumula erro (geracao que falha depois de debitar, custo que
 o Google muda, imagem que as vezes sai a zero). Em uma semana o app manda job pra
@@ -616,39 +745,174 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from flowpool.nucleo.custos import custo_de
-from flowpool.nucleo.tipos import Conta, Modelo
+from flowpool.nucleo.custos import TETO_DIARIO_FREE, custo_de
+from flowpool.nucleo.erros import SaldoInsuficiente
+from flowpool.nucleo.tipos import Conta, Modelo, Tier
 
-# Acima disso, o saldo deixa de ser confiavel ate a proxima leitura.
+# Gastar mais do que o previsto acima disso significa que o modelo de custo esta
+# errado — o numero lido continua valido, mas projetar em cima dele nao.
 LIMIAR_DIVERGENCIA = 5
 
 
 def reservar(conta: Conta, modelo: Modelo) -> int:
-    """Desconta o custo previsto antes de despachar. Devolve o custo reservado."""
+    """Desconta o custo previsto antes de despachar. Devolve o custo reservado.
+
+    Recusa em vez de zerar: chegar aqui sem saldo significa que quem chamou ignorou
+    `escolher`, e silenciar isso apagaria credito real que ainda daria outra geracao.
+    """
     custo = custo_de(modelo, conta.tier)
-    conta.saldo = max(0, conta.saldo - custo)
+    if custo > conta.saldo:
+        raise SaldoInsuficiente(
+            f"conta {conta.email}: saldo {conta.saldo} < custo {custo}"
+        )
+    conta.saldo -= custo
     return custo
 
 
+def liberar(conta: Conta, custo: int) -> None:
+    """Devolve uma reserva que nao virou geracao.
+
+    Sem isso, tres timeouts de rede numa conta de 50 creditos zeram o saldo local com
+    os 50 creditos intactos no Flow — e a conta some do pool para sempre, porque
+    ninguem despacha job para conta que parece seca.
+    """
+    conta.saldo += custo
+
+
 def reconciliar(conta: Conta, lido: int, agora: datetime) -> int:
-    """Adota o saldo lido do Flow. Devolve a divergencia absoluta."""
-    divergencia = abs(lido - conta.saldo)
+    """Adota o saldo lido do Flow. Devolve a diferenca COM SINAL.
+
+    Positivo = sobrou credito (o custo real e menor que a tabela).
+    Negativo = faltou credito (o Google cobrou mais que a tabela).
+    A distincao importa: e ela que responde se a imagem custa creditos ou sai de graca.
+    """
+    delta = lido - conta.saldo
     conta.saldo = lido
     conta.saldo_lido_em = agora
-    conta.saldo_confiavel = divergencia <= LIMIAR_DIVERGENCIA
-    return divergencia
+
+    if _parece_reset(conta, lido, delta):
+        conta.reset_em = agora
+        conta.saldo_confiavel = True
+    else:
+        # So a direcao pessimista derruba a confianca. Sobrar credito e boa noticia,
+        # nao sintoma de contabilidade furada.
+        conta.saldo_confiavel = delta >= -LIMIAR_DIVERGENCIA
+
+    return delta
+
+
+def _parece_reset(conta: Conta, lido: int, delta: int) -> bool:
+    """Conta gratuita que volta ao teto diario nao divergiu: ela resetou."""
+    return conta.tier == Tier.FREE and delta > 0 and lido >= TETO_DIARIO_FREE
 ```
 
-- [ ] **Step 4: Rodar e ver passar**
+- [ ] **Step 5: Rodar e ver passar**
 
 Run: `.venv/Scripts/pytest tests/test_credito.py -q`
-Expected: `7 passed`
+Expected: `15 passed`
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Teste de integração do núcleo**
+
+Os testes acima olham uma função de cada vez. Falta o cenário real do pool do Davi — três contas grátis e uma Ultra, dez jobs em sequência — que é o único que exporia uma regressão na contabilidade (reserva que zera saldo, estorno que não volta, grátis que sobra sem ser usada). Continua sem navegador e sem banco: é só núcleo.
+
+`tests/test_pool.py`:
+
+```python
+"""Integracao do nucleo: escolher + reservar + liberar sobre o pool real do Davi.
+
+Nao ha navegador nem banco aqui. E o cenario que expoe qualquer regressao na
+contabilidade — reserva que zera saldo, estorno que nao volta, free que sobra.
+"""
+
+from flowpool.nucleo.credito import liberar, reservar
+from flowpool.nucleo.custos import custo_de
+from flowpool.nucleo.escolha import escolher
+from flowpool.nucleo.tipos import Conta, Modelo, Tier
+
+
+def conta(id, tier, saldo):
+    return Conta(id=id, email=f"c{id}@x.com", tier=tier, perfil=f"p/{id}", saldo=saldo)
+
+
+def pool():
+    return [
+        conta(1, Tier.FREE, 50),
+        conta(2, Tier.FREE, 50),
+        conta(3, Tier.FREE, 50),
+        conta(4, Tier.ULTRA, 9000),
+    ]
+
+
+def test_dez_jobs_fast_drenam_as_free_antes_de_tocar_a_ultra():
+    contas = pool()
+    ultra = contas[3]
+    frees = contas[:3]
+    despachos = []
+
+    for _ in range(10):
+        escolhida = escolher(contas, Modelo.VEO_FAST)
+        assert escolhida is not None, "o pool tem Ultra com 9000; nunca deveria secar"
+        # so se reserva na conta que `escolher` devolveu — mesmo objeto, nao uma copia
+        assert any(escolhida is c for c in contas)
+        custo = reservar(escolhida, Modelo.VEO_FAST)
+        assert custo == custo_de(Modelo.VEO_FAST, escolhida.tier)
+        despachos.append(escolhida.id)
+
+    # Fast custa 20 na free: 50 -> 30 -> 10. Cada free rende 2 jobs, as tres rendem 6.
+    assert despachos[:6].count(1) == 2
+    assert despachos[:6].count(2) == 2
+    assert despachos[:6].count(3) == 2
+    assert ultra.id not in despachos[:6]
+    # so depois de nenhuma free caber e que a Ultra entra
+    assert despachos[6:] == [ultra.id] * 4
+
+    for f in frees:
+        assert f.saldo < custo_de(Modelo.VEO_FAST, Tier.FREE)
+
+    assert all(c.saldo >= 0 for c in contas)
+    assert ultra.saldo == 9000 - 4 * custo_de(Modelo.VEO_FAST, Tier.ULTRA)
+
+
+def test_nenhuma_conta_e_reservada_sem_ter_sido_escolhida():
+    contas = pool()
+    tocadas = set()
+
+    for _ in range(10):
+        escolhida = escolher(contas, Modelo.VEO_FAST)
+        reservar(escolhida, Modelo.VEO_FAST)
+        tocadas.add(escolhida.id)
+
+    intactas = [c for c in contas if c.id not in tocadas]
+    assert all(c.saldo == 50 or c.saldo == 9000 for c in intactas)
+
+
+def test_falha_de_geracao_devolve_a_reserva_intacta():
+    contas = pool()
+    escolhida = escolher(contas, Modelo.VEO_FAST)
+    antes = escolhida.saldo
+
+    custo = reservar(escolhida, Modelo.VEO_FAST)
+    # a geracao morre aqui: timeout de rede, sessao caida, o que for
+    liberar(escolhida, custo)
+
+    assert escolhida.saldo == antes
+```
+
+- [ ] **Step 7: Rodar e ver passar**
+
+Run: `.venv/Scripts/pytest tests/test_pool.py -q`
+Expected: `3 passed`
+
+- [ ] **Step 8: Rodar o núcleo inteiro**
+
+Run: `.venv/Scripts/pytest -q`
+Expected: `54 passed` (5 tipos + 17 custos + 14 escolha + 15 credito + 3 pool)
+
+- [ ] **Step 9: Commit**
 
 ```bash
-git add flowpool/nucleo/credito.py tests/test_credito.py
-git commit -m "feat: reserva e reconciliacao de credito"
+git add flowpool/nucleo/erros.py flowpool/nucleo/credito.py tests/test_credito.py tests/test_pool.py
+git commit -m "feat: reserva, estorno e reconciliacao de credito"
 ```
 
 ---
@@ -658,6 +922,8 @@ git commit -m "feat: reserva e reconciliacao de credito"
 **Files:**
 - Create: `flowpool/dados/esquema.sql`, `flowpool/dados/repo.py`
 - Test: `tests/test_repo.py`
+
+`custo_estimado` é persistido junto com o job. Não é enfeite: é o que permite estornar a reserva de um job que morreu no meio, inclusive depois de um restart do serviço — quem reabrir o banco precisa saber quanto aquele job tinha reservado.
 
 - [ ] **Step 1: Escrever o teste que falha**
 
@@ -719,6 +985,11 @@ def test_criar_e_ler_job(repo):
     assert j.prompt == "uma gata"
     assert j.estado is EstadoJob.PENDENTE
     assert j.criado_em is not None
+    assert j.custo_estimado is None
+    # o custo reservado precisa sobreviver a um restart para poder ser estornado
+    j.custo_estimado = 20
+    repo.salvar_job(j)
+    assert repo.job(id_).custo_estimado == 20
 
 
 def test_referencias_sobrevivem_ao_banco(repo):
@@ -793,6 +1064,7 @@ CREATE TABLE IF NOT EXISTS job (
     id_remoto      TEXT,
     arquivo        TEXT,
     tentativas     INTEGER NOT NULL DEFAULT 0,
+    custo_estimado INTEGER,
     erro           TEXT,
     reavaliar_em   TEXT,
     criado_em      TEXT    NOT NULL,
@@ -899,12 +1171,12 @@ class Repo:
         agora = datetime.now(timezone.utc).isoformat()
         cur = self.con.execute(
             """INSERT INTO job (modo, modelo, prompt, destino, nome, referencias,
-                   frame_inicial, frame_final, prioridade, estado, reavaliar_em,
-                   criado_em, atualizado_em)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   frame_inicial, frame_final, prioridade, estado, custo_estimado,
+                   reavaliar_em, criado_em, atualizado_em)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (j.modo.value, j.modelo.value, j.prompt, j.destino, j.nome,
              json.dumps(j.referencias), j.frame_inicial, j.frame_final, j.prioridade,
-             j.estado.value, _txt(j.reavaliar_em), agora, agora),
+             j.estado.value, j.custo_estimado, _txt(j.reavaliar_em), agora, agora),
         )
         self.con.commit()
         return int(cur.lastrowid)
@@ -935,10 +1207,12 @@ class Repo:
     def salvar_job(self, j: Job) -> None:
         self.con.execute(
             """UPDATE job SET estado=?, conta_id=?, id_remoto=?, arquivo=?,
-                   tentativas=?, erro=?, reavaliar_em=?, atualizado_em=?
+                   tentativas=?, custo_estimado=?, erro=?, reavaliar_em=?,
+                   atualizado_em=?
                WHERE id=?""",
-            (j.estado.value, j.conta_id, j.id_remoto, j.arquivo, j.tentativas, j.erro,
-             _txt(j.reavaliar_em), datetime.now(timezone.utc).isoformat(), j.id),
+            (j.estado.value, j.conta_id, j.id_remoto, j.arquivo, j.tentativas,
+             j.custo_estimado, j.erro, _txt(j.reavaliar_em),
+             datetime.now(timezone.utc).isoformat(), j.id),
         )
         self.con.commit()
 
@@ -951,7 +1225,8 @@ class Repo:
             frame_inicial=r["frame_inicial"], frame_final=r["frame_final"],
             prioridade=r["prioridade"], estado=EstadoJob(r["estado"]),
             conta_id=r["conta_id"], id_remoto=r["id_remoto"], arquivo=r["arquivo"],
-            tentativas=r["tentativas"], erro=r["erro"],
+            tentativas=r["tentativas"], custo_estimado=r["custo_estimado"],
+            erro=r["erro"],
             reavaliar_em=_dt(r["reavaliar_em"]), criado_em=_dt(r["criado_em"]),
             atualizado_em=_dt(r["atualizado_em"]),
         )
@@ -995,6 +1270,8 @@ git commit -m "feat: esquema sqlite e repositorio"
 **Files:**
 - Create: `flowpool/transporte/base.py`, `flowpool/transporte/falso.py`
 - Test: `tests/test_transporte_falso.py`
+
+`base.py` **não define** a sua própria `SaldoInsuficiente`: importa a do núcleo (`flowpool.nucleo.erros`) e reexporta. `ErroTransporte`, `SessaoMorta` e `GeracaoFalhou` continuam sendo do transporte — só a de saldo é compartilhada, porque `nucleo/credito.py` também a levanta e o orquestrador precisa que os dois caminhos caiam no mesmo `except`. Consequência a lembrar: `SaldoInsuficiente` não é mais subclasse de `ErroTransporte`; quem quiser pegar as duas famílias escreve `except (ErroTransporte, SaldoInsuficiente)`.
 
 - [ ] **Step 1: Escrever o teste que falha**
 
@@ -1081,7 +1358,16 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol
 
+from flowpool.nucleo.erros import SaldoInsuficiente
 from flowpool.nucleo.tipos import Conta, Modelo, Modo
+
+# `SaldoInsuficiente` mora no nucleo e e so reexportada aqui, para quem importa de
+# `transporte.base` continuar funcionando. Duas classes com o mesmo nome fariam o
+# `except` do orquestrador pegar uma e deixar a outra passar como falha de rede.
+__all__ = [
+    "Estado", "Pedido", "Sessao", "FlowTransport",
+    "ErroTransporte", "SaldoInsuficiente", "SessaoMorta", "GeracaoFalhou",
+]
 
 
 class Estado(str, Enum):
@@ -1108,10 +1394,6 @@ class Sessao:
 
 class ErroTransporte(Exception):
     """Base de tudo que o transporte sabe dar errado."""
-
-
-class SaldoInsuficiente(ErroTransporte):
-    """A conta nao tem credito. Nao e erro: e hora de trocar de conta."""
 
 
 class SessaoMorta(ErroTransporte):
@@ -1213,6 +1495,8 @@ git commit -m "feat: interface de transporte e implementacao falsa"
 - Test: `tests/test_orquestrador.py`
 
 O coração do motor: puxa job, escolhe conta, reserva crédito, despacha, reconcilia, trata falha. Testado inteiro contra o transporte falso.
+
+A regra que não pode escapar daqui: **toda reserva que não virou geração tem que ser estornada.** O orquestrador guarda em `job.custo_estimado` quanto reservou, chama `liberar` em todo caminho de falha anterior à confirmação da geração, e zera o campo depois de estornar (para não estornar duas vezes). Sem isso, três timeouts de rede numa conta de 50 créditos zeram o saldo local com os 50 créditos intactos no Flow, e a conta some do pool para sempre. No caminho de sucesso não há estorno: o crédito foi gasto de verdade, e a reconciliação com o saldo lido fecha a conta.
 
 - [ ] **Step 1: Escrever o teste que falha**
 
@@ -1334,6 +1618,29 @@ async def test_quality_vai_pra_conta_paga_mesmo_com_free_disponivel(repo, tmp_pa
     assert repo.job(jid).conta_id == ultra
 
 
+async def test_falha_de_rede_estorna_a_reserva(repo, tmp_path):
+    # uma falha de rede nao pode reduzir o saldo: o Flow nunca chegou a cobrar.
+    # Sem estorno, tres timeouts secam uma conta de 50 e ela some do pool.
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 50; repo.salvar_conta(c)
+    jid = repo.criar_job(job_fast())
+
+    async def rede_caiu(*a, **k):
+        raise ConnectionError("rede caiu")
+
+    t = TransporteFalso(saldos={cid: 50})
+    t.gerar = rede_caiu
+    t.saldo = rede_caiu  # a rede caiu inteira: nem a releitura de saldo salva o dia
+
+    orq = Orquestrador(repo, t, raiz=tmp_path)
+    await orq.passo()
+
+    j = repo.job(jid)
+    assert repo.conta(cid).saldo == 50    # 50 - 20 reservados + 20 estornados
+    assert j.estado is EstadoJob.PENDENTE
+    assert j.custo_estimado is None       # estornado, e uma vez so
+
+
 async def test_passo_sem_job_nao_explode(repo, tmp_path):
     orq = Orquestrador(repo, TransporteFalso(saldos={}), raiz=tmp_path)
     assert await orq.passo() is False
@@ -1385,7 +1692,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from flowpool.dados.repo import Repo
-from flowpool.nucleo.credito import reconciliar, reservar
+from flowpool.nucleo.credito import liberar, reconciliar, reservar
 from flowpool.nucleo.escolha import escolher
 from flowpool.nucleo.tipos import Conta, EstadoJob, Job, Modo, SaudeSessao
 from flowpool.transporte.base import (
@@ -1438,8 +1745,11 @@ class Orquestrador:
         sessao = None
         try:
             sessao = await self.transporte.abrir_sessao(conta)
-            reservar(conta, job.modelo)
+            # guardar o reservado no job e o que permite estornar depois — inclusive
+            # depois de um restart, por isso vai para o banco na hora
+            job.custo_estimado = reservar(conta, job.modelo)
             self.repo.salvar_conta(conta)
+            self.repo.salvar_job(job)
 
             job.id_remoto = await self.transporte.gerar(sessao, self._pedido(job))
             self.repo.salvar_job(job)
@@ -1458,19 +1768,28 @@ class Orquestrador:
             self.repo.registrar_evento(job.id, conta.id, "pronto")
 
         except SessaoMorta as e:
+            # nao ha estorno aqui: `abrir_sessao` falha antes de `reservar` rodar
             conta.saude = SaudeSessao.EXPIRADA
             self.repo.salvar_conta(conta)
             self._devolver(job, str(e), gasta_tentativa=False)
             self.repo.registrar_evento(job.id, conta.id, "sessao_morta")
 
         except SaldoInsuficiente as e:
-            conta.saldo = 0
+            # Vem de duas fontes: o guarda local em `reservar` (a conta tem credito
+            # real, so nao o bastante para este modelo) ou o proprio Flow. Estornar e
+            # deixar a reconciliacao do `finally` adotar o numero verdadeiro — zerar o
+            # saldo na mao apagaria credito que existe e tiraria a conta do pool.
+            self._estornar(job, conta)
             conta.saldo_confiavel = False
             self.repo.salvar_conta(conta)
             self._devolver(job, str(e), gasta_tentativa=False)
             self.repo.registrar_evento(job.id, conta.id, "conta_seca")
 
         except Exception as e:  # falha de rede, timeout, geracao errada
+            # A geracao nao se confirmou, entao o credito reservado nao foi gasto.
+            # Se por acaso tiver sido (falha depois do Flow aceitar), a leitura de
+            # saldo no `finally`, logo abaixo, corrige na mesma passada.
+            self._estornar(job, conta)
             conta.falhas += 1
             self.repo.salvar_conta(conta)
             self._devolver(job, f"{type(e).__name__}: {e}", gasta_tentativa=True)
@@ -1487,6 +1806,17 @@ class Orquestrador:
                 except Exception:
                     pass
                 await self.transporte.fechar(sessao)
+
+    def _estornar(self, job: Job, conta: Conta) -> None:
+        """Devolve ao saldo a reserva de um job que nao virou geracao.
+
+        Idempotente: zera `custo_estimado` para nao estornar duas vezes. Quem chama
+        salva o job logo em seguida (`_devolver`), entao o zero chega ao banco.
+        """
+        if job.custo_estimado is None:
+            return
+        liberar(conta, job.custo_estimado)
+        job.custo_estimado = None
 
     def _devolver(self, job: Job, erro: str, gasta_tentativa: bool) -> None:
         job.erro = erro
@@ -1529,12 +1859,12 @@ class Orquestrador:
 - [ ] **Step 4: Rodar e ver passar**
 
 Run: `.venv/Scripts/pytest tests/test_orquestrador.py -q`
-Expected: `10 passed`
+Expected: `11 passed`
 
 - [ ] **Step 5: Rodar a suíte inteira**
 
 Run: `.venv/Scripts/pytest -q`
-Expected: `64 passed` (4 tipos + 16 custos + 12 escolha + 7 credito + 9 repo + 6 transporte + 10 orquestrador)
+Expected: `80 passed` (5 tipos + 17 custos + 14 escolha + 15 credito + 3 pool + 9 repo + 6 transporte + 11 orquestrador)
 
 - [ ] **Step 6: Commit**
 
@@ -2171,7 +2501,7 @@ from flowpool.transporte.pw.sessao import cadastrar, caminho_perfil
 - [ ] **Step 6: Rodar a suíte**
 
 Run: `.venv/Scripts/pytest -q`
-Expected: `77 passed` (64 + 9 da api + 4 da sessao)
+Expected: `93 passed` (80 + 9 da api + 4 da sessao)
 
 - [ ] **Step 7: Commit**
 
@@ -2614,7 +2944,7 @@ Expected: `4 passed`
 - [ ] **Step 6: Rodar a suíte inteira**
 
 Run: `.venv/Scripts/pytest -q`
-Expected: `81 passed` (77 + 4 do cliente)
+Expected: `97 passed` (93 + 4 do cliente)
 
 - [ ] **Step 7: Commit**
 
