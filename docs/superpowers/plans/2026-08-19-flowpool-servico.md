@@ -18,7 +18,7 @@
 |---|---|
 | `flowpool/nucleo/tipos.py` | enums e dataclasses do domínio. Sem I/O, sem dependências. |
 | `flowpool/nucleo/custos.py` | tabela de custo por (modelo, tier) e o teto diário do free |
-| `flowpool/nucleo/escolha.py` | `escolher(contas, modelo) -> Conta | None`. Função pura. |
+| `flowpool/nucleo/escolha.py` | `escolher(contas, modelo, agora) -> Conta | None`. Função pura. |
 | `flowpool/nucleo/credito.py` | debitar previsto, reconciliar com o lido, decidir confiança |
 | `flowpool/dados/esquema.sql` | DDL das três tabelas |
 | `flowpool/dados/repo.py` | leitura/escrita SQLite. Única parte que conhece SQL. |
@@ -182,6 +182,14 @@ def test_reavaliar_em_aceita_datetime():
     assert j.reavaliar_em is None
     j.reavaliar_em = datetime(2026, 8, 20, 3, 0, tzinfo=timezone.utc)
     assert j.reavaliar_em.year == 2026
+
+
+def test_conta_nasce_sem_prazo_de_seca():
+    # `seca_ate` e o que tira do pool a conta que o Flow recusou apesar do saldo
+    c = Conta(id=1, email="a@b.com", tier=Tier.FREE, perfil="perfis/1")
+    assert c.seca_ate is None
+    c.seca_ate = datetime(2026, 8, 20, 13, 0, tzinfo=timezone.utc)
+    assert c.seca_ate.hour == 13
 ```
 
 - [ ] **Step 2: Rodar e ver falhar**
@@ -194,7 +202,7 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'flowpool.nucleo.tipos'
 `flowpool/nucleo/tipos.py`:
 
 ```python
-"""Tipos do domínio. Sem I/O, sem dependências externas."""
+"""Tipos do dominio. Sem I/O, sem dependencias externas."""
 
 from __future__ import annotations
 
@@ -247,6 +255,9 @@ class Conta:
     saldo_lido_em: datetime | None = None
     saldo_confiavel: bool = False
     reset_em: datetime | None = None
+    # Ate quando o Flow recusou gerar apesar do saldo aparente (cota diaria, throttle).
+    # Enquanto estiver no futuro a conta sai da escolha, senao o motor gira em laco quente.
+    seca_ate: datetime | None = None
     saude: SaudeSessao = SaudeSessao.VIVA
     falhas: int = 0
     ativa: bool = True
@@ -279,10 +290,18 @@ class Job:
 `custo_estimado` guarda quanto o job reservou. Sem esse número não há como estornar a
 reserva de um job que morreu antes de gerar — nem depois de um restart do serviço.
 
+`seca_ate` guarda até quando a conta está fora do pool. Existe porque o Flow às vezes
+mostra saldo e mesmo assim recusa gerar (cota diária, throttle, rate limit). Sem esse
+prazo o job volta para a fila no mesmo instante, cai de novo na mesma conta, e o motor
+gira em laço quente: CPU a 100%, um Chrome aberto e fechado por iteração, tabela de
+eventos crescendo sem parar e nenhuma tentativa sendo consumida — ou seja, nada nunca
+desiste. É a coluna que o spec já pedia quando falava em "marcar a conta seca até o
+reset estimado".
+
 - [ ] **Step 4: Rodar e ver passar**
 
 Run: `.venv/Scripts/pytest tests/test_tipos.py -q`
-Expected: `5 passed`
+Expected: `6 passed`
 
 - [ ] **Step 5: Commit**
 
@@ -433,90 +452,110 @@ Esta é a peça central e é função pura — merece teste de tabela cobrindo o
 
 Os enums são comparados com `==`, nunca com `is`. `Tier` e `SaudeSessao` herdam de `str, Enum`: se em qualquer caminho futuro um valor chegar como string crua vinda do SQLite, o `is` falha em silêncio — e falha nas duas direções erradas, descartando conta viva ou aprovando conta grátis para Veo Quality, que é a única regra que o spec chama de intransponível. O `==` custa zero e elimina o modo de falha.
 
+A assinatura é `escolher(contas, modelo, agora)` e `apta(c, modelo, agora)`: **o relógio entra por parâmetro.** Chamar `datetime.now()` aqui dentro tiraria a pureza justamente da peça que precisa ser testável sem navegador e sem congelar o relógio do processo — e é o núcleo inteiro que se apoia nessa garantia.
+
+O `agora` serve para uma decisão só, mas é uma decisão que não dá para adiar: conta com `seca_ate` no futuro é descartada. Sem esse descarte, a conta que o Flow acabou de recusar volta a ser escolhida na iteração seguinte e o motor entra em laço quente (ver Task 1 e Task 7).
+
 - [ ] **Step 1: Escrever o teste que falha**
 
 `tests/test_escolha.py`:
 
 ```python
+from datetime import datetime, timedelta, timezone
+
 from flowpool.nucleo.escolha import escolher
 from flowpool.nucleo.tipos import Conta, Modelo, SaudeSessao, Tier
 
+# relogio fixo: `escolher` e pura e recebe o agora por parametro
+AGORA = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
 
-def conta(id, tier, saldo, saude=SaudeSessao.VIVA, ativa=True):
+
+def conta(id, tier, saldo, saude=SaudeSessao.VIVA, ativa=True, seca_ate=None):
     return Conta(id=id, email=f"c{id}@x.com", tier=tier, perfil=f"p/{id}",
-                 saldo=saldo, saude=saude, ativa=ativa)
+                 saldo=saldo, saude=saude, ativa=ativa, seca_ate=seca_ate)
 
 
 def test_sem_contas_devolve_none():
-    assert escolher([], Modelo.VEO_FAST) is None
+    assert escolher([], Modelo.VEO_FAST, AGORA) is None
 
 
 def test_gasta_o_gratis_antes_do_pago():
     # credito de free morre em 24h; o de pago acumula. Aritmetica, nao preferencia.
     free = conta(1, Tier.FREE, 50)
     pro = conta(2, Tier.PRO, 1000)
-    assert escolher([pro, free], Modelo.VEO_FAST).id == 1
+    assert escolher([pro, free], Modelo.VEO_FAST, AGORA).id == 1
 
 
 def test_entre_free_pega_a_de_maior_saldo():
     # espalha o uso e evita sobras inuteis de 5 creditos pelo pool
-    escolhida = escolher([conta(1, Tier.FREE, 20), conta(2, Tier.FREE, 50)], Modelo.VEO_LITE)
+    escolhida = escolher([conta(1, Tier.FREE, 20), conta(2, Tier.FREE, 50)], Modelo.VEO_LITE, AGORA)
     assert escolhida.id == 2
 
 
 def test_quality_ignora_todas_as_free_e_vai_pra_paga():
     contas = [conta(1, Tier.FREE, 50), conta(2, Tier.FREE, 50), conta(3, Tier.ULTRA, 9000)]
-    assert escolher(contas, Modelo.VEO_QUALITY).id == 3
+    assert escolher(contas, Modelo.VEO_QUALITY, AGORA).id == 3
 
 
 def test_quality_sem_conta_paga_devolve_none():
-    assert escolher([conta(1, Tier.FREE, 50)], Modelo.VEO_QUALITY) is None
+    assert escolher([conta(1, Tier.FREE, 50)], Modelo.VEO_QUALITY, AGORA) is None
 
 
 def test_pula_conta_com_saldo_insuficiente():
     # Fast custa 20 na free
-    escolhida = escolher([conta(1, Tier.FREE, 10), conta(2, Tier.FREE, 40)], Modelo.VEO_FAST)
+    escolhida = escolher([conta(1, Tier.FREE, 10), conta(2, Tier.FREE, 40)], Modelo.VEO_FAST, AGORA)
     assert escolhida.id == 2
 
 
 def test_pula_conta_com_sessao_expirada():
     contas = [conta(1, Tier.FREE, 50, saude=SaudeSessao.EXPIRADA), conta(2, Tier.FREE, 30)]
-    assert escolher(contas, Modelo.VEO_FAST).id == 2
+    assert escolher(contas, Modelo.VEO_FAST, AGORA).id == 2
 
 
 def test_pula_conta_bloqueada():
     contas = [conta(1, Tier.FREE, 50, saude=SaudeSessao.BLOQUEADA), conta(2, Tier.PRO, 900)]
-    assert escolher(contas, Modelo.VEO_FAST).id == 2
+    assert escolher(contas, Modelo.VEO_FAST, AGORA).id == 2
 
 
 def test_pula_conta_desativada():
     contas = [conta(1, Tier.FREE, 50, ativa=False), conta(2, Tier.FREE, 30)]
-    assert escolher(contas, Modelo.VEO_FAST).id == 2
+    assert escolher(contas, Modelo.VEO_FAST, AGORA).id == 2
 
 
 def test_pool_todo_seco_devolve_none():
-    assert escolher([conta(1, Tier.FREE, 5), conta(2, Tier.FREE, 0)], Modelo.VEO_FAST) is None
+    assert escolher([conta(1, Tier.FREE, 5), conta(2, Tier.FREE, 0)], Modelo.VEO_FAST, AGORA) is None
 
 
 def test_ultra_paga_menos_e_por_isso_consegue_onde_pro_nao_conseguiria():
     # Fast custa 10 na ultra e 20 na pro. Com saldo 15, so a ultra da conta.
     contas = [conta(1, Tier.PRO, 15), conta(2, Tier.ULTRA, 15)]
-    assert escolher(contas, Modelo.VEO_FAST).id == 2
+    assert escolher(contas, Modelo.VEO_FAST, AGORA).id == 2
 
 
 def test_desempate_entre_pagas_e_por_saldo():
     contas = [conta(1, Tier.PRO, 300), conta(2, Tier.ULTRA, 900)]
-    assert escolher(contas, Modelo.VEO_QUALITY).id == 2
+    assert escolher(contas, Modelo.VEO_QUALITY, AGORA).id == 2
 
 
 def test_desempate_nao_depende_da_ordem_da_lista():
     # a lista vem de um SELECT sem ORDER BY garantido; a escolha nao pode variar
     a, b = conta(1, Tier.FREE, 50), conta(2, Tier.FREE, 50)
-    assert escolher([a, b], Modelo.VEO_FAST).id == escolher([b, a], Modelo.VEO_FAST).id
+    assert escolher([a, b], Modelo.VEO_FAST, AGORA).id == escolher([b, a], Modelo.VEO_FAST, AGORA).id
 
 
 def test_saldo_exatamente_igual_ao_custo_serve():
-    assert escolher([conta(1, Tier.FREE, 20)], Modelo.VEO_FAST).id == 1
+    assert escolher([conta(1, Tier.FREE, 20)], Modelo.VEO_FAST, AGORA).id == 1
+
+
+def test_pula_conta_seca_ate_o_prazo():
+    # o Flow mostrou saldo e recusou gerar; insistir antes do prazo e laco quente
+    seca = conta(1, Tier.FREE, 50, seca_ate=AGORA + timedelta(hours=1))
+    assert escolher([seca, conta(2, Tier.FREE, 30)], Modelo.VEO_FAST, AGORA).id == 2
+
+
+def test_conta_seca_volta_ao_pool_depois_do_prazo():
+    seca = conta(1, Tier.FREE, 50, seca_ate=AGORA - timedelta(minutes=1))
+    assert escolher([seca], Modelo.VEO_FAST, AGORA).id == 1
 ```
 
 - [ ] **Step 2: Rodar e ver falhar**
@@ -529,11 +568,16 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'flowpool.nucleo.escolh
 `flowpool/nucleo/escolha.py`:
 
 ```python
-"""Escolha de conta. Funcao pura: sem I/O, sem relogio, sem banco."""
+"""Escolha de conta. Funcao pura: sem I/O, sem relogio proprio, sem banco.
+
+O `agora` entra por parametro. Chamar `datetime.now()` aqui dentro tiraria a pureza
+da unica peca que precisa ser testavel sem navegador e sem congelar o relogio.
+"""
 
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime
 
 from flowpool.nucleo.custos import cabe_no_free, custo_de
 from flowpool.nucleo.tipos import Conta, Modelo, SaudeSessao, Tier
@@ -542,19 +586,23 @@ from flowpool.nucleo.tipos import Conta, Modelo, SaudeSessao, Tier
 _ORDEM_TIER = {Tier.FREE: 1, Tier.PRO: 0, Tier.ULTRA: 0}
 
 
-def apta(c: Conta, modelo: Modelo) -> bool:
+def apta(c: Conta, modelo: Modelo, agora: datetime) -> bool:
     # Comparacao por valor, nao por identidade: `Tier` e `SaudeSessao` herdam de
     # `str, Enum`, e um valor cru vindo do SQLite quebraria `is` em silencio.
     if not c.ativa or c.saude != SaudeSessao.VIVA:
+        return False
+    # Conta seca: o Flow ja recusou gerar apesar do saldo aparente. Insistir antes do
+    # prazo devolve o job a fila na hora e o motor vira laco quente.
+    if c.seca_ate is not None and c.seca_ate > agora:
         return False
     if c.tier == Tier.FREE and not cabe_no_free(modelo):
         return False
     return custo_de(modelo, c.tier) <= c.saldo
 
 
-def escolher(contas: Sequence[Conta], modelo: Modelo) -> Conta | None:
-    """Melhor conta para rodar `modelo` agora, ou None se nenhuma serve."""
-    aptas = [c for c in contas if apta(c, modelo)]
+def escolher(contas: Sequence[Conta], modelo: Modelo, agora: datetime) -> Conta | None:
+    """Melhor conta para rodar `modelo` em `agora`, ou None se nenhuma serve."""
+    aptas = [c for c in contas if apta(c, modelo, agora)]
     if not aptas:
         return None
     return max(aptas, key=lambda c: (_ORDEM_TIER[c.tier], c.saldo, -c.id))
@@ -563,7 +611,7 @@ def escolher(contas: Sequence[Conta], modelo: Modelo) -> Conta | None:
 - [ ] **Step 4: Rodar e ver passar**
 
 Run: `.venv/Scripts/pytest tests/test_escolha.py -q`
-Expected: `14 passed`
+Expected: `16 passed`
 
 - [ ] **Step 5: Commit**
 
@@ -825,10 +873,14 @@ Nao ha navegador nem banco aqui. E o cenario que expoe qualquer regressao na
 contabilidade — reserva que zera saldo, estorno que nao volta, free que sobra.
 """
 
+from datetime import datetime, timezone
+
 from flowpool.nucleo.credito import liberar, reservar
 from flowpool.nucleo.custos import custo_de
 from flowpool.nucleo.escolha import escolher
 from flowpool.nucleo.tipos import Conta, Modelo, Tier
+
+AGORA = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
 
 
 def conta(id, tier, saldo):
@@ -851,7 +903,7 @@ def test_dez_jobs_fast_drenam_as_free_antes_de_tocar_a_ultra():
     despachos = []
 
     for _ in range(10):
-        escolhida = escolher(contas, Modelo.VEO_FAST)
+        escolhida = escolher(contas, Modelo.VEO_FAST, AGORA)
         assert escolhida is not None, "o pool tem Ultra com 9000; nunca deveria secar"
         # so se reserva na conta que `escolher` devolveu — mesmo objeto, nao uma copia
         assert any(escolhida is c for c in contas)
@@ -879,7 +931,7 @@ def test_nenhuma_conta_e_reservada_sem_ter_sido_escolhida():
     tocadas = set()
 
     for _ in range(10):
-        escolhida = escolher(contas, Modelo.VEO_FAST)
+        escolhida = escolher(contas, Modelo.VEO_FAST, AGORA)
         reservar(escolhida, Modelo.VEO_FAST)
         tocadas.add(escolhida.id)
 
@@ -889,7 +941,7 @@ def test_nenhuma_conta_e_reservada_sem_ter_sido_escolhida():
 
 def test_falha_de_geracao_devolve_a_reserva_intacta():
     contas = pool()
-    escolhida = escolher(contas, Modelo.VEO_FAST)
+    escolhida = escolher(contas, Modelo.VEO_FAST, AGORA)
     antes = escolhida.saldo
 
     custo = reservar(escolhida, Modelo.VEO_FAST)
@@ -907,7 +959,7 @@ Expected: `3 passed`
 - [ ] **Step 7: Rodar o núcleo inteiro**
 
 Run: `.venv/Scripts/pytest -q`
-Expected: `54 passed` (5 tipos + 17 custos + 14 escolha + 15 credito + 3 pool)
+Expected: `57 passed` (6 tipos + 17 custos + 16 escolha + 15 credito + 3 pool)
 
 - [ ] **Step 8: Commit**
 
@@ -924,14 +976,24 @@ git commit -m "feat: reserva, estorno e reconciliacao de credito"
 - Create: `flowpool/dados/esquema.sql`, `flowpool/dados/repo.py`
 - Test: `tests/test_repo.py`
 
-`custo_estimado` é persistido junto com o job. Não é enfeite: é o que permite estornar a reserva de um job que morreu no meio, inclusive depois de um restart do serviço — quem reabrir o banco precisa saber quanto aquele job tinha reservado.
+`custo_estimado` é persistido junto com o job. Não é enfeite: é o que permite estornar a reserva de um job que morreu no meio, inclusive depois de um restart do serviço — quem reabrir o banco precisa saber quanto aquele job tinha reservado. Quem consome esse campo depois do restart é o `recuperar()` da Task 7.
+
+Quatro decisões desta task que não são detalhe de implementação:
+
+**`reivindicar(agora)` no lugar de `proximo_pendente(agora)`.** Ler o job e marcá-lo `rodando` em dois passos deixa entre os dois uma janela em que o job continua `pendente` e visível para todo mundo. Com três workers e teto de simultâneos 1, dois jobs viraram três gerações e 60 créditos gastos em vez de 40 — e o worker perdedor sobrescreveu o arquivo do vencedor. O `UPDATE ... RETURNING` fecha a janela: quem perde a corrida simplesmente não vê mais o job.
+
+**`marcar_sessao(conta_id, saude, falhas=None)`.** `salvar_conta` grava a linha inteira a partir de uma cópia carregada no início do passo. Com dois workers na mesma conta, um marca `EXPIRADA` e o outro ressuscita para `VIVA` com a cópia velha — e o pool volta a despachar para uma conta que exige login manual. A escrita de campo específico é o que impede isso onde a corrida importa.
+
+**`PRAGMA busy_timeout = 5000` e `close()`.** Vários workers escrevem na mesma base; sem o `busy_timeout` o segundo escritor recebe `database is locked` na hora em vez de esperar a transação curta do outro. O `close()` existe por causa do Windows: o handle aberto impede o pytest de apagar o `tmp_path`, e a suíte falha de forma intermitente, sem relação nenhuma com o teste que falhou.
+
+**`_txt` normaliza o datetime para UTC antes do `isoformat()`.** A comparação de `reavaliar_em` no SQL é lexicográfica sobre texto. Gravar dois offsets diferentes quebraria a ordem em silêncio: um horário com `-03:00` ordena antes de um `+00:00` que é anterior de verdade.
 
 - [ ] **Step 1: Escrever o teste que falha**
 
 `tests/test_repo.py`:
 
 ```python
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -1000,20 +1062,79 @@ def test_referencias_sobrevivem_ao_banco(repo):
     assert repo.job(id_).referencias == ["a/1.png", "a/2.png", "a/3.png"]
 
 
-def test_proximo_pendente_respeita_prioridade(repo):
+def test_reivindicar_respeita_prioridade(repo):
     repo.criar_job(Job(id=0, modo=Modo.T2V, modelo=Modelo.VEO_FAST,
                        prompt="baixa", destino="d", nome="n1", prioridade=0))
     repo.criar_job(Job(id=0, modo=Modo.T2V, modelo=Modelo.VEO_FAST,
                        prompt="alta", destino="d", nome="n2", prioridade=9))
-    assert repo.proximo_pendente(agora=datetime.now(timezone.utc)).prompt == "alta"
+    assert repo.reivindicar(agora=datetime.now(timezone.utc)).prompt == "alta"
 
 
-def test_proximo_pendente_ignora_job_esperando_reset(repo):
+def test_reivindicar_ignora_job_esperando_reset(repo):
     futuro = datetime(2099, 1, 1, tzinfo=timezone.utc)
     j = Job(id=0, modo=Modo.T2V, modelo=Modelo.VEO_FAST, prompt="p", destino="d", nome="n")
     j.reavaliar_em = futuro
     repo.criar_job(j)
-    assert repo.proximo_pendente(agora=datetime.now(timezone.utc)) is None
+    assert repo.reivindicar(agora=datetime.now(timezone.utc)) is None
+
+
+def test_reivindicar_ja_devolve_o_job_marcado_rodando(repo):
+    jid = repo.criar_job(Job(id=0, modo=Modo.T2V, modelo=Modelo.VEO_FAST,
+                             prompt="p", destino="d", nome="n"))
+    j = repo.reivindicar(agora=datetime.now(timezone.utc))
+    assert j.id == jid
+    assert j.estado is EstadoJob.RODANDO
+    assert repo.job(jid).estado is EstadoJob.RODANDO
+
+
+def test_reivindicar_nao_entrega_o_mesmo_job_duas_vezes(repo):
+    # e este o passo que impede dois workers de gerarem (e pagarem) o mesmo job
+    repo.criar_job(Job(id=0, modo=Modo.T2V, modelo=Modelo.VEO_FAST,
+                       prompt="p", destino="d", nome="n"))
+    agora = datetime.now(timezone.utc)
+    assert repo.reivindicar(agora) is not None
+    assert repo.reivindicar(agora) is None
+
+
+def test_seca_ate_sobrevive_ao_banco(repo):
+    id_ = repo.criar_conta(email="a@b.com", tier=Tier.FREE, perfil="p/1")
+    c = repo.conta(id_)
+    c.seca_ate = datetime(2026, 8, 20, 13, 0, tzinfo=timezone.utc)
+    repo.salvar_conta(c)
+    assert repo.conta(id_).seca_ate == c.seca_ate
+
+
+def test_marcar_sessao_nao_toca_no_saldo(repo):
+    # dois workers na mesma conta: a marcacao de sessao nao pode carregar junto uma
+    # copia velha do saldo e desfazer o que o outro worker gravou
+    id_ = repo.criar_conta(email="a@b.com", tier=Tier.FREE, perfil="p/1")
+    velha = repo.conta(id_)
+    nova = repo.conta(id_); nova.saldo = 30; repo.salvar_conta(nova)
+
+    repo.marcar_sessao(velha.id, SaudeSessao.EXPIRADA, falhas=2)
+
+    lida = repo.conta(id_)
+    assert lida.saude is SaudeSessao.EXPIRADA
+    assert lida.falhas == 2
+    assert lida.saldo == 30
+
+
+def test_txt_normaliza_o_datetime_para_utc(repo):
+    # a comparacao de `reavaliar_em` no SQL e lexicografica: offset diferente
+    # quebraria a ordem em silencio
+    outro_fuso = timezone(timedelta(hours=-3))
+    j = Job(id=0, modo=Modo.T2V, modelo=Modelo.VEO_FAST, prompt="p", destino="d", nome="n")
+    j.reavaliar_em = datetime(2026, 8, 20, 9, 0, tzinfo=outro_fuso)   # 12:00 UTC
+    jid = repo.criar_job(j)
+
+    cru = repo.con.execute("SELECT reavaliar_em FROM job WHERE id=?", (jid,)).fetchone()[0]
+    assert cru == "2026-08-20T12:00:00+00:00"
+
+
+def test_close_libera_a_conexao(repo):
+    repo.close()
+    with pytest.raises(Exception):
+        repo.contas()
 
 
 def test_registrar_evento_e_listar_por_job(repo):
@@ -1044,6 +1165,7 @@ CREATE TABLE IF NOT EXISTS conta (
     saldo_lido_em   TEXT,
     saldo_confiavel INTEGER NOT NULL DEFAULT 0,
     reset_em        TEXT,
+    seca_ate        TEXT,
     saude           TEXT    NOT NULL DEFAULT 'viva',
     falhas          INTEGER NOT NULL DEFAULT 0,
     ativa           INTEGER NOT NULL DEFAULT 1
@@ -1110,7 +1232,17 @@ def _dt(s: str | None) -> datetime | None:
 
 
 def _txt(d: datetime | None) -> str | None:
-    return d.isoformat() if d else None
+    """Serializa sempre em UTC.
+
+    A comparacao de `reavaliar_em` no SQL e lexicografica sobre texto. Gravar dois
+    offsets diferentes faria a ordem quebrar em silencio: um horario com `-03:00`
+    ordena antes de um `+00:00` que e anterior de verdade.
+    """
+    if d is None:
+        return None
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=timezone.utc)
+    return d.astimezone(timezone.utc).isoformat()
 
 
 class Repo:
@@ -1120,6 +1252,17 @@ class Repo:
         self.con = sqlite3.connect(self.caminho, check_same_thread=False)
         self.con.row_factory = sqlite3.Row
         self.con.execute("PRAGMA foreign_keys = ON")
+        # Varios workers escrevem na mesma base. Sem isto o segundo escritor recebe
+        # "database is locked" na hora em vez de esperar a transacao curta do outro.
+        self.con.execute("PRAGMA busy_timeout = 5000")
+
+    def close(self) -> None:
+        """Fecha a conexao.
+
+        No Windows o handle aberto impede o pytest de apagar o `tmp_path`, o que faz a
+        suite falhar de forma intermitente e sem relacao com o teste que falhou.
+        """
+        self.con.close()
 
     def criar_esquema(self) -> None:
         self.con.executescript(_ESQUEMA.read_text(encoding="utf-8"))
@@ -1149,12 +1292,29 @@ class Repo:
     def salvar_conta(self, c: Conta) -> None:
         self.con.execute(
             """UPDATE conta SET tier=?, perfil=?, saldo=?, saldo_lido_em=?,
-                   saldo_confiavel=?, reset_em=?, saude=?, falhas=?, ativa=?
+                   saldo_confiavel=?, reset_em=?, seca_ate=?, saude=?, falhas=?, ativa=?
                WHERE id=?""",
             (c.tier.value, c.perfil, c.saldo, _txt(c.saldo_lido_em),
-             int(c.saldo_confiavel), _txt(c.reset_em), c.saude.value, c.falhas,
-             int(c.ativa), c.id),
+             int(c.saldo_confiavel), _txt(c.reset_em), _txt(c.seca_ate),
+             c.saude.value, c.falhas, int(c.ativa), c.id),
         )
+        self.con.commit()
+
+    def marcar_sessao(self, conta_id: int, saude: SaudeSessao,
+                      falhas: int | None = None) -> None:
+        """Escreve so as colunas de sessao, sem a linha inteira.
+
+        `salvar_conta` grava a partir de uma copia carregada no inicio do passo. Com
+        dois workers na mesma conta, um marca EXPIRADA e o outro ressuscita para VIVA
+        com sua copia velha — e o pool volta a despachar para uma conta que exige
+        login manual.
+        """
+        if falhas is None:
+            self.con.execute("UPDATE conta SET saude=? WHERE id=?",
+                             (saude.value, conta_id))
+        else:
+            self.con.execute("UPDATE conta SET saude=?, falhas=? WHERE id=?",
+                             (saude.value, falhas, conta_id))
         self.con.commit()
 
     @staticmethod
@@ -1163,13 +1323,14 @@ class Repo:
             id=r["id"], email=r["email"], tier=Tier(r["tier"]), perfil=r["perfil"],
             saldo=r["saldo"], saldo_lido_em=_dt(r["saldo_lido_em"]),
             saldo_confiavel=bool(r["saldo_confiavel"]), reset_em=_dt(r["reset_em"]),
-            saude=SaudeSessao(r["saude"]), falhas=r["falhas"], ativa=bool(r["ativa"]),
+            seca_ate=_dt(r["seca_ate"]), saude=SaudeSessao(r["saude"]),
+            falhas=r["falhas"], ativa=bool(r["ativa"]),
         )
 
     # ---------- jobs ----------
 
     def criar_job(self, j: Job) -> int:
-        agora = datetime.now(timezone.utc).isoformat()
+        agora = _txt(datetime.now(timezone.utc))
         cur = self.con.execute(
             """INSERT INTO job (modo, modelo, prompt, destino, nome, referencias,
                    frame_inicial, frame_final, prioridade, estado, custo_estimado,
@@ -1195,15 +1356,27 @@ class Repo:
             rs = self.con.execute("SELECT * FROM job ORDER BY id DESC").fetchall()
         return [self._job(r) for r in rs]
 
-    def proximo_pendente(self, agora: datetime) -> Job | None:
-        r = self.con.execute(
-            """SELECT * FROM job
-               WHERE estado = 'pendente'
-                 AND (reavaliar_em IS NULL OR reavaliar_em <= ?)
-               ORDER BY prioridade DESC, id ASC LIMIT 1""",
-            (agora.isoformat(),),
-        ).fetchone()
-        return self._job(r) if r else None
+    def reivindicar(self, agora: datetime) -> Job | None:
+        """Pega o proximo pendente e ja o marca `rodando`, em UMA instrucao.
+
+        Ler e depois marcar sao dois passos, e entre eles o job continua visivel para
+        os outros workers: dois deles pegam o mesmo job, geram duas vezes, pagam duas
+        vezes e um sobrescreve o arquivo do outro. O UPDATE ... RETURNING fecha a
+        janela — quem perde a corrida nao ve mais o job.
+        """
+        ts = _txt(agora)
+        cur = self.con.execute(
+            """UPDATE job SET estado='rodando', atualizado_em=?
+                WHERE id = (SELECT id FROM job
+                             WHERE estado='pendente'
+                               AND (reavaliar_em IS NULL OR reavaliar_em <= ?)
+                             ORDER BY prioridade DESC, id ASC LIMIT 1)
+             RETURNING *""",
+            (ts, ts),
+        )
+        rs = cur.fetchall()
+        self.con.commit()
+        return self._job(rs[0]) if rs else None
 
     def salvar_job(self, j: Job) -> None:
         self.con.execute(
@@ -1213,7 +1386,7 @@ class Repo:
                WHERE id=?""",
             (j.estado.value, j.conta_id, j.id_remoto, j.arquivo, j.tentativas,
              j.custo_estimado, j.erro, _txt(j.reavaliar_em),
-             datetime.now(timezone.utc).isoformat(), j.id),
+             _txt(datetime.now(timezone.utc)), j.id),
         )
         self.con.commit()
 
@@ -1238,7 +1411,7 @@ class Repo:
                          tipo: str, payload: str = "{}") -> None:
         self.con.execute(
             "INSERT INTO evento (job_id, conta_id, tipo, payload, em) VALUES (?,?,?,?,?)",
-            (job_id, conta_id, tipo, payload, datetime.now(timezone.utc).isoformat()),
+            (job_id, conta_id, tipo, payload, _txt(datetime.now(timezone.utc))),
         )
         self.con.commit()
 
@@ -1255,7 +1428,7 @@ class Repo:
 - [ ] **Step 5: Rodar e ver passar**
 
 Run: `.venv/Scripts/pytest tests/test_repo.py -q`
-Expected: `9 passed`
+Expected: `15 passed`
 
 - [ ] **Step 6: Commit**
 
@@ -1273,6 +1446,12 @@ git commit -m "feat: esquema sqlite e repositorio"
 - Test: `tests/test_transporte_falso.py`
 
 `base.py` **não define** a sua própria `SaldoInsuficiente`: importa a do núcleo (`flowpool.nucleo.erros`) e reexporta. `ErroTransporte`, `SessaoMorta` e `GeracaoFalhou` continuam sendo do transporte — só a de saldo é compartilhada, porque `nucleo/credito.py` também a levanta e o orquestrador precisa que os dois caminhos caiam no mesmo `except`. Consequência a lembrar: `SaldoInsuficiente` não é mais subclasse de `ErroTransporte`; quem quiser pegar as duas famílias escreve `except (ErroTransporte, SaldoInsuficiente)`.
+
+O transporte falso precisa simular geração **assíncrona**, senão o motor nunca é exercitado nos caminhos que mais custam crédito. Três interruptores além dos originais:
+
+- `passos_rodando`: as N primeiras chamadas de `consultar` devolvem `RODANDO`. É o caso normal do Flow — geração não fica pronta na primeira consulta.
+- `nunca_termina`: a geração fica `RODANDO` para sempre, para exercitar o timeout do orquestrador sem esperar dez minutos de verdade.
+- `morre_ao_gerar`: `gerar()` levanta `SessaoMorta`. É o que reproduz a sessão do Google que cai **no meio** da geração, e não só em `abrir_sessao`.
 
 - [ ] **Step 1: Escrever o teste que falha**
 
@@ -1338,6 +1517,34 @@ async def test_falhar_em_conta_especifica():
     s = await t.abrir_sessao(conta())
     id_remoto = await t.gerar(s, pedido())
     assert await t.consultar(s, id_remoto) is Estado.FALHOU
+
+
+async def test_passos_rodando_atrasa_o_pronto():
+    # geracao real nao fica pronta na primeira consulta; o motor precisa fazer polling
+    t = TransporteFalso(saldos={1: 50}, passos_rodando=2)
+    s = await t.abrir_sessao(conta())
+    id_remoto = await t.gerar(s, pedido())
+    assert await t.consultar(s, id_remoto) is Estado.RODANDO
+    assert await t.consultar(s, id_remoto) is Estado.RODANDO
+    assert await t.consultar(s, id_remoto) is Estado.PRONTO
+
+
+async def test_nunca_termina_fica_rodando_para_sempre():
+    t = TransporteFalso(saldos={1: 50}, nunca_termina={1})
+    s = await t.abrir_sessao(conta())
+    id_remoto = await t.gerar(s, pedido())
+    for _ in range(5):
+        assert await t.consultar(s, id_remoto) is Estado.RODANDO
+
+
+async def test_morre_ao_gerar_levanta_sessao_morta_sem_cobrar():
+    # a sessao do Google cai no meio de `gerar`, nao so em `abrir_sessao`
+    t = TransporteFalso(saldos={1: 50}, morre_ao_gerar={1})
+    s = await t.abrir_sessao(conta())
+    with pytest.raises(SessaoMorta):
+        await t.gerar(s, pedido())
+    assert await t.saldo(s) == 50
+    assert t.geracoes == {}
 ```
 
 - [ ] **Step 2: Rodar e ver falhar**
@@ -1434,13 +1641,28 @@ from flowpool.transporte.base import (
 
 
 class TransporteFalso:
+    """Simula os modos de falha reais do Flow.
+
+    - `mortas`: `abrir_sessao` levanta `SessaoMorta` (login caiu antes de comecar).
+    - `morre_ao_gerar`: `gerar` levanta `SessaoMorta` (o Chrome caiu no meio).
+    - `falha_em`: a geracao e aceita e volta `FALHOU`.
+    - `passos_rodando`: as N primeiras consultas de cada geracao voltam `RODANDO`.
+    - `nunca_termina`: a geracao fica `RODANDO` para sempre, para exercitar timeout.
+    """
+
     def __init__(self, saldos: dict[int, int], mortas: set[int] | None = None,
-                 falha_em: set[int] | None = None, latencia: float = 0.0) -> None:
+                 falha_em: set[int] | None = None, latencia: float = 0.0,
+                 passos_rodando: int = 0, nunca_termina: set[int] | None = None,
+                 morre_ao_gerar: set[int] | None = None) -> None:
         self.saldos = dict(saldos)
         self.mortas = mortas or set()
         self.falha_em = falha_em or set()
         self.latencia = latencia
+        self.passos_rodando = passos_rodando
+        self.nunca_termina = nunca_termina or set()
+        self.morre_ao_gerar = morre_ao_gerar or set()
         self.geracoes: dict[str, tuple[int, Estado]] = {}
+        self.consultas: dict[str, int] = {}
         self._seq = 0
 
     async def abrir_sessao(self, conta: Conta) -> Sessao:
@@ -1453,18 +1675,32 @@ class TransporteFalso:
 
     async def gerar(self, s: Sessao, p: Pedido) -> str:
         await asyncio.sleep(self.latencia)
+        # antes de debitar: sessao que cai aqui nao chegou a fazer o Flow cobrar
+        if s.conta.id in self.morre_ao_gerar:
+            raise SessaoMorta(f"sessao da conta {s.conta.email} caiu ao gerar")
         custo = custo_de(p.modelo, s.conta.tier)
         if self.saldos.get(s.conta.id, 0) < custo:
             raise SaldoInsuficiente(f"conta {s.conta.email} sem credito")
         self.saldos[s.conta.id] -= custo
         self._seq += 1
         id_remoto = f"falso-{self._seq}"
-        estado = Estado.FALHOU if s.conta.id in self.falha_em else Estado.PRONTO
-        self.geracoes[id_remoto] = (s.conta.id, estado)
+        if s.conta.id in self.nunca_termina:
+            final = Estado.RODANDO
+        elif s.conta.id in self.falha_em:
+            final = Estado.FALHOU
+        else:
+            final = Estado.PRONTO
+        self.geracoes[id_remoto] = (s.conta.id, final)
+        self.consultas[id_remoto] = 0
         return id_remoto
 
     async def consultar(self, s: Sessao, id_remoto: str) -> Estado:
-        return self.geracoes[id_remoto][1]
+        _, final = self.geracoes[id_remoto]
+        vistas = self.consultas[id_remoto]
+        self.consultas[id_remoto] = vistas + 1
+        if final is Estado.RODANDO:
+            return Estado.RODANDO
+        return Estado.RODANDO if vistas < self.passos_rodando else final
 
     async def baixar(self, s: Sessao, id_remoto: str, destino: Path) -> Path:
         destino.parent.mkdir(parents=True, exist_ok=True)
@@ -1478,7 +1714,7 @@ class TransporteFalso:
 - [ ] **Step 5: Rodar e ver passar**
 
 Run: `.venv/Scripts/pytest tests/test_transporte_falso.py -q`
-Expected: `6 passed`
+Expected: `9 passed`
 
 - [ ] **Step 6: Commit**
 
@@ -1499,17 +1735,38 @@ O coração do motor: puxa job, escolhe conta, reserva crédito, despacha, recon
 
 A regra que não pode escapar daqui: **toda reserva que não virou geração tem que ser estornada.** O orquestrador guarda em `job.custo_estimado` quanto reservou, chama `liberar` em todo caminho de falha anterior à confirmação da geração, e zera o campo depois de estornar (para não estornar duas vezes). Sem isso, três timeouts de rede numa conta de 50 créditos zeram o saldo local com os 50 créditos intactos no Flow, e a conta some do pool para sempre. No caminho de sucesso não há estorno: o crédito foi gasto de verdade, e a reconciliação com o saldo lido fecha a conta.
 
+Isso vale para **todos** os ramos de falha, `SessaoMorta` inclusive. A sessão não morre só em `abrir_sessao`: no transporte real ela cai durante `gerar`, `consultar` ou `baixar`. Como `SessaoMorta` é o primeiro `except`, sem estorno ali o caso nunca chega ao ramo genérico e o crédito reservado some do saldo local para sempre. `_estornar` é no-op depois que o Flow aceitou (`id_remoto is not None`), então isso não infla saldo — e devolve `True` só quando crédito voltou de fato, que é como o ramo sabe se ainda precisa persistir a conta antes de `marcar_sessao`.
+
+Seis outras decisões desta task, cada uma com um modo de falha real por trás:
+
+**Recusa de saldo marca a conta seca com prazo.** No ramo `SaldoInsuficiente`: `conta.seca_ate = agora + ESPERA_RESET`, `saldo_confiavel = False`, `job.reavaliar_em = conta.seca_ate`. Sem prazo o job volta para a fila no mesmo instante, cai na mesma conta e o motor gira em laço quente — reproduzido em 50 iterações, 0 tentativas consumidas e 100 eventos gravados.
+
+**O semáforo vem antes de reivindicar.** Reivindicar primeiro e esperar depois deixa o job puxado parado na fila do semáforo; na versão em que a marcação de `rodando` vinha depois do semáforo, ele ficava visível como `pendente` para todos os outros workers.
+
+**`recuperar()` no boot, chamado pelo lifespan da API antes de `rodar()`.** Um crash entre `reservar` e `gerar` deixa o job em `rodando` para sempre — `reivindicar` só olha para `pendente`, então ele nunca é retomado nem falha — e o crédito reservado nunca volta. Sem isso, o `custo_estimado` persistido é um campo sem consumidor, o que contraria a justificativa que o spec dá para ele existir. Job sem `id_remoto` é estornado e volta para `pendente` sem gastar tentativa (não foi ele que falhou, foi a máquina); job com `id_remoto` volta preservando `id_remoto` e `conta_id`, sem estorno.
+
+**O motor não morre em silêncio.** `rodar()` envolve `passo()` em `try/except`, registra `passo_falhou` e continua; `fechar()` ganha o seu próprio `try/except` dentro do `finally`. Três caminhos reais escapavam do `try` de `_executar` — `fechar()` de um browser já morto, `ModeloSemCusto` levantado por `escolher` (o erro criado justamente para não travar a fila, e que ninguém capturava) e falha de escrita no banco. Em qualquer um deles a task de `rodar()` terminava e ninguém observava: a API seguia respondendo HTTP normalmente e a fila nunca mais andava.
+
+**Divergência vira evento, e falha de reconciliação também.** O `finally` guarda o retorno de `reconciliar` e grava `divergencia` com `{"delta", "lido"}` quando `abs(delta) >= LIMIAR_DIVERGENCIA`; o `except` do bloco grava `reconciliacao_falhou` em vez de engolir. O spec diz que é a reconciliação que responde se imagem custa crédito ou sai de graça — e o delta com sinal estava sendo calculado e jogado fora, sem chegar a lugar nenhum. O `except: pass` também engolia falha de `salvar_conta`, que era o silêncio que transformava conta seca em laço infinito.
+
+**Timeout não pode pagar duas vezes.** `_devolver` preserva `id_remoto` e `conta_id` quando há geração em curso; `_executar` pula `gerar` se o job chega com `id_remoto` e a conta escolhida é a mesma; `_conta_para` tenta primeiro a conta anterior, e só cai na escolha normal se ela não servir mais. `TIMEOUT_GERACAO` e o intervalo de polling viram parâmetros do `__init__` (com os valores atuais como padrão) para o teste não esperar dez minutos. Antes de `_devolver`, todo ramo de falha registra o evento com `{"id_remoto", "tentativa"}` — é o que permite achar geração órfã no Flow depois. Sem nada disso, um timeout descarta o `id_remoto`, o job é gerado de novo e paga de novo enquanto a primeira geração termina no Flow sem ninguém para baixar: um Quality de 11 minutos custa 200 créditos e não entrega nada; na terceira tentativa, 300.
+
 - [ ] **Step 1: Escrever o teste que falha**
 
 `tests/test_orquestrador.py`:
 
 ```python
+import asyncio
+import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 from flowpool.dados.repo import Repo
 from flowpool.motor.orquestrador import MAX_TENTATIVAS, Orquestrador
+from flowpool.nucleo.escolha import escolher
+from flowpool.nucleo.erros import SaldoInsuficiente
 from flowpool.nucleo.tipos import EstadoJob, Job, Modelo, Modo, SaudeSessao, Tier
 from flowpool.transporte.falso import TransporteFalso
 
@@ -1671,6 +1928,184 @@ async def test_job_de_imagem_sai_com_extensao_png(repo, tmp_path):
     await orq.passo()
 
     assert repo.job(jid).arquivo.endswith("i1.png")
+
+
+async def test_geracao_passa_por_rodando_antes_de_ficar_pronta(repo, tmp_path):
+    # o caso normal do Flow: a geracao demora e o motor faz polling ate terminar
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 50; repo.salvar_conta(c)
+    jid = repo.criar_job(job_fast())
+
+    t = TransporteFalso(saldos={cid: 50}, passos_rodando=3)
+    orq = Orquestrador(repo, t, raiz=tmp_path, intervalo_polling=0.001)
+    await orq.passo()
+
+    assert repo.job(jid).estado is EstadoJob.PRONTO
+    assert len(t.geracoes) == 1
+
+
+async def test_timeout_devolve_o_job_com_id_remoto_e_nao_gera_de_novo(repo, tmp_path):
+    # descartar o id_remoto faria a segunda tentativa pagar de novo enquanto a
+    # primeira geracao termina no Flow, orfa, sem ninguem para baixar
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 500; repo.salvar_conta(c)
+    jid = repo.criar_job(job_fast())
+
+    t = TransporteFalso(saldos={cid: 500}, nunca_termina={cid})
+    orq = Orquestrador(repo, t, raiz=tmp_path,
+                       timeout_geracao=timedelta(milliseconds=20),
+                       intervalo_polling=0.001)
+    await orq.passo()
+
+    j = repo.job(jid)
+    assert j.estado is EstadoJob.PENDENTE
+    assert j.id_remoto is not None
+    assert j.conta_id == cid
+    assert j.tentativas == 1
+    primeiro = j.id_remoto
+
+    await orq.passo()
+
+    assert len(t.geracoes) == 1                       # a segunda tentativa nao gerou
+    assert repo.job(jid).id_remoto == primeiro
+    assert repo.job(jid).tentativas == 2
+
+
+async def test_sessao_morta_durante_gerar_estorna_a_reserva(repo, tmp_path):
+    # SessaoMorta e o primeiro `except`: sem estorno ali o credito reservado some do
+    # saldo local para sempre, porque nunca chega no ramo generico
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 50; repo.salvar_conta(c)
+    jid = repo.criar_job(job_fast())
+
+    async def sem_leitura(*a, **k):
+        raise ConnectionError("browser morto")
+
+    t = TransporteFalso(saldos={cid: 50}, morre_ao_gerar={cid})
+    t.saldo = sem_leitura   # navegador ja morreu: a reconciliacao nao salva o dia
+
+    orq = Orquestrador(repo, t, raiz=tmp_path)
+    await orq.passo()
+
+    assert repo.conta(cid).saldo == 50            # 50 - 20 reservados + 20 estornados
+    assert repo.conta(cid).saude is SaudeSessao.EXPIRADA
+    j = repo.job(jid)
+    assert j.estado is EstadoJob.PENDENTE
+    assert j.custo_estimado is None
+
+
+async def test_recusa_de_saldo_seca_a_conta_com_prazo_e_adia_o_job(repo, tmp_path):
+    # o Flow mostra saldo e recusa gerar (cota diaria, throttle). Sem prazo o job
+    # volta a fila na hora, para a mesma conta, e o motor vira laco quente.
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 50; repo.salvar_conta(c)
+    jid = repo.criar_job(job_fast())
+
+    async def recusa(*a, **k):
+        raise SaldoInsuficiente("cota diaria estourada")
+
+    t = TransporteFalso(saldos={cid: 50})
+    t.gerar = recusa
+
+    orq = Orquestrador(repo, t, raiz=tmp_path)
+    await orq.passo()
+
+    conta = repo.conta(cid)
+    agora = datetime.now(timezone.utc)
+    assert conta.seca_ate is not None and conta.seca_ate > agora
+    assert conta.saldo == 50                       # estornado e reconciliado
+    assert escolher([conta], Modelo.VEO_FAST, agora) is None   # some da escolha
+
+    j = repo.job(jid)
+    assert j.estado is EstadoJob.PENDENTE
+    assert j.reavaliar_em == conta.seca_ate
+    assert j.tentativas == 0
+    assert repo.reivindicar(agora) is None         # nao volta na proxima iteracao
+
+
+async def test_recuperar_estorna_job_preso_sem_geracao(repo, tmp_path):
+    # crash entre `reservar` e `gerar`: sem recuperacao o job fica `rodando` para
+    # sempre e o credito reservado nunca volta
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 30; repo.salvar_conta(c)
+    jid = repo.criar_job(job_fast())
+    j = repo.job(jid)
+    j.estado = EstadoJob.RODANDO; j.conta_id = cid; j.custo_estimado = 20
+    repo.salvar_job(j)
+
+    orq = Orquestrador(repo, TransporteFalso(saldos={cid: 50}), raiz=tmp_path)
+    assert orq.recuperar() == 1
+
+    j = repo.job(jid)
+    assert j.estado is EstadoJob.PENDENTE
+    assert j.custo_estimado is None
+    assert j.tentativas == 0                       # nao foi o job que falhou
+    assert repo.conta(cid).saldo == 50
+    assert [e["tipo"] for e in repo.eventos(jid)] == ["recuperado_sem_gerar"]
+
+
+async def test_recuperar_preserva_geracao_ja_paga(repo, tmp_path):
+    # ha geracao em curso no Flow, ja cobrada: estornar inflaria o saldo e perder o
+    # id_remoto faria pagar de novo
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 30; repo.salvar_conta(c)
+    jid = repo.criar_job(job_fast())
+    j = repo.job(jid)
+    j.estado = EstadoJob.RODANDO; j.conta_id = cid
+    j.custo_estimado = 20; j.id_remoto = "falso-9"
+    repo.salvar_job(j)
+
+    orq = Orquestrador(repo, TransporteFalso(saldos={cid: 50}), raiz=tmp_path)
+    assert orq.recuperar() == 1
+
+    j = repo.job(jid)
+    assert j.estado is EstadoJob.PENDENTE
+    assert j.id_remoto == "falso-9"
+    assert j.conta_id == cid
+    assert repo.conta(cid).saldo == 30             # nao estornou
+    ev = repo.eventos(jid)[0]
+    assert ev["tipo"] == "recuperado_com_geracao"
+    assert json.loads(ev["payload"])["id_remoto"] == "falso-9"
+
+
+async def test_divergencia_acima_do_limiar_vira_evento_com_sinal(repo, tmp_path):
+    # e esta medicao que responde se imagem custa credito ou sai de graca
+    cid = repo.criar_conta("a@b.com", Tier.PRO, "p/1")
+    c = repo.conta(cid); c.saldo = 100; repo.salvar_conta(c)
+    jid = repo.criar_job(job_fast())
+
+    async def cobrou_mais(*a, **k):
+        return 60          # previsto 80 (100 - 20 da tabela); o Flow cobrou 40
+
+    t = TransporteFalso(saldos={cid: 100})
+    t.saldo = cobrou_mais
+
+    orq = Orquestrador(repo, t, raiz=tmp_path)
+    await orq.passo()
+
+    div = [e for e in repo.eventos(jid) if e["tipo"] == "divergencia"]
+    assert len(div) == 1
+    payload = json.loads(div[0]["payload"])
+    assert payload["delta"] == -20                 # negativo = faltou credito
+    assert payload["lido"] == 60
+    assert repo.conta(cid).saldo_confiavel is False
+
+
+async def test_workers_simultaneos_nao_pegam_o_mesmo_job(repo, tmp_path):
+    # dois jobs e tres workers com teto 1: tres geracoes seria pagar por um job duas
+    # vezes, com o perdedor sobrescrevendo o arquivo do vencedor
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 500; repo.salvar_conta(c)
+    j1 = repo.criar_job(job_fast(nome="c1"))
+    j2 = repo.criar_job(job_fast(nome="c2"))
+
+    t = TransporteFalso(saldos={cid: 500}, latencia=0.01)
+    orq = Orquestrador(repo, t, raiz=tmp_path, max_simultaneos=1)
+    await asyncio.gather(orq.passo(), orq.passo(), orq.passo())
+
+    assert len(t.geracoes) == 2
+    assert repo.job(j1).estado is EstadoJob.PRONTO
+    assert repo.job(j2).estado is EstadoJob.PRONTO
 ```
 
 - [ ] **Step 2: Rodar e ver falhar**
@@ -1693,8 +2128,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from flowpool.dados.repo import Repo
-from flowpool.nucleo.credito import liberar, reconciliar, reservar
-from flowpool.nucleo.escolha import escolher
+from flowpool.nucleo.credito import LIMIAR_DIVERGENCIA, liberar, reconciliar, reservar
+from flowpool.nucleo.escolha import apta, escolher
 from flowpool.nucleo.tipos import Conta, EstadoJob, Job, Modo, SaudeSessao
 from flowpool.transporte.base import (
     Estado, FlowTransport, GeracaoFalhou, Pedido, SaldoInsuficiente, SessaoMorta,
@@ -1703,6 +2138,7 @@ from flowpool.transporte.base import (
 MAX_TENTATIVAS = 3
 ESPERA_RESET = timedelta(hours=1)
 TIMEOUT_GERACAO = timedelta(minutes=10)
+INTERVALO_POLLING = 5.0
 
 
 def _extensao(modo: Modo) -> str:
@@ -1711,49 +2147,117 @@ def _extensao(modo: Modo) -> str:
 
 class Orquestrador:
     def __init__(self, repo: Repo, transporte: FlowTransport, raiz: Path | str,
-                 max_simultaneos: int = 3) -> None:
+                 max_simultaneos: int = 3,
+                 timeout_geracao: timedelta = TIMEOUT_GERACAO,
+                 intervalo_polling: float = INTERVALO_POLLING) -> None:
         self.repo = repo
         self.transporte = transporte
         self.raiz = Path(raiz)
         self.sem = asyncio.Semaphore(max_simultaneos)
+        # parametrizados para o teste nao ter que esperar dez minutos de verdade
+        self.timeout_geracao = timeout_geracao
+        self.intervalo_polling = intervalo_polling
         self._rodando = False
 
+    def recuperar(self) -> int:
+        """Resolve os jobs que um crash deixou presos em `rodando`. Roda no boot.
+
+        `reivindicar` so olha para `pendente`, entao um job travado em `rodando` nunca
+        seria retomado nem falharia — e o credito que ele reservou nunca voltaria ao
+        saldo. Devolve quantos jobs foram tocados.
+
+        Duas situacoes, e a diferenca e o `id_remoto`:
+        - vazio: o Flow nunca aceitou o pedido, entao a reserva volta e o job recomeca
+          do zero, sem gastar tentativa (nao foi ele que falhou, foi a maquina).
+        - preenchido: existe geracao la fora, ja paga. Estornar inflaria o saldo, e
+          perder o `id_remoto` faria pagar de novo — os dois sao preservados.
+        """
+        presos = self.repo.jobs(EstadoJob.RODANDO)
+        for job in presos:
+            conta_id = job.conta_id
+            conta = self.repo.conta(conta_id) if conta_id is not None else None
+            if job.id_remoto is None:
+                if conta is not None and job.custo_estimado is not None:
+                    liberar(conta, job.custo_estimado)
+                    self.repo.salvar_conta(conta)
+                job.custo_estimado = None
+                job.conta_id = None
+                job.estado = EstadoJob.PENDENTE
+                self.repo.salvar_job(job)
+                self.repo.registrar_evento(job.id, conta_id, "recuperado_sem_gerar")
+            else:
+                job.estado = EstadoJob.PENDENTE
+                self.repo.salvar_job(job)
+                self.repo.registrar_evento(
+                    job.id, conta_id, "recuperado_com_geracao",
+                    json.dumps({"id_remoto": job.id_remoto}))
+        return len(presos)
+
     async def passo(self) -> bool:
-        """Puxa um job e leva ate o fim. Devolve False se nao havia job."""
-        agora = datetime.now(timezone.utc)
-        job = self.repo.proximo_pendente(agora)
-        if job is None:
-            return False
+        """Puxa um job e leva ate o fim. Devolve False se nao havia job.
 
-        conta = escolher(self.repo.contas(), job.modelo)
-        if conta is None:
-            job.reavaliar_em = agora + ESPERA_RESET
-            self.repo.salvar_job(job)
-            self.repo.registrar_evento(job.id, None, "sem_conta_apta")
-            return True
-
+        O semaforo e adquirido ANTES de reivindicar. Reivindicar primeiro deixaria o
+        job puxado visivel como `pendente` enquanto o worker espera na fila do
+        semaforo — e outro worker o pegaria, gerando e pagando duas vezes pelo mesmo
+        job, com o perdedor sobrescrevendo o arquivo do vencedor.
+        """
         async with self.sem:
+            agora = datetime.now(timezone.utc)
+            job = self.repo.reivindicar(agora)
+            if job is None:
+                return False
+
+            conta = self._conta_para(job, agora)
+            if conta is None:
+                job.estado = EstadoJob.PENDENTE
+                job.reavaliar_em = agora + ESPERA_RESET
+                self.repo.salvar_job(job)
+                self.repo.registrar_evento(job.id, None, "sem_conta_apta")
+                return True
+
             await self._executar(job, conta)
         return True
 
+    def _conta_para(self, job: Job, agora: datetime) -> Conta | None:
+        """Conta em que este job deve rodar.
+
+        Job que volta a fila com `id_remoto` tem geracao paga em curso no Flow, e ela
+        so pode ser retomada de dentro da conta que a criou — por isso aquela conta
+        tem preferencia. Se ela nao servir mais, a escolha normal vale e o job gera do
+        zero.
+        """
+        contas = self.repo.contas()
+        if job.id_remoto is not None and job.conta_id is not None:
+            anterior = next((c for c in contas if c.id == job.conta_id), None)
+            if anterior is not None and apta(anterior, job.modelo, agora):
+                return anterior
+        return escolher(contas, job.modelo, agora)
+
     async def _executar(self, job: Job, conta: Conta) -> None:
+        # retomada: a geracao ja existe e e da mesma conta. Gerar de novo pagaria duas
+        # vezes e deixaria a primeira orfa, terminando no Flow sem ninguem para baixar.
+        retomando = job.id_remoto is not None and job.conta_id == conta.id
         job.estado = EstadoJob.RODANDO
         job.conta_id = conta.id
         self.repo.salvar_job(job)
-        self.repo.registrar_evento(job.id, conta.id, "despachado",
-                                   json.dumps({"modelo": job.modelo.value}))
+        self.repo.registrar_evento(
+            job.id, conta.id, "despachado",
+            json.dumps({"modelo": job.modelo.value, "retomada": retomando}))
 
         sessao = None
         try:
             sessao = await self.transporte.abrir_sessao(conta)
-            # guardar o reservado no job e o que permite estornar depois — inclusive
-            # depois de um restart, por isso vai para o banco na hora
-            job.custo_estimado = reservar(conta, job.modelo)
-            self.repo.salvar_conta(conta)
-            self.repo.salvar_job(job)
+            if not retomando:
+                # a conta mudou: a geracao anterior nao serve mais, comeca do zero
+                job.id_remoto = None
+                # guardar o reservado no job e o que permite estornar depois —
+                # inclusive depois de um restart, por isso vai para o banco na hora
+                job.custo_estimado = reservar(conta, job.modelo)
+                self.repo.salvar_conta(conta)
+                self.repo.salvar_job(job)
 
-            job.id_remoto = await self.transporte.gerar(sessao, self._pedido(job))
-            self.repo.salvar_job(job)
+                job.id_remoto = await self.transporte.gerar(sessao, self._pedido(job))
+                self.repo.salvar_job(job)
 
             estado = await self._esperar(sessao, job.id_remoto)
             if estado is not Estado.PRONTO:
@@ -1769,22 +2273,36 @@ class Orquestrador:
             self.repo.registrar_evento(job.id, conta.id, "pronto")
 
         except SessaoMorta as e:
-            # nao ha estorno aqui: `abrir_sessao` falha antes de `reservar` rodar
+            # A sessao nao morre so em `abrir_sessao`: no transporte real ela cai no
+            # meio de `gerar`/`consultar`/`baixar`. Como este e o primeiro `except`,
+            # sem estornar aqui o credito reservado sumiria do saldo local para
+            # sempre. `_estornar` e no-op depois que o Flow aceitou, entao nao infla.
+            if self._estornar(job, conta):
+                self.repo.salvar_conta(conta)
             conta.saude = SaudeSessao.EXPIRADA
-            self.repo.salvar_conta(conta)
+            # escrita de campo especifico: `salvar_conta` grava a linha inteira a
+            # partir de uma copia velha, e outro worker ressuscitaria a sessao
+            self.repo.marcar_sessao(conta.id, SaudeSessao.EXPIRADA)
+            self._evento_de_falha(job, conta, "sessao_morta")
             self._devolver(job, str(e), gasta_tentativa=False)
-            self.repo.registrar_evento(job.id, conta.id, "sessao_morta")
 
         except SaldoInsuficiente as e:
             # Vem de duas fontes: o guarda local em `reservar` (a conta tem credito
             # real, so nao o bastante para este modelo) ou o proprio Flow. Estornar e
             # deixar a reconciliacao do `finally` adotar o numero verdadeiro — zerar o
             # saldo na mao apagaria credito que existe e tiraria a conta do pool.
+            #
+            # Marcar a conta seca COM PRAZO e o que impede o laco quente: se o Flow
+            # mostra saldo mas recusa gerar (cota diaria, throttle), sem prazo o job
+            # volta a fila na mesma hora, para a mesma conta, abrindo e fechando um
+            # Chrome por iteracao, sem gastar tentativa e sem nunca desistir.
             self._estornar(job, conta)
+            conta.seca_ate = datetime.now(timezone.utc) + ESPERA_RESET
             conta.saldo_confiavel = False
             self.repo.salvar_conta(conta)
+            job.reavaliar_em = conta.seca_ate
+            self._evento_de_falha(job, conta, "conta_seca")
             self._devolver(job, str(e), gasta_tentativa=False)
-            self.repo.registrar_evento(job.id, conta.id, "conta_seca")
 
         except Exception as e:  # falha de rede, timeout, geracao errada
             # `_estornar` decide sozinho se devolve: so devolve enquanto o Flow ainda
@@ -1793,22 +2311,50 @@ class Orquestrador:
             self._estornar(job, conta)
             conta.falhas += 1
             self.repo.salvar_conta(conta)
+            self._evento_de_falha(job, conta, "falhou", {"erro": str(e)})
             self._devolver(job, f"{type(e).__name__}: {e}", gasta_tentativa=True)
-            self.repo.registrar_evento(job.id, conta.id, "falhou",
-                                       json.dumps({"erro": str(e)}))
 
         finally:
             if sessao is not None:
                 try:
                     lido = await self.transporte.saldo(sessao)
-                    reconciliar(conta, lido, datetime.now(timezone.utc))
+                    delta = reconciliar(conta, lido, datetime.now(timezone.utc))
                     conta.falhas = 0 if job.estado is EstadoJob.PRONTO else conta.falhas
                     self.repo.salvar_conta(conta)
-                except Exception:
-                    pass
-                await self.transporte.fechar(sessao)
+                    if abs(delta) >= LIMIAR_DIVERGENCIA:
+                        # a medicao que responde se imagem custa credito ou sai de
+                        # graca. Calcular o delta com sinal e joga-lo fora apagava o
+                        # unico dado real que o projeto tem sobre custo.
+                        self.repo.registrar_evento(
+                            job.id, conta.id, "divergencia",
+                            json.dumps({"delta": delta, "lido": lido}))
+                except Exception as e:
+                    # o `except: pass` daqui engolia tambem falha de `salvar_conta` —
+                    # o silencio que transformava conta seca em laco infinito
+                    self.repo.registrar_evento(job.id, conta.id, "reconciliacao_falhou",
+                                               json.dumps({"erro": str(e)}))
+                try:
+                    # fechar um browser ja morto levanta, e isso escapava do `try` de
+                    # cima: a task de `rodar()` terminava e a fila parava em silencio
+                    await self.transporte.fechar(sessao)
+                except Exception as e:
+                    self.repo.registrar_evento(job.id, conta.id, "fechar_falhou",
+                                               json.dumps({"erro": str(e)}))
 
-    def _estornar(self, job: Job, conta: Conta) -> None:
+    def _evento_de_falha(self, job: Job, conta: Conta, tipo: str,
+                         extra: dict | None = None) -> None:
+        """Registra a falha ANTES de `_devolver`, com o que a auditoria precisa.
+
+        Depois de `_devolver` o job ja mudou de estado e pode ter perdido o vinculo
+        com a conta. O `id_remoto` no evento e o que permite achar geracao orfa no
+        Flow, e a tentativa e o que mostra quantas vezes aquele job ja custou credito.
+        """
+        payload = {"id_remoto": job.id_remoto, "tentativa": job.tentativas}
+        if extra:
+            payload.update(extra)
+        self.repo.registrar_evento(job.id, conta.id, tipo, json.dumps(payload))
+
+    def _estornar(self, job: Job, conta: Conta) -> bool:
         """Devolve ao saldo a reserva de um job que nao chegou a virar geracao.
 
         So estorna enquanto `id_remoto is None` — ou seja, enquanto o Flow ainda nao
@@ -1820,14 +2366,26 @@ class Orquestrador:
 
         Idempotente: zera `custo_estimado` para nao estornar duas vezes. Quem chama
         salva o job logo em seguida (`_devolver`), entao o zero chega ao banco.
+
+        Devolve True quando credito voltou de fato ao saldo em memoria — quem chamou
+        usa isso para saber se ainda precisa persistir a conta.
         """
         if job.custo_estimado is None:
-            return
-        if job.id_remoto is None:
+            return False
+        devolveu = job.id_remoto is None
+        if devolveu:
             liberar(conta, job.custo_estimado)
         job.custo_estimado = None
+        return devolveu
 
     def _devolver(self, job: Job, erro: str, gasta_tentativa: bool) -> None:
+        """Devolve o job a fila.
+
+        Com `id_remoto` preenchido, `id_remoto` e `conta_id` sao PRESERVADOS: existe
+        geracao paga em curso no Flow, e a proxima tentativa retoma aquela em vez de
+        gerar (e pagar) de novo deixando a primeira orfa. Um Quality de 11 minutos
+        custa 200 creditos e nao entrega nada; na terceira tentativa, 300.
+        """
         job.erro = erro
         if gasta_tentativa:
             job.tentativas += 1
@@ -1835,18 +2393,18 @@ class Orquestrador:
             job.estado = EstadoJob.FALHOU
         else:
             job.estado = EstadoJob.PENDENTE
-            job.conta_id = None
-            job.id_remoto = None
+            if job.id_remoto is None:
+                job.conta_id = None
         self.repo.salvar_job(job)
 
     async def _esperar(self, sessao, id_remoto: str) -> Estado:
-        limite = datetime.now(timezone.utc) + TIMEOUT_GERACAO
+        limite = datetime.now(timezone.utc) + self.timeout_geracao
         while datetime.now(timezone.utc) < limite:
             estado = await self.transporte.consultar(sessao, id_remoto)
             if estado is not Estado.RODANDO:
                 return estado
-            await asyncio.sleep(5)
-        raise TimeoutError(f"geracao {id_remoto} passou de {TIMEOUT_GERACAO}")
+            await asyncio.sleep(self.intervalo_polling)
+        raise TimeoutError(f"geracao {id_remoto} passou de {self.timeout_geracao}")
 
     @staticmethod
     def _pedido(job: Job) -> Pedido:
@@ -1855,10 +2413,23 @@ class Orquestrador:
                       frame_final=job.frame_final)
 
     async def rodar(self, intervalo: float = 2.0) -> None:
-        """Laco eterno, usado pela API. Para com `parar()`."""
+        """Laco eterno, usado pela API. Para com `parar()`.
+
+        Tudo que escapa de `passo()` vira evento e o laco continua. Sem isso a task
+        morre e ninguem observa: a API segue respondendo HTTP normalmente enquanto a
+        fila nunca mais anda. Tres caminhos reais chegavam aqui — `fechar()` de um
+        browser morto, `ModeloSemCusto` vindo de `escolher`, e falha de escrita no
+        banco.
+        """
         self._rodando = True
         while self._rodando:
-            if not await self.passo():
+            try:
+                if not await self.passo():
+                    await asyncio.sleep(intervalo)
+            except Exception as e:
+                self.repo.registrar_evento(
+                    None, None, "passo_falhou",
+                    json.dumps({"erro": f"{type(e).__name__}: {e}"}))
                 await asyncio.sleep(intervalo)
 
     def parar(self) -> None:
@@ -1868,12 +2439,12 @@ class Orquestrador:
 - [ ] **Step 4: Rodar e ver passar**
 
 Run: `.venv/Scripts/pytest tests/test_orquestrador.py -q`
-Expected: `11 passed`
+Expected: `19 passed`
 
 - [ ] **Step 5: Rodar a suíte inteira**
 
 Run: `.venv/Scripts/pytest -q`
-Expected: `80 passed` (5 tipos + 17 custos + 14 escolha + 15 credito + 3 pool + 9 repo + 6 transporte + 11 orquestrador)
+Expected: `100 passed` (6 tipos + 17 custos + 16 escolha + 15 credito + 3 pool + 15 repo + 9 transporte + 19 orquestrador)
 
 - [ ] **Step 6: Commit**
 
@@ -1889,6 +2460,8 @@ git commit -m "feat: orquestrador de fila com troca de conta e retry"
 **Files:**
 - Create: `flowpool/api/esquemas.py`, `flowpool/api/app.py`
 - Test: `tests/test_api.py`
+
+O lifespan chama `orq.recuperar()` **antes** de `rodar()`. É o único ponto do sistema que roda uma vez por boot, e é onde um job deixado em `rodando` por um crash anterior — com crédito reservado que nunca voltou — precisa ser resolvido antes de o motor puxar qualquer coisa nova.
 
 - [ ] **Step 1: Escrever o teste que falha**
 
@@ -2106,6 +2679,9 @@ def criar_app(repo: Repo, transporte: FlowTransport, raiz: Path | str,
 
     @asynccontextmanager
     async def ciclo(app: FastAPI):
+        # antes de qualquer coisa: um crash anterior pode ter deixado job preso em
+        # `rodando` com credito reservado que nunca voltou
+        orq.recuperar()
         tarefa = asyncio.create_task(orq.rodar()) if rodar_motor else None
         yield
         if tarefa:
@@ -2510,7 +3086,7 @@ from flowpool.transporte.pw.sessao import cadastrar, caminho_perfil
 - [ ] **Step 6: Rodar a suíte**
 
 Run: `.venv/Scripts/pytest -q`
-Expected: `93 passed` (80 + 9 da api + 4 da sessao)
+Expected: `113 passed` (100 + 9 da api + 4 da sessão)
 
 - [ ] **Step 7: Commit**
 
@@ -2953,7 +3529,7 @@ Expected: `4 passed`
 - [ ] **Step 6: Rodar a suíte inteira**
 
 Run: `.venv/Scripts/pytest -q`
-Expected: `97 passed` (93 + 4 do cliente)
+Expected: `117 passed` (113 + 4 do cliente)
 
 - [ ] **Step 7: Commit**
 
