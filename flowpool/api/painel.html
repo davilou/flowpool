@@ -11,257 +11,242 @@
 </head>
 <body>
 
-<header class="topo">
+<!-- L4: a faixa. Contas saem do caminho, mas o que EXIGE AÇÃO continua gritando aqui:
+     a sessão do Flow cai a cada ~48h e revalidar é a única coisa que precisa de gente. -->
+<header class="faixa">
   <div class="marca">
     <span class="ponto" id="ponto-servico"></span>
-    <h1>FlowPool</h1>
-    <span class="sub">pool de contas do Google Flow</span>
+    <strong>FlowPool</strong>
   </div>
-  <div class="estado-conexao" id="estado-conexao">conectando…</div>
+
+  <div class="medidores">
+    <span class="medidor"><b class="mono" id="credito-total">—</b> créditos</span>
+    <span class="medidor"><b class="mono" id="contas-vivas">—</b> contas vivas</span>
+    <span class="medidor"><b class="mono" id="fila-pendente">—</b> na fila</span>
+  </div>
+
+  <div class="expiradas oculto" id="faixa-expiradas">
+    <span class="alerta-texto" id="titulo-expiradas"></span>
+    <span class="lista-expiradas" id="lista-expiradas"></span>
+  </div>
+
+  <div class="faixa-fim">
+    <span class="estado-conexao" id="estado-conexao">conectando…</span>
+    <button type="button" class="mini" id="abrir-contas">Contas</button>
+  </div>
 </header>
 
-<main>
+<!-- L1: a galeria é a tela. Tudo o que foi gerado, mais recente primeiro. -->
+<main class="galeria" id="galeria">
+  <div class="galeria-vazia">Carregando…</div>
+</main>
 
-  <!-- P3: saude do pool. Primeiro na pagina porque e o que exige acao. -->
-  <section class="faixa-alerta oculto" id="faixa-expiradas">
-    <div class="alerta-cabeca">
-      <strong id="titulo-expiradas">Sessões caídas</strong>
-      <span>Uma sessão do Flow vive ~48h. Enquanto estiver caída, a conta sai do pool.</span>
-    </div>
-    <div class="lista-expiradas" id="lista-expiradas"></div>
-  </section>
+<!-- Barra de seleção: só aparece quando há algo marcado. -->
+<div class="barra-selecao oculto" id="barra-selecao">
+  <span id="selecao-conta"></span>
+  <button type="button" class="mini" id="baixar-selecao">Baixar selecionados</button>
+  <button type="button" class="mini" id="limpar-selecao">Limpar</button>
+</div>
 
-  <section class="cartoes">
-    <div class="cartao destaque">
-      <div class="rotulo">Crédito no pool</div>
-      <div class="numerao mono" id="credito-total">—</div>
-      <div class="nota">soma das contas ativas com sessão viva</div>
-    </div>
-    <div class="cartao">
-      <div class="rotulo">Contas vivas</div>
-      <div class="numerao mono" id="contas-vivas">—</div>
-      <div class="nota">ativas e com sessão de pé</div>
-    </div>
-    <div class="cartao">
-      <div class="rotulo">Fila pendente</div>
-      <div class="numerao mono" id="fila-pendente">—</div>
-      <div class="nota">jobs esperando conta</div>
-    </div>
-  </section>
+<!-- L3: a barra de prompt. Flutua sobre a galeria, no rodapé.
+     NÃO é um agente: o campo é só o prompt. Quem decide modo, modelo e parâmetros é o
+     chip ao lado — a mesma escolha determinística que o transporte já faz. -->
+<footer class="barra">
+  <form class="caixa" id="form-job" autocomplete="off">
+    <div class="tira-anexos" id="tira-anexos"></div>
 
-  <!-- P2: contas. O centro do painel. -->
-  <section class="bloco">
-    <div class="bloco-cabeca">
-      <h2>Contas</h2>
-      <span class="contador mono" id="contador-contas"></span>
+    <div class="linha-caixa">
+      <button type="button" class="redondo" id="botao-mais"
+              title="anexar imagens do disco">+</button>
+
+      <textarea id="job-prompt" rows="1" placeholder="O que você quer criar?"
+                required></textarea>
+
+      <button type="button" class="chip" id="chip">
+        <span id="chip-texto">Vídeo · 4s · 9:16 · x1</span>
+        <span class="chip-seta">▾</span>
+      </button>
+
+      <button type="button" class="chip produto" id="chip-produto">
+        <span id="chip-produto-texto">produto</span>
+        <span class="chip-seta">▾</span>
+      </button>
+
+      <button type="submit" class="enviar" id="botao-enviar" title="enviar (Enter)">↑</button>
     </div>
+  </form>
 
-    <div class="cadastro" id="cadastro">
-      <form id="form-conta" autocomplete="off">
-        <fieldset id="campos-conta">
-          <legend>Cadastrar nova conta</legend>
-          <div class="linha-campos">
-            <label class="campo cresce">
-              <span>E-mail da conta Google</span>
-              <input type="email" id="conta-email" required placeholder="conta@gmail.com">
-            </label>
-            <label class="campo">
-              <span>Tier</span>
-              <select id="conta-tier">
-                <option value="free" selected>free</option>
-                <option value="pro">pro</option>
-                <option value="ultra">ultra</option>
-              </select>
-            </label>
-            <label class="campo cresce">
-              <span>Proxy (opcional)</span>
-              <input type="text" id="conta-proxy" class="mono" placeholder="http://host:porta">
-            </label>
-            <button type="submit" id="botao-cadastrar" class="primario">Cadastrar conta</button>
-          </div>
-          <p class="dica">
-            O proxy entra <em>já no cadastro</em>: o login precisa sair do mesmo IP por onde a conta
-            vai operar. Sem proxy, a conta usa o IP desta máquina. Proxy com usuário e senha não
-            funciona no Chrome do cadastro — use um proxy sem credencial ou deixe em branco.
-          </p>
-        </fieldset>
-      </form>
+  <div class="aviso erro oculto" id="erro-job"></div>
+</footer>
 
-      <!-- O estado que evita o segundo clique. POST /contas bloqueia por minutos. -->
-      <div class="andamento oculto" id="andamento-cadastro">
-        <div class="andamento-cabeca">
-          <span class="girando"></span>
-          <strong id="andamento-titulo">Abri o Chrome. Agora é com você.</strong>
-        </div>
-        <ol class="passos">
-          <li>Faça o login na conta Google na janela que abriu.</li>
-          <li>Tela de consentimento: <strong>deixe as duas caixas desmarcadas</strong> e clique em “Avançar”.</li>
-          <li>Aviso de privacidade: <strong>role até o fim do texto</strong> — o botão “Continuar” só habilita
-              quando o fim entra na tela de verdade. Janela minimizada ou coberta por outra não conta.</li>
-          <li>Confirme que a lista de projetos do Flow carregou.</li>
-          <li><strong>Feche a janela do Chrome.</strong> Daí em diante é comigo.</li>
-        </ol>
-        <p class="andamento-rodape">
-          Não abra este mesmo perfil em outro Chrome enquanto isso, e não clique em cadastrar de novo:
-          o segundo Chrome rouba a janela do primeiro e o cadastro falha.
-          <br>Eu confirmo aqui quando a sessão estiver de pé. <span class="mono" id="cronometro">0:00</span>
-        </p>
+<!-- Popover do chip. Só mostra o que a API aceitaria: duração só em vídeo, quantidade
+     acima de 1 só em imagem, proporção de vídeo só 9:16 e 16:9, modelo por família. -->
+<div class="popover oculto" id="pop-chip" role="dialog" aria-label="Configuração da geração">
+  <div class="pop-grupo">
+    <span class="pop-rotulo">Tipo</span>
+    <div class="pop-opcoes" id="pop-tipo">
+      <button type="button" data-modo="t2v">vídeo — texto</button>
+      <button type="button" data-modo="frames2v">vídeo — frames</button>
+      <button type="button" data-modo="ingredients2v">vídeo — referências</button>
+      <button type="button" data-modo="imagem">imagem</button>
+    </div>
+  </div>
+
+  <div class="pop-grupo">
+    <span class="pop-rotulo">Modelo</span>
+    <div class="pop-opcoes" id="pop-modelo"></div>
+  </div>
+
+  <div class="pop-grupo">
+    <span class="pop-rotulo">Proporção</span>
+    <div class="pop-opcoes" id="pop-proporcao"></div>
+  </div>
+
+  <div class="pop-grupo" id="grupo-duracao">
+    <span class="pop-rotulo">Duração</span>
+    <div class="pop-opcoes" id="pop-duracao"></div>
+  </div>
+
+  <div class="pop-grupo" id="grupo-quantidade">
+    <span class="pop-rotulo">Quantidade</span>
+    <div class="pop-opcoes" id="pop-quantidade"></div>
+  </div>
+
+  <p class="pop-dica" id="pop-dica"></p>
+</div>
+
+<!-- Popover do produto. O produto é a pasta em disco E o nome do projeto no Flow, então
+     a API exige. Fica aqui, e não na barra, para não roubar espaço do prompt. -->
+<div class="popover oculto" id="pop-produto" role="dialog" aria-label="Produto">
+  <span class="pop-rotulo">Produto</span>
+  <div class="pop-lista" id="lista-produtos"></div>
+  <div class="pop-novo">
+    <input type="text" id="produto-novo" placeholder="novo produto…">
+    <button type="button" class="mini" id="usar-produto-novo">Usar</button>
+  </div>
+  <p class="pop-dica">
+    O produto é a pasta onde o arquivo cai (<span class="mono-peq">produto/clipes</span>)
+    e o nome do projeto dentro do Flow. O nome do arquivo sai automático
+    (<span class="mono-peq">produto-n</span>) e dá para trocar no visualizador enquanto o
+    job está na fila.
+  </p>
+</div>
+
+<!-- Visualizador. Abre no clique do card: mídia grande, o prompt inteiro, de onde veio
+     e o caminho em disco — que é como o arquivo chega no editor de vídeo. -->
+<div class="modal-fundo oculto" id="visor">
+  <div class="visor" role="dialog" aria-modal="true" aria-labelledby="visor-titulo">
+    <div class="visor-palco" id="visor-palco"></div>
+    <aside class="visor-lado">
+      <div class="visor-topo">
+        <strong id="visor-titulo">—</strong>
+        <button type="button" class="mini" id="visor-fechar">Fechar</button>
       </div>
 
-      <div class="aviso erro oculto" id="erro-cadastro"></div>
-      <div class="aviso ok oculto" id="ok-cadastro"></div>
-    </div>
+      <div class="visor-linha"><span class="pop-rotulo">Prompt</span>
+        <p class="visor-prompt" id="visor-prompt"></p></div>
 
-    <div class="rolagem">
-      <table class="tabela" id="tabela-contas">
-        <thead>
-          <tr>
-            <th>E-mail</th>
-            <th>Tier</th>
-            <th class="num">Saldo</th>
-            <th>Sessão</th>
-            <th>Proxy</th>
-            <th>Ativa</th>
-            <th>Ações</th>
-          </tr>
-        </thead>
-        <tbody id="corpo-contas">
-          <tr class="vazio"><td colspan="7">Carregando…</td></tr>
-        </tbody>
-      </table>
-    </div>
-  </section>
+      <div class="visor-linha"><span class="pop-rotulo">Configuração</span>
+        <p class="mono-peq" id="visor-config"></p></div>
 
-  <!-- P4: jobs. -->
-  <section class="bloco">
-    <div class="bloco-cabeca">
-      <h2>Jobs</h2>
-      <span class="contador mono" id="contador-jobs"></span>
-    </div>
+      <div class="visor-linha"><span class="pop-rotulo">Produto e conta</span>
+        <p class="mono-peq" id="visor-origem"></p></div>
 
-    <form id="form-job" autocomplete="off" class="cadastro">
-      <fieldset id="campos-job">
-        <legend>Novo job</legend>
-        <div class="linha-campos">
-          <label class="campo cresce">
-            <span>Produto</span>
-            <input type="text" id="job-produto" required placeholder="Panelas Monaco">
-          </label>
-          <label class="campo cresce">
-            <span>Nome do arquivo</span>
-            <input type="text" id="job-nome" required placeholder="c3-take1">
-          </label>
-          <label class="campo">
-            <span>Modo</span>
-            <select id="job-modo">
-              <option value="t2v" selected>vídeo — texto</option>
-              <option value="frames2v">vídeo — frames</option>
-              <option value="ingredients2v">vídeo — referências</option>
-              <option value="imagem">imagem</option>
-            </select>
-          </label>
-          <label class="campo">
-            <span>Modelo</span>
-            <select id="job-modelo"></select>
-          </label>
-          <label class="campo">
-            <span>Proporção</span>
-            <select id="job-proporcao"></select>
-          </label>
-          <label class="campo" id="campo-duracao">
-            <span>Duração</span>
-            <select id="job-duracao">
-              <option value="4s" selected>4s</option>
-              <option value="6s">6s</option>
-              <option value="8s">8s</option>
-              <option value="10s">10s</option>
-            </select>
-          </label>
-          <label class="campo" id="campo-quantidade">
-            <span>Quantidade</span>
-            <select id="job-quantidade">
-              <option value="1" selected>1</option>
-              <option value="2">2</option>
-              <option value="3">3</option>
-              <option value="4">4</option>
-            </select>
-          </label>
+      <div class="visor-linha" id="visor-linha-erro"><span class="pop-rotulo">Erro</span>
+        <p class="visor-erro" id="visor-erro"></p></div>
+
+      <div class="visor-linha" id="visor-linha-nome"><span class="pop-rotulo">Nome do arquivo</span>
+        <div class="linha-arquivo">
+          <input type="text" id="visor-nome" class="mono">
+          <button type="button" class="mini" id="visor-renomear">Salvar</button>
         </div>
+        <p class="pop-dica">O nome vira o arquivo em disco, então só muda enquanto o job
+          está na fila.</p></div>
 
-        <!-- Os campos de arquivo continuam sendo CAMPO DE TEXTO: quem já sabe o caminho
-             digita e pronto. O botão só abre o navegador de imagens por cima; o que ele
-             escolhe vira texto aqui dentro, e a miniatura abaixo é o reflexo do campo. -->
-        <div class="linha-campos" id="campo-frames">
-          <div class="campo cresce">
-            <span>Frame inicial</span>
-            <div class="linha-arquivo">
-              <input type="text" id="job-frame-inicial" class="mono" placeholder="Produto/frames/01.png">
-              <button type="button" class="mini abrir-seletor" data-campo="job-frame-inicial">Escolher…</button>
-            </div>
-            <div class="tiras" id="tira-job-frame-inicial"></div>
-          </div>
-          <div class="campo cresce">
-            <span>Frame final (opcional)</span>
-            <div class="linha-arquivo">
-              <input type="text" id="job-frame-final" class="mono" placeholder="Produto/frames/09.png">
-              <button type="button" class="mini abrir-seletor" data-campo="job-frame-final">Escolher…</button>
-            </div>
-            <div class="tiras" id="tira-job-frame-final"></div>
-          </div>
-        </div>
+      <div class="visor-linha" id="visor-linha-caminho"><span class="pop-rotulo">Caminho no disco</span>
+        <div class="linha-arquivo">
+          <input type="text" id="visor-caminho" class="mono" readonly>
+          <button type="button" class="mini" id="visor-copiar">Copiar</button>
+        </div></div>
 
-        <div class="linha-campos" id="campo-referencias">
-          <div class="campo cresce">
-            <span>Referências — até 3, uma por linha</span>
-            <div class="linha-arquivo">
-              <textarea id="job-referencias" class="mono" rows="3"
-                        placeholder="Panelas Monaco/imagens/panelas_isoladas.png"></textarea>
-              <button type="button" class="mini abrir-seletor" data-campo="job-referencias"
-                      data-multiplo="1">Escolher…</button>
-            </div>
-            <div class="tiras" id="tira-job-referencias"></div>
-          </div>
-        </div>
+      <div class="visor-acoes">
+        <a class="mini primario-link oculto" id="visor-baixar" download>Baixar</a>
+        <button type="button" class="mini oculto" id="visor-cancelar">Cancelar job</button>
+      </div>
 
-        <div class="linha-campos">
-          <label class="campo cresce">
-            <span>Prompt</span>
-            <textarea id="job-prompt" rows="3" required
-                      placeholder="o que gerar"></textarea>
-          </label>
-          <label class="campo cresce">
-            <span>Destino (opcional)</span>
-            <input type="text" id="job-destino" class="mono" placeholder="deriva do produto: {produto}/clipes">
-          </label>
-          <button type="submit" id="botao-job" class="primario">Enfileirar</button>
-        </div>
-        <p class="dica" id="dica-job"></p>
+      <div class="aviso erro oculto" id="visor-aviso"></div>
+    </aside>
+  </div>
+</div>
+
+<!-- L4: a gaveta. Toda a gestão de contas continua aqui — cadastrar, revalidar,
+     ativar/desativar, tier, proxy, ler saldo. Fora do caminho, não fora do alcance. -->
+<div class="gaveta-fundo oculto" id="gaveta-fundo"></div>
+<aside class="gaveta oculto" id="gaveta" aria-label="Contas">
+  <div class="gaveta-topo">
+    <strong>Contas</strong>
+    <span class="contador mono" id="contador-contas"></span>
+    <button type="button" class="mini" id="fechar-contas">Fechar</button>
+  </div>
+
+  <div class="gaveta-corpo">
+    <form id="form-conta" autocomplete="off">
+      <fieldset id="campos-conta">
+        <legend>Cadastrar nova conta</legend>
+        <label class="campo">
+          <span>E-mail da conta Google</span>
+          <input type="email" id="conta-email" required placeholder="conta@gmail.com">
+        </label>
+        <label class="campo">
+          <span>Tier</span>
+          <select id="conta-tier">
+            <option value="free" selected>free</option>
+            <option value="pro">pro</option>
+            <option value="ultra">ultra</option>
+          </select>
+        </label>
+        <label class="campo">
+          <span>Proxy (opcional)</span>
+          <input type="text" id="conta-proxy" class="mono" placeholder="http://host:porta">
+        </label>
+        <button type="submit" id="botao-cadastrar" class="primario">Cadastrar conta</button>
+        <p class="dica">
+          O proxy entra <em>já no cadastro</em>: o login precisa sair do mesmo IP por onde a
+          conta vai operar. Sem proxy, a conta usa o IP desta máquina. Proxy com usuário e
+          senha não funciona no Chrome do cadastro — use um sem credencial ou deixe em branco.
+        </p>
       </fieldset>
-      <div class="aviso erro oculto" id="erro-job"></div>
     </form>
 
-    <div class="rolagem">
-      <table class="tabela" id="tabela-jobs">
-        <thead>
-          <tr>
-            <th class="num">#</th>
-            <th>Estado</th>
-            <th>Modo / modelo</th>
-            <th>Produto / nome</th>
-            <th>Config</th>
-            <th>Conta</th>
-            <th>Arquivo / erro</th>
-            <th>Ação</th>
-          </tr>
-        </thead>
-        <tbody id="corpo-jobs">
-          <tr class="vazio"><td colspan="8">Carregando…</td></tr>
-        </tbody>
-      </table>
+    <!-- O estado que evita o segundo clique. POST /contas bloqueia por minutos. -->
+    <div class="andamento oculto" id="andamento-cadastro">
+      <div class="andamento-cabeca">
+        <span class="girando"></span>
+        <strong id="andamento-titulo">Abri o Chrome. Agora é com você.</strong>
+      </div>
+      <ol class="passos">
+        <li>Faça o login na conta Google na janela que abriu.</li>
+        <li>Tela de consentimento: <strong>deixe as duas caixas desmarcadas</strong> e clique em “Avançar”.</li>
+        <li>Aviso de privacidade: <strong>role até o fim do texto</strong> — o botão “Continuar” só habilita
+            quando o fim entra na tela de verdade. Janela minimizada ou coberta não conta.</li>
+        <li>Confirme que a lista de projetos do Flow carregou.</li>
+        <li><strong>Feche a janela do Chrome.</strong> Daí em diante é comigo.</li>
+      </ol>
+      <p class="andamento-rodape">
+        Não abra este mesmo perfil em outro Chrome enquanto isso, e não clique em cadastrar de
+        novo: o segundo Chrome rouba a janela do primeiro e o cadastro falha.
+        <br>Eu confirmo aqui quando a sessão estiver de pé. <span class="mono" id="cronometro">0:00</span>
+      </p>
     </div>
-  </section>
 
-</main>
+    <div class="aviso erro oculto" id="erro-cadastro"></div>
+    <div class="aviso ok oculto" id="ok-cadastro"></div>
+
+    <div class="lista-contas" id="lista-contas">
+      <div class="galeria-vazia">Carregando…</div>
+    </div>
+  </div>
+</aside>
 
 <!-- Seletor de imagens. Navega o DISCO pelo servidor (GET /arquivos), e não faz upload:
      o transporte precisa de um caminho em disco para o `set_input_files`, e o

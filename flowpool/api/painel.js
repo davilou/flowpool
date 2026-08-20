@@ -1,5 +1,10 @@
-/* Painel do FlowPool. Cliente da propria API - nao fala com o Flow e nao tem regra de
-   negocio: tudo o que o servidor recusaria, aqui some da tela antes de virar um 422. */
+/* Painel do FlowPool. Cliente da propria API — nao fala com o Flow e nao tem regra de
+   negocio: tudo o que o servidor recusaria some da tela antes de virar um 422.
+
+   A estrutura e a do proprio Flow: galeria no centro, barra de prompt flutuando no
+   rodape, operacao do pool fora do caminho. O campo de texto e SO O PROMPT — nao ha
+   agente conversacional aqui. Quem decide modo, modelo, proporcao, duracao e quantidade
+   e o chip ao lado, que e determinista e mostra o estado inteiro sem ser aberto. */
 
 "use strict";
 
@@ -22,10 +27,44 @@ const PROPORCOES_VIDEO = ["9:16", "16:9"];
 const PROPORCOES_IMAGEM = ["9:16", "16:9", "4:3", "1:1", "3:4"];
 const MODELOS_VIDEO = ["omni-flash", "veo-lite", "veo-fast", "veo-quality"];
 const MODELOS_IMAGEM = ["nano-banana"];
+const DURACOES = ["4s", "6s", "8s", "10s"];
+const MAX_REFERENCIAS = 3;
+
+// O nome curto do chip. Precisa SEPARAR os tres modos de video — um chip que diz so
+// "Vídeo" nos tres deixaria a pessoa enviar em `frames2v` achando que estava em texto
+// puro, e o transporte anexaria arquivo nenhum. O nome por extenso de cada modo esta
+// nos proprios botoes do popover, no HTML.
+const CHIP_DO_MODO = {
+  "t2v": "Vídeo", "frames2v": "Vídeo·frames", "ingredients2v": "Vídeo·refs",
+  "imagem": "Imagem",
+};
+
+// Quantos arquivos cada modo anexa, e o que cada um significa. O transporte usa UM
+// `input[type=file]` para tudo e deixa o MODO decidir o papel de cada arquivo — em
+// `frames2v` viram frame inicial e final, em `ingredients2v` viram referencias. Nos
+// outros dois o transporte simplesmente nao anexa nada, e por isso o `+` fica travado.
+const PAPEIS = {
+  "frames2v": ["frame inicial", "frame final"],
+  "ingredients2v": ["referência 1", "referência 2", "referência 3"],
+};
 
 let contas = [];
+let jobs = [];
 let sessaoEmCurso = false;   // cadastro OU revalidacao: os dois abrem Chrome e bloqueiam
 let cronometro = null;
+let assinaturaGaleria = null;   // evita redesenhar a grade quando nada mudou
+const selecao = new Set();
+
+// O que o chip mostra e o que vai no corpo do POST /jobs.
+const cfg = {
+  modo: "t2v", modelo: "omni-flash", proporcao: "9:16", duracao: "4s", quantidade: 1,
+};
+
+// Caminhos escolhidos no `+`. O papel de cada um sai do modo, nao da ordem de escolha.
+let anexos = [];
+
+let produto = null;
+let jobAberto = null;
 
 /* ---------------- utilidades ---------------- */
 
@@ -77,7 +116,34 @@ function mostrar(el, texto) {
 
 function esconder(el) { el.classList.add("oculto"); }
 
-/* ---------------- saude ---------------- */
+function urlMiniatura(caminho) {
+  return `/miniatura?caminho=${encodeURIComponent(caminho)}`;
+}
+
+function urlMidia(caminho) {
+  return `/midia?caminho=${encodeURIComponent(caminho)}`;
+}
+
+function urlBaixar(caminho) {
+  return `/baixar?caminho=${encodeURIComponent(caminho)}`;
+}
+
+function tamanhoLegivel(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+  return `${(n / 1048576).toFixed(1)} MB`;
+}
+
+function ehVideo() { return cfg.modo !== "imagem"; }
+
+function ehVideoDoJob(j) { return j.modo !== "imagem"; }
+
+function emailDaConta(id) {
+  const c = contas.find((x) => x.id === id);
+  return c ? c.email : `#${id}`;
+}
+
+/* ---------------- L4: a faixa de cima ---------------- */
 
 function pintarSaude(s) {
   $("credito-total").textContent = s.credito_total;
@@ -86,14 +152,11 @@ function pintarSaude(s) {
 
   const faixa = $("faixa-expiradas");
   const expiradas = s.contas_expiradas || [];
-  if (expiradas.length === 0) {
-    esconder(faixa);
-    return;
-  }
+  if (expiradas.length === 0) { esconder(faixa); return; }
+
   faixa.classList.remove("oculto");
   $("titulo-expiradas").textContent = expiradas.length === 1
-    ? "1 conta com a sessão caída — precisa de você"
-    : `${expiradas.length} contas com a sessão caída — precisam de você`;
+    ? "1 sessão caída:" : `${expiradas.length} sessões caídas:`;
 
   // o botao precisa do id da conta, e /saude devolve so o email: o cruzamento e com a
   // ultima lista de contas. Enquanto ela nao chegou, o chip aparece sem botao.
@@ -107,67 +170,485 @@ function pintarSaude(s) {
   }).join("");
 }
 
-/* ---------------- contas ---------------- */
+/* ---------------- L1: a galeria ---------------- */
 
-function linhaConta(c) {
+function proporcaoCss(p) {
+  // "9:16" -> "9 / 16". Card com a forma do arquivo: 9:16 fica alto, 16:9 fica largo.
+  const [a, b] = String(p || "9:16").split(":");
+  return `${Number(a) || 9} / ${Number(b) || 16}`;
+}
+
+function resumoConfig(j) {
+  return [j.modo === "imagem" ? "imagem" : "vídeo", j.modelo,
+          j.proporcao, j.modo === "imagem" ? "" : j.duracao,
+          j.quantidade > 1 ? `x${j.quantidade}` : ""].filter(Boolean).join(" · ");
+}
+
+function cardDeMidia(j) {
+  const url = urlMidia(j.caminho);
+  if (!ehVideoDoJob(j)) {
+    return `<img src="${esc(url)}" alt="" loading="lazy">`;
+  }
+  // `preload="metadata"` desenha o primeiro quadro sem baixar o clipe inteiro — e por
+  // isso que `/midia` responde a `Range`. O `#t=0.1` e o que faz o Chrome SEEKAR ate um
+  // quadro de verdade: sem ele, o poster de um mp4 costuma sair preto.
+  return `<video src="${esc(url)}#t=0.1" preload="metadata" muted playsinline
+                 loop disablepictureinpicture></video>
+          <span class="selo">▶ ${esc(j.duracao)}</span>`;
+}
+
+function card(j) {
+  const marcado = selecao.has(j.id);
+  const rodape = `
+    <div class="rodape-card">
+      <span class="modo" title="${esc(resumoConfig(j))}">${esc(j.modo)} · ${esc(j.modelo)}</span>
+      <span class="credito">${j.custo_estimado === null ? "—" : `${j.custo_estimado} cr`}</span>
+    </div>`;
+
+  let dentro;
+  if (j.caminho) {
+    dentro = cardDeMidia(j) + `
+      <label class="marcar" title="selecionar para baixar">
+        <input type="checkbox" class="marcar-job" data-id="${j.id}" ${marcado ? "checked" : ""}>
+      </label>`;
+  } else if (j.estado === "falhou") {
+    dentro = `<div class="card-texto">
+        <span class="pilula falhou">falhou</span>
+        <span class="prompt-curto">${esc(j.erro || "sem detalhe do erro")}</span>
+        <span class="leve">${esc(j.nome)}</span>
+      </div>`;
+  } else if (j.estado === "pronto") {
+    // pronto sem caminho: o job foi gerado com OUTRA raiz de projeto, ou o arquivo
+    // saiu do lugar. Card mudo seria pior do que card que diz o que houve.
+    dentro = `<div class="card-texto">
+        <span class="pilula pronto">pronto</span>
+        <span class="prompt-curto">O arquivo está fora da raiz do projeto — não dá para
+          mostrar nem baixar por aqui.</span>
+        <span class="leve">${esc(j.arquivo || j.nome)}</span>
+      </div>`;
+  } else {
+    const rodando = j.estado === "rodando";
+    dentro = `<div class="card-texto">
+        <span class="pilula ${esc(j.estado)}">${rodando ? '<span class="girando"></span>' : ""}${esc(j.estado)}</span>
+        <span class="prompt-curto">${esc(j.prompt)}</span>
+        <span class="leve">${esc(j.nome)}</span>
+      </div>`;
+  }
+
+  return `<article class="card ${esc(j.estado)}${j.caminho ? "" : " sem-arquivo"}${marcado ? " marcado" : ""}"
+                   data-id="${j.id}" style="--prop: ${proporcaoCss(j.proporcao)}">
+    <div class="moldura">${dentro}</div>${rodape}
+  </article>`;
+}
+
+/* A grade so e redesenhada quando ALGO MUDOU. O poll roda a cada 4s, e reescrever o
+   innerHTML a cada volta faria todo `<video>` recarregar o primeiro quadro — a galeria
+   piscaria sozinha, e o card sob o mouse pararia de tocar no meio. */
+function assinatura(lista) {
+  return lista.map((j) => `${j.id}:${j.estado}:${j.caminho || ""}:${j.custo_estimado}`).join("|");
+}
+
+/* Cada card ocupa quantas linhas de 4px a sua altura pedir. E o que fecha os buracos
+   que uma grade comum abriria entre um card 16:9 e um 9:16 na mesma fileira. */
+function medirGrade() {
+  const g = $("galeria");
+  const estilo = getComputedStyle(g);
+  const linha = parseFloat(estilo.gridAutoRows) || 4;
+  const vao = parseFloat(estilo.rowGap) || 0;
+  g.querySelectorAll(".card").forEach((c) => {
+    const h = c.getBoundingClientRect().height;
+    // altura 0 e a galeria que ainda nao foi disposta (aba em segundo plano, por
+    // exemplo). Gravar `span 1` ali achataria todo card ate a proxima medicao.
+    if (h > 0) c.style.gridRowEnd = `span ${Math.ceil((h + vao) / (linha + vao))}`;
+  });
+}
+
+function pintarGaleria(lista) {
+  const nova = assinatura(lista) + `#${[...selecao].sort().join(",")}`;
+  if (nova === assinaturaGaleria) return;
+  assinaturaGaleria = nova;
+
+  const g = $("galeria");
+  if (!lista.length) {
+    g.innerHTML = `<div class="galeria-vazia">
+      <strong>Nada gerado ainda.</strong>
+      Escreva o prompt ali embaixo, confira o chip e envie.</div>`;
+    return;
+  }
+  g.innerHTML = lista.map(card).join("");
+  medirGrade();
+}
+
+function atualizarBarraSelecao() {
+  const barra = $("barra-selecao");
+  if (!selecao.size) { esconder(barra); return; }
+  barra.classList.remove("oculto");
+  $("selecao-conta").textContent = selecao.size === 1
+    ? "1 selecionado" : `${selecao.size} selecionados`;
+}
+
+/* L2: baixar. Os arquivos JA estao em disco — o transporte os pos em `produto/clipes/`.
+   O que faltava era alcanca-los sem sair do painel. */
+function baixarSelecao() {
+  const caminhos = jobs.filter((j) => selecao.has(j.id) && j.caminho).map((j) => j.caminho);
+  if (!caminhos.length) return;
+  if (caminhos.length === 1) { window.location.href = urlBaixar(caminhos[0]); return; }
+  const q = caminhos.map((c) => `caminho=${encodeURIComponent(c)}`).join("&");
+  window.location.href = `/baixar-lote?${q}`;
+}
+
+/* ---------------- visualizador ---------------- */
+
+function abrirVisor(id) {
+  const j = jobs.find((x) => x.id === id);
+  if (!j) return;
+  jobAberto = id;
+  esconder($("visor-aviso"));
+
+  $("visor-titulo").textContent = j.nome || `job ${j.id}`;
+  $("visor-prompt").textContent = j.prompt || "—";
+  $("visor-config").textContent = resumoConfig(j) +
+    (j.custo_estimado === null ? "" : ` · ${j.custo_estimado} créditos`);
+  $("visor-origem").textContent =
+    `${j.produto || "—"} · ${j.conta_id === null ? "nenhuma conta ainda" : emailDaConta(j.conta_id)}`;
+
+  $("visor-linha-erro").classList.toggle("oculto", !j.erro);
+  $("visor-erro").textContent = j.erro || "";
+
+  // O nome vira o nome do ARQUIVO em disco. Depois que o arquivo existe, trocar o campo
+  // faria o job mentir — e o servidor recusa com 409. Some daqui pelo mesmo motivo.
+  const podeRenomear = j.estado === "pendente";
+  $("visor-linha-nome").classList.toggle("oculto", !podeRenomear);
+  $("visor-nome").value = j.nome || "";
+
+  $("visor-linha-caminho").classList.toggle("oculto", !j.arquivo);
+  $("visor-caminho").value = j.arquivo || "";
+
+  $("visor-baixar").classList.toggle("oculto", !j.caminho);
+  if (j.caminho) $("visor-baixar").href = urlBaixar(j.caminho);
+  $("visor-cancelar").classList.toggle("oculto", j.estado !== "pendente");
+
+  const palco = $("visor-palco");
+  if (j.caminho) {
+    palco.innerHTML = ehVideoDoJob(j)
+      ? `<video src="${esc(urlMidia(j.caminho))}" controls autoplay loop playsinline></video>`
+      : `<img src="${esc(urlMidia(j.caminho))}" alt="">`;
+  } else {
+    palco.innerHTML = `<div class="sem-midia">${
+      j.estado === "falhou" ? "Esta geração não produziu arquivo."
+                            : "Ainda não há arquivo — o job está " + esc(j.estado) + "."}</div>`;
+  }
+  $("visor").classList.remove("oculto");
+}
+
+function fecharVisor() {
+  // zera o `src` antes de esconder: sem isso o video continua tocando (e baixando) atras
+  // do modal fechado
+  $("visor-palco").innerHTML = "";
+  $("visor").classList.add("oculto");
+  jobAberto = null;
+}
+
+async function renomear() {
+  const nome = $("visor-nome").value.trim();
+  if (!nome || jobAberto === null) return;
+  try {
+    await api(`/jobs/${jobAberto}`, { metodo: "PATCH", corpo: { nome } });
+    esconder($("visor-aviso"));
+    $("visor-titulo").textContent = nome;
+    await atualizar();
+  } catch (e) {
+    mostrar($("visor-aviso"), e.message);
+  }
+}
+
+async function copiarCaminho() {
+  const campo = $("visor-caminho");
+  campo.select();
+  try {
+    await navigator.clipboard.writeText(campo.value);
+    $("visor-copiar").textContent = "Copiado";
+    setTimeout(() => { $("visor-copiar").textContent = "Copiar"; }, 1200);
+  } catch (e) {
+    // sem permissao de area de transferencia o texto ja ficou SELECIONADO acima, entao
+    // Ctrl+C resolve — dizer isso e melhor do que um erro que nao leva a lugar nenhum
+    mostrar($("visor-aviso"), "O navegador não deixou copiar sozinho; o caminho está "
+      + "selecionado, use Ctrl+C.");
+  }
+}
+
+/* ---------------- L3: o chip ---------------- */
+
+function textoDoChip() {
+  const partes = [CHIP_DO_MODO[cfg.modo], cfg.modelo];
+  if (ehVideo()) partes.push(cfg.duracao);
+  partes.push(cfg.proporcao);
+  if (!ehVideo() && cfg.quantidade > 1) partes.push(`x${cfg.quantidade}`);
+  return partes.join(" · ");
+}
+
+function opcoes(alvo, valores, atual, chave) {
+  alvo.innerHTML = valores.map((v) =>
+    `<button type="button" data-chave="${chave}" data-valor="${esc(v)}"
+             class="${String(v) === String(atual) ? "ativo" : ""}">${esc(v)}</button>`).join("");
+}
+
+/* Some da tela tudo o que a API recusaria. Melhor a opcao nao existir do que o usuario
+   escolher e tomar 422: duracao so em video, quantidade acima de 1 so em imagem,
+   proporcao de video so 9:16 ou 16:9, e modelo de imagem separado do de video. */
+function ajustarChip() {
+  const video = ehVideo();
+  const modelos = video ? MODELOS_VIDEO : MODELOS_IMAGEM;
+  const proporcoes = video ? PROPORCOES_VIDEO : PROPORCOES_IMAGEM;
+  if (!modelos.includes(cfg.modelo)) cfg.modelo = modelos[0];
+  if (!proporcoes.includes(cfg.proporcao)) cfg.proporcao = proporcoes[0];
+  if (video) cfg.quantidade = 1;
+
+  document.querySelectorAll("#pop-tipo button").forEach((b) => {
+    b.classList.toggle("ativo", b.dataset.modo === cfg.modo);
+  });
+  opcoes($("pop-modelo"), modelos, cfg.modelo, "modelo");
+  opcoes($("pop-proporcao"), proporcoes, cfg.proporcao, "proporcao");
+  opcoes($("pop-duracao"), DURACOES, cfg.duracao, "duracao");
+  opcoes($("pop-quantidade"), [1, 2, 3, 4], cfg.quantidade, "quantidade");
+
+  $("grupo-duracao").classList.toggle("oculto", !video);
+  $("grupo-quantidade").classList.toggle("oculto", video);
+
+  $("pop-dica").textContent = video
+    ? "Vídeo sai sempre em uma geração — take é escolha sua, não sorteio — e o chip do Flow "
+      + "só oferece 9:16 e 16:9. A duração muda o preço: 4s custa 7 créditos e 8s custa 12 "
+      + "no Omni Flash."
+    : "Imagem não tem duração (o painel do Flow não oferece o grupo nesse modo) e aceita até "
+      + "4 variações na mesma geração — cada uma custa cheio.";
+
+  $("chip-texto").textContent = textoDoChip();
+
+  // O `+` so faz sentido nos dois modos em que o transporte ANEXA alguma coisa. Em t2v
+  // ele continua clicavel e troca o modo para "referências" — que e o que a pessoa quis
+  // dizer ao anexar. Em imagem fica travado: o transporte nao anexa nada ali, e um
+  // arquivo escolhido seria ignorado em silencio.
+  const mais = $("botao-mais");
+  mais.disabled = cfg.modo === "imagem";
+  mais.title = cfg.modo === "imagem"
+    ? "em modo imagem o Flow não recebe anexo por aqui"
+    : "anexar imagens do disco";
+
+  ajustarAnexos();
+}
+
+/* Os anexos sobrevivem a troca de modo, mas o TETO muda: frames2v usa dois arquivos
+   (inicial e final) e ingredients2v usa tres. O excedente cai fora aqui, e nao no 422. */
+function ajustarAnexos() {
+  const teto = (PAPEIS[cfg.modo] || []).length;
+  if (anexos.length > teto) anexos = anexos.slice(0, teto);
+  pintarAnexos();
+}
+
+function pintarAnexos() {
+  const papeis = PAPEIS[cfg.modo] || [];
+  $("tira-anexos").innerHTML = anexos.map((c, i) => {
+    const nome = c.split("/").pop();
+    return `<span class="tira" title="${esc(c)}">
+      <img src="${esc(urlMiniatura(c))}" alt="" loading="lazy">
+      <span><span class="tira-nome">${esc(nome)}</span>
+        <span class="tira-papel">${esc(papeis[i] || "")}</span></span>
+      <button type="button" class="tira-x" data-caminho="${esc(c)}"
+              title="tirar">&times;</button></span>`;
+  }).join("");
+}
+
+function posicionar(pop, botao) {
+  pop.classList.remove("oculto");
+  const r = botao.getBoundingClientRect();
+  const largura = pop.offsetWidth;
+  const altura = pop.offsetHeight;
+  // ancorado ACIMA do chip, porque a barra vive no rodape; preso as bordas da janela
+  // para nao nascer metade fora da tela num navegador estreito
+  const esquerda = Math.min(Math.max(8, r.left + r.width / 2 - largura / 2),
+                            window.innerWidth - largura - 8);
+  pop.style.left = `${esquerda}px`;
+  pop.style.top = `${Math.max(8, r.top - altura - 8)}px`;
+}
+
+function fecharPopovers() {
+  ["pop-chip", "pop-produto"].forEach((id) => esconder($(id)));
+  $("chip").classList.remove("aberto");
+  $("chip-produto").classList.remove("aberto");
+}
+
+function alternarPopover(popId, botaoId) {
+  const pop = $(popId);
+  const aberto = !pop.classList.contains("oculto");
+  fecharPopovers();
+  if (aberto) return;
+  posicionar(pop, $(botaoId));
+  $(botaoId).classList.add("aberto");
+}
+
+/* ---------------- L3: o produto ---------------- */
+
+function produtosConhecidos() {
+  return [...new Set(jobs.map((j) => j.produto).filter(Boolean))];
+}
+
+function pintarProdutos() {
+  const lista = produtosConhecidos();
+  $("lista-produtos").innerHTML = lista.length
+    ? lista.map((p) => `<button type="button" class="escolher-produto ${
+        p === produto ? "ativo" : ""}" data-produto="${esc(p)}">${esc(p)}</button>`).join("")
+    : `<div class="vazio">Nenhum produto ainda — escreva o primeiro abaixo.</div>`;
+}
+
+function definirProduto(p) {
+  produto = p || null;
+  $("chip-produto-texto").textContent = produto || "escolher produto";
+  $("chip-produto").classList.toggle("faltando", !produto);
+  try { localStorage.setItem("flowpool:produto", produto || ""); } catch (e) { /* modo privado */ }
+}
+
+/* O nome do arquivo sai automatico. `<produto>-<n>` com o primeiro `n` livre: repetir um
+   nome ja usado faria a geracao nova SOBRESCREVER o arquivo da antiga em disco, sem
+   aviso. Continua editavel no visualizador enquanto o job esta na fila. */
+function nomeAutomatico(p) {
+  const base = p.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "job";
+  const usados = new Set(jobs.filter((j) => j.produto === p).map((j) => j.nome));
+  let n = 1;
+  while (usados.has(`${base}-${n}`)) n += 1;
+  return `${base}-${n}`;
+}
+
+/* ---------------- L3: enviar ---------------- */
+
+function corpoDoJob() {
+  const corpo = {
+    modo: cfg.modo,
+    modelo: cfg.modelo,
+    prompt: $("job-prompt").value.trim(),
+    produto,
+    nome: nomeAutomatico(produto),
+    proporcao: cfg.proporcao,
+    quantidade: ehVideo() ? 1 : cfg.quantidade,
+  };
+  // `duracao` so entra em video: mandar o campo em imagem e 422 por si so, e o teste do
+  // servidor e pelo campo TER VINDO no corpo, nao pelo valor.
+  if (ehVideo()) corpo.duracao = cfg.duracao;
+  if (cfg.modo === "frames2v") {
+    corpo.frame_inicial = anexos[0] || "";
+    if (anexos[1]) corpo.frame_final = anexos[1];
+  }
+  if (cfg.modo === "ingredients2v") corpo.referencias = anexos.slice(0, MAX_REFERENCIAS);
+  return corpo;
+}
+
+async function enviar(ev) {
+  ev.preventDefault();
+  esconder($("erro-job"));
+  if (!$("job-prompt").value.trim()) {
+    mostrar($("erro-job"), "Escreva o prompt antes de enviar.");
+    return;
+  }
+  if (!produto) {
+    mostrar($("erro-job"), "Escolha o produto: é a pasta onde o arquivo cai e o nome do "
+      + "projeto dentro do Flow.");
+    alternarPopover("pop-produto", "chip-produto");
+    return;
+  }
+  // Mesma regra do servidor, dita antes: `frames2v` exige o frame inicial e
+  // `ingredients2v` exige ao menos uma referencia. Tomar 422 depois de escrever o
+  // prompt inteiro seria o pior lugar para descobrir isso.
+  if (!anexos.length && PAPEIS[cfg.modo]) {
+    mostrar($("erro-job"), cfg.modo === "frames2v"
+      ? "Este modo gera a partir de frames: use o + para escolher ao menos o frame inicial."
+      : "Este modo gera a partir de referências: use o + para escolher ao menos uma.");
+    return;
+  }
+  const botao = $("botao-enviar");
+  botao.disabled = true;
+  try {
+    await api("/jobs", { metodo: "POST", corpo: corpoDoJob() });
+    $("job-prompt").value = "";
+    crescerPrompt();
+    await atualizar();
+  } catch (e) {
+    mostrar($("erro-job"), e.message);
+  } finally {
+    botao.disabled = false;
+  }
+}
+
+/* Textarea que cresce com o texto ate um teto, e depois rola. */
+function crescerPrompt() {
+  const t = $("job-prompt");
+  t.style.height = "auto";
+  t.style.height = `${Math.min(t.scrollHeight, 168)}px`;
+}
+
+async function cancelar(id) {
+  try {
+    await api(`/jobs/${id}`, { metodo: "DELETE" });
+    if (jobAberto === id) fecharVisor();
+    await atualizar();
+  } catch (e) {
+    mostrar($(jobAberto === id ? "visor-aviso" : "erro-job"), e.message);
+  }
+}
+
+/* ---------------- L4: contas, na gaveta ---------------- */
+
+function blocoConta(c) {
   const precisa = c.saude !== "viva";
-  const classes = [precisa ? "precisa-acao" : "", c.ativa ? "" : "inativa"]
-    .filter(Boolean).join(" ");
   const tiers = ["free", "pro", "ultra"].map(
     (t) => `<option value="${t}" ${t === c.tier ? "selected" : ""}>${t}</option>`).join("");
-  const saldo = `<span class="saldo ${c.saldo === 0 ? "zerado" : ""}">${c.saldo}</span>` +
-    (c.saldo_confiavel ? "" :
-      ` <span class="duvida" title="saldo estimado desde a última leitura no Flow">~</span>`);
 
   return `
-  <tr class="${classes}" data-id="${c.id}">
-    <td><span class="email-conta">${esc(c.email)}</span>${
-      c.falhas > 0 ? `<span class="falhas" title="falhas consecutivas">${c.falhas} falhas</span>` : ""}</td>
-    <td><select class="acao-tier" data-id="${c.id}">${tiers}</select></td>
-    <td class="num">${saldo}</td>
-    <td><span class="pilula ${esc(c.saude)}">${esc(c.saude)}</span></td>
-    <td>
-      <div class="linha-proxy">
-        <span class="proxy-atual ${c.proxy ? "mono-peq" : "leve"}">${
-          c.proxy ? esc(c.proxy) : "sem proxy (IP desta máquina)"}</span>
-        <input type="text" class="mono campo-proxy" data-id="${c.id}" placeholder="trocar…">
-        <button class="mini acao-proxy" data-id="${c.id}">Salvar</button>
-        ${c.proxy ? `<button class="mini acao-tirar-proxy" data-id="${c.id}">Tirar</button>` : ""}
-      </div>
-    </td>
-    <td>
+  <div class="conta ${precisa ? "precisa-acao" : ""} ${c.ativa ? "" : "inativa"}" data-id="${c.id}">
+    <div class="conta-cabeca">
+      <span class="email-conta">${esc(c.email)}</span>
+      <span class="pilula ${esc(c.saude)}">${esc(c.saude)}</span>
+      ${c.falhas > 0 ? `<span class="falhas" title="falhas consecutivas">${c.falhas} falhas</span>` : ""}
+      <span class="saldo ${c.saldo === 0 ? "zerado" : ""}">${c.saldo}${
+        c.saldo_confiavel ? "" :
+        `<span class="duvida" title="saldo estimado desde a última leitura no Flow">~</span>`}</span>
+    </div>
+
+    <div class="conta-linha">
+      <select class="acao-tier" data-id="${c.id}">${tiers}</select>
       <label class="interruptor" title="${c.ativa ? "desativar" : "ativar"}">
         <input type="checkbox" class="acao-ativa" data-id="${c.id}" ${c.ativa ? "checked" : ""}>
-        <span class="trilho"></span>
+        <span class="trilho"></span>${c.ativa ? "ativa" : "inativa"}
       </label>
-    </td>
-    <td>
-      <div class="acoes">
-        <button class="mini acao-saldo" data-id="${c.id}" data-email="${esc(c.email)}"
-                title="lê o saldo agora no Flow — abre uma janela e não gasta crédito">
-          Ler saldo</button>
-        <button class="mini ${precisa ? "alerta" : ""} acao-revalidar"
-                data-id="${c.id}" data-email="${esc(c.email)}"
-                ${sessaoEmCurso ? "disabled" : ""}>Revalidar</button>
-      </div>
-    </td>
-  </tr>`;
+      <button class="mini acao-saldo" data-id="${c.id}" data-email="${esc(c.email)}"
+              title="lê o saldo agora no Flow — abre uma janela e não gasta crédito">Ler saldo</button>
+      <button class="mini ${precisa ? "alerta" : ""} acao-revalidar" data-id="${c.id}"
+              data-email="${esc(c.email)}" ${sessaoEmCurso ? "disabled" : ""}>Revalidar</button>
+    </div>
+
+    <div class="conta-linha">
+      <span class="proxy-atual ${c.proxy ? "mono-peq" : "leve"}">${
+        c.proxy ? esc(c.proxy) : "sem proxy (IP desta máquina)"}</span>
+    </div>
+    <div class="conta-linha">
+      <input type="text" class="mono campo-proxy" data-id="${c.id}" placeholder="trocar proxy…">
+      <button class="mini acao-proxy" data-id="${c.id}">Salvar</button>
+      ${c.proxy ? `<button class="mini acao-tirar-proxy" data-id="${c.id}">Tirar</button>` : ""}
+    </div>
+  </div>`;
 }
 
 function pintarContas(lista) {
   contas = lista;
-  const corpo = $("corpo-contas");
+  const alvo = $("lista-contas");
   // nao redesenha por cima de quem esta digitando o proxy: o poll apagaria o texto no
   // meio da edicao, e a pessoa culparia o campo.
   const foco = document.activeElement;
-  if (corpo.contains(foco) && (foco.tagName === "INPUT" || foco.tagName === "SELECT")) return;
+  if (alvo.contains(foco) && (foco.tagName === "INPUT" || foco.tagName === "SELECT")) return;
 
   $("contador-contas").textContent = lista.length
-    ? `${lista.length} no pool · ${lista.filter((c) => c.ativa).length} ativas`
-    : "";
-  corpo.innerHTML = lista.length
-    ? lista.map(linhaConta).join("")
-    : `<tr class="vazio"><td colspan="7">Nenhuma conta ainda. Cadastre a primeira acima.</td></tr>`;
+    ? `${lista.length} no pool · ${lista.filter((c) => c.ativa).length} ativas` : "";
+  alvo.innerHTML = lista.length
+    ? lista.map(blocoConta).join("")
+    : `<div class="galeria-vazia">Nenhuma conta ainda. Cadastre a primeira acima.</div>`;
 }
 
 async function alterarConta(id, corpo) {
@@ -178,6 +659,16 @@ async function alterarConta(id, corpo) {
   } catch (e) {
     mostrar($("erro-cadastro"), e.message);
   }
+}
+
+function abrirGaveta() {
+  $("gaveta").classList.remove("oculto");
+  $("gaveta-fundo").classList.remove("oculto");
+}
+
+function fecharGaveta() {
+  $("gaveta").classList.add("oculto");
+  $("gaveta-fundo").classList.add("oculto");
 }
 
 /* ---------------- sessao: cadastro e revalidacao ---------------- */
@@ -193,6 +684,7 @@ function iniciarCronometro() {
 
 function travarSessao(titulo) {
   sessaoEmCurso = true;
+  abrirGaveta();
   $("campos-conta").disabled = true;
   document.querySelectorAll(".acao-revalidar").forEach((b) => { b.disabled = true; });
   $("andamento-titulo").textContent = titulo;
@@ -222,13 +714,13 @@ async function cadastrar(ev) {
   try {
     const c = await api("/contas", { metodo: "POST", corpo }, TETO_SESSAO_MS);
     destravarSessao();
-    // o saldo vem LIDO do Flow no próprio cadastro. Quando a leitura falha a conta
-    // entra assim mesmo (a sessão é a parte cara), e aí o número seria 0 — dizer
-    // "entrou com 0 créditos" faria o usuário achar que a conta está seca.
+    // o saldo vem LIDO do Flow no próprio cadastro. Quando a leitura falha a conta entra
+    // assim mesmo (a sessão é a parte cara), e aí o número seria 0 — dizer "entrou com 0
+    // créditos" faria o usuário achar que a conta está seca.
     mostrar($("ok-cadastro"), c.saldo_confiavel
       ? `Sessão de pé para ${c.email}. A conta entrou no pool com ${c.saldo} créditos.`
       : `Sessão de pé para ${c.email}, mas não deu para ler o saldo agora. `
-        + `A conta entrou no pool; use “Ler saldo” na linha dela.`);
+        + `A conta entrou no pool; use “Ler saldo” no bloco dela.`);
     $("form-conta").reset();
   } catch (e) {
     destravarSessao();
@@ -272,141 +764,22 @@ async function revalidar(id, email) {
   await atualizar();
 }
 
-/* ---------------- jobs ---------------- */
-
-function ehVideo() { return $("job-modo").value !== "imagem"; }
-
-function preencher(select, valores, atual) {
-  const escolhido = valores.includes(atual) ? atual : valores[0];
-  select.innerHTML = valores.map(
-    (v) => `<option value="${v}" ${v === escolhido ? "selected" : ""}>${v}</option>`).join("");
-}
-
-/* Some da tela tudo o que a API recusaria. Melhor o campo nao existir do que o usuario
-   preencher e tomar 422: duracao so em video, quantidade acima de 1 so em imagem, e
-   proporcao de video so 9:16 ou 16:9. */
-function ajustarFormulario() {
-  const modo = $("job-modo").value;
-  const video = ehVideo();
-
-  preencher($("job-modelo"), video ? MODELOS_VIDEO : MODELOS_IMAGEM, $("job-modelo").value);
-  preencher($("job-proporcao"), video ? PROPORCOES_VIDEO : PROPORCOES_IMAGEM,
-            $("job-proporcao").value);
-
-  $("campo-duracao").classList.toggle("oculto", !video);
-  $("campo-quantidade").classList.toggle("oculto", video);
-  $("campo-frames").classList.toggle("oculto", modo !== "frames2v");
-  $("campo-referencias").classList.toggle("oculto", modo !== "ingredients2v");
-
-  $("dica-job").textContent = video
-    ? "Vídeo sai sempre em uma geração — take é escolha sua, não sorteio — e o chip do Flow só "
-      + "oferece 9:16 e 16:9. A duração muda o preço: 4s custa 7 créditos e 8s custa 12 no Omni Flash."
-    : "Imagem não tem duração (o painel do Flow não oferece o grupo nesse modo) e aceita até 4 "
-      + "variações na mesma geração — cada uma custa cheio.";
-}
-
-function corpoDoJob() {
-  const modo = $("job-modo").value;
-  const corpo = {
-    modo,
-    modelo: $("job-modelo").value,
-    prompt: $("job-prompt").value,
-    produto: $("job-produto").value.trim(),
-    nome: $("job-nome").value.trim(),
-    proporcao: $("job-proporcao").value,
-    quantidade: ehVideo() ? 1 : Number($("job-quantidade").value),
-  };
-  // `duracao` so entra em video: mandar o campo em imagem e 422 por si so, e o teste do
-  // servidor e pelo campo TER VINDO no corpo, nao pelo valor.
-  if (ehVideo()) corpo.duracao = $("job-duracao").value;
-  const destino = $("job-destino").value.trim();
-  if (destino) corpo.destino = destino;
-  if (modo === "frames2v") {
-    corpo.frame_inicial = $("job-frame-inicial").value.trim();
-    const fim = $("job-frame-final").value.trim();
-    if (fim) corpo.frame_final = fim;
-  }
-  if (modo === "ingredients2v") {
-    corpo.referencias = $("job-referencias").value
-      .split("\n").map((s) => s.trim()).filter(Boolean);
-  }
-  return corpo;
-}
-
-async function enfileirar(ev) {
-  ev.preventDefault();
-  const botao = $("botao-job");
-  botao.disabled = true;
-  esconder($("erro-job"));
-  try {
-    await api("/jobs", { metodo: "POST", corpo: corpoDoJob() });
-    $("job-prompt").value = "";
-    $("job-nome").value = "";
-    await atualizar();
-  } catch (e) {
-    mostrar($("erro-job"), e.message);
-  } finally {
-    botao.disabled = false;
-  }
-}
-
-function emailDaConta(id) {
-  const c = contas.find((x) => x.id === id);
-  return c ? c.email : `#${id}`;
-}
-
-function linhaJob(j) {
-  const config = [j.proporcao, j.quantidade > 1 ? `x${j.quantidade}` : "",
-                  j.modo === "imagem" ? "" : j.duracao].filter(Boolean).join(" · ");
-  const saida = j.erro
-    ? `<span class="corta" style="color:var(--erro)" title="${esc(j.erro)}">${esc(j.erro)}</span>`
-    : (j.arquivo
-      ? `<span class="corta mono-peq" title="${esc(j.arquivo)}">${esc(j.arquivo)}</span>`
-      : `<span class="leve">—</span>`);
-  return `
-  <tr>
-    <td class="num">${j.id}</td>
-    <td><span class="pilula ${esc(j.estado)}">${esc(j.estado)}</span>${
-      j.tentativas > 0 ? `<span class="leve"> ${j.tentativas}ª</span>` : ""}</td>
-    <td><span class="mono-peq">${esc(j.modo)}</span><br><span class="leve">${esc(j.modelo)}</span></td>
-    <td>${esc(j.produto)}<br><span class="leve">${esc(j.nome)}</span></td>
-    <td><span class="mono-peq">${esc(config)}</span></td>
-    <td><span class="mono-peq">${j.conta_id === null ? "—" : esc(emailDaConta(j.conta_id))}</span></td>
-    <td>${saida}</td>
-    <td>${j.estado === "pendente"
-      ? `<button class="mini acao-cancelar" data-id="${j.id}">Cancelar</button>` : ""}</td>
-  </tr>`;
-}
-
-function pintarJobs(lista) {
-  const porEstado = {};
-  lista.forEach((j) => { porEstado[j.estado] = (porEstado[j.estado] || 0) + 1; });
-  $("contador-jobs").textContent = Object.entries(porEstado)
-    .map(([e, n]) => `${n} ${e}`).join(" · ");
-  $("corpo-jobs").innerHTML = lista.length
-    ? lista.map(linhaJob).join("")
-    : `<tr class="vazio"><td colspan="8">Nenhum job ainda.</td></tr>`;
-}
-
-async function cancelar(id) {
-  try {
-    await api(`/jobs/${id}`, { metodo: "DELETE" });
-    await atualizar();
-  } catch (e) {
-    mostrar($("erro-job"), e.message);
-  }
-}
-
 /* ---------------- poll ---------------- */
 
 async function atualizar() {
   try {
-    const [saude, listaContas, jobs] = await Promise.all([
+    const [saude, listaContas, lista] = await Promise.all([
       api("/saude"), api("/contas"), api("/jobs"),
     ]);
+    jobs = lista;
     pintarContas(listaContas);
     pintarSaude(saude);
-    pintarJobs(jobs);
+    // um job selecionado que sumiu do banco nao pode continuar contando na barra
+    [...selecao].forEach((id) => { if (!jobs.some((j) => j.id === id)) selecao.delete(id); });
+    pintarGaleria(jobs);
+    pintarProdutos();
+    atualizarBarraSelecao();
+    if (!produto && jobs.length) definirProduto(jobs[0].produto);
     $("ponto-servico").className = "ponto vivo";
     $("estado-conexao").className = "estado-conexao";
     $("estado-conexao").textContent =
@@ -414,25 +787,258 @@ async function atualizar() {
   } catch (e) {
     $("ponto-servico").className = "ponto morto";
     $("estado-conexao").className = "estado-conexao falha";
-    $("estado-conexao").textContent = `sem resposta do serviço: ${e.message}`;
+    $("estado-conexao").textContent = `sem resposta: ${e.message}`;
   }
 }
 
+/* ---------------- seletor de imagens ----------------
+
+   Por que o servidor navega o disco em vez de o navegador subir o arquivo: o transporte
+   entrega a imagem ao Flow com `set_input_files`, que precisa de um arquivo EM DISCO. E
+   o `<input type="file">` do navegador entrega o conteudo do arquivo e nunca o caminho
+   real — protecao do navegador, nao detalhe que se contorna. Como a API e local,
+   caminho e a moeda natural. */
+
+// A ultima pasta visitada volta na proxima abertura. As referencias do usuario moram em
+// poucas pastas conhecidas; comecar sempre da raiz cobraria a mesma descida toda vez.
+const ULTIMA_PASTA = "flowpool:ultima-pasta";
+
+let seletor = { caminho: "", pai: null, arquivos: [] };
+
+function tetoAnexos() { return (PAPEIS[cfg.modo] || []).length; }
+
+async function abrirSeletor() {
+  // anexar em t2v so pode querer dizer uma coisa: virar geracao por referencias. Trocar
+  // o modo aqui e melhor do que aceitar o arquivo e o transporte ignora-lo depois.
+  if (cfg.modo === "t2v") { cfg.modo = "ingredients2v"; ajustarChip(); }
+  if (!tetoAnexos()) return;
+
+  seletor = { caminho: "", pai: null, arquivos: [] };
+  $("seletor-titulo").textContent = cfg.modo === "frames2v"
+    ? "Escolher os frames — inicial e final" : "Escolher referências — até 3";
+  $("seletor-tres").classList.toggle("oculto", cfg.modo !== "ingredients2v");
+  esconder($("seletor-erro"));
+  $("seletor-corpo").innerHTML = `<div class="modal-vazio">Lendo a pasta…</div>`;
+  $("seletor").classList.remove("oculto");
+  // `true`: se a pasta guardada foi renomeada ou apagada desde a ultima vez, cai na raiz
+  // em vez de abrir o modal num erro
+  await navegar(localStorage.getItem(ULTIMA_PASTA) || "", true);
+}
+
+function fecharSeletor() { $("seletor").classList.add("oculto"); }
+
+async function navegar(caminho, cairNaRaiz = false) {
+  esconder($("seletor-erro"));
+  try {
+    const r = await api(`/arquivos?caminho=${encodeURIComponent(caminho)}`);
+    seletor.caminho = r.caminho;
+    seletor.pai = r.pai;
+    seletor.arquivos = r.arquivos;
+    try { localStorage.setItem(ULTIMA_PASTA, r.caminho); } catch (e) { /* modo privado */ }
+    pintarSeletor(r);
+  } catch (e) {
+    if (cairNaRaiz && caminho) { await navegar("", false); return; }
+    $("seletor-corpo").innerHTML = "";
+    mostrar($("seletor-erro"), e.message);
+  }
+}
+
+function atualizarRestam() {
+  const teto = tetoAnexos();
+  const faltam = teto - anexos.length;
+  const papeis = PAPEIS[cfg.modo] || [];
+  $("seletor-restam").textContent = faltam > 0
+    ? `${anexos.length} de ${teto} — a próxima vira “${papeis[anexos.length]}”`
+    : `${teto} de ${teto} escolhidas — clique numa marcada para tirar`;
+}
+
+function pintarSeletor(r) {
+  $("seletor-caminho").textContent = r.caminho ? `/${r.caminho}` : "/ raiz do projeto";
+  $("seletor-voltar").disabled = r.pai === null;
+  $("seletor-tres").disabled = r.arquivos.length === 0;
+  atualizarRestam();
+
+  const pastas = r.pastas.map((p) =>
+    `<button type="button" class="mini item-pasta ir-pasta"
+             data-caminho="${esc(p.caminho)}">${esc(p.nome)}</button>`).join("");
+  const imagens = r.arquivos.map((a) =>
+    `<button type="button" class="item-imagem escolher-imagem${
+        anexos.includes(a.caminho) ? " escolhida" : ""}"
+             data-caminho="${esc(a.caminho)}" title="${esc(a.caminho)}">
+       <img src="${esc(urlMiniatura(a.caminho))}" alt="" loading="lazy">
+       <span class="nome">${esc(a.nome)}</span>
+       <span class="tamanho">${tamanhoLegivel(a.tamanho)}</span>
+     </button>`).join("");
+
+  $("seletor-corpo").innerHTML =
+    (pastas ? `<div class="grade-pastas">${pastas}</div>` : "") +
+    (imagens ? `<div class="grade-imagens">${imagens}</div>`
+             : `<div class="modal-vazio">Nenhuma imagem nesta pasta.</div>`);
+}
+
+function repintarMarcas() {
+  document.querySelectorAll("#seletor-corpo .escolher-imagem").forEach((b) => {
+    b.classList.toggle("escolhida", anexos.includes(b.dataset.caminho));
+  });
+  atualizarRestam();
+}
+
+function escolherImagem(caminho) {
+  const teto = tetoAnexos();
+  const i = anexos.indexOf(caminho);
+  if (i >= 0) {
+    anexos.splice(i, 1);          // clicar de novo na marcada tira — e como se corrige
+  } else if (anexos.length >= teto) {
+    // impede a de mais AQUI em vez de deixar o 422 do servidor explicar depois
+    mostrar($("seletor-erro"),
+      `Já são ${teto}, e o Flow não aceita mais neste modo. Clique numa marcada para tirar.`);
+    return;
+  } else {
+    anexos.push(caminho);
+  }
+  esconder($("seletor-erro"));
+  pintarAnexos();
+  repintarMarcas();
+  if (cfg.modo === "frames2v" && anexos.length === teto) fecharSeletor();
+}
+
+/* As tres primeiras imagens da pasta aberta, de uma vez. E o atalho do caso comum:
+   identidade de personagem se mantem com um trio fixo de referencias, e escolher as
+   mesmas tres a mao toda vez e atrito puro.
+
+   Deliberadamente "as 3 desta pasta" e nao "as 3 do personagem X": nao ha no projeto uma
+   convencao de pasta por personagem que permita descobrir isso sem chutar, e um botao
+   que as vezes pega o arquivo errado e pior do que nenhum botao. */
+function usarTresDaPasta() {
+  const tres = seletor.arquivos.slice(0, MAX_REFERENCIAS).map((a) => a.caminho);
+  if (!tres.length) return;
+  esconder($("seletor-erro"));
+  anexos = tres.slice(0, tetoAnexos());
+  pintarAnexos();
+  repintarMarcas();
+}
+
 /* ---------------- ligacao ---------------- */
+
+$("galeria").addEventListener("click", (ev) => {
+  const caixa = ev.target.closest(".marcar-job");
+  const cartao = ev.target.closest(".card");
+  if (!cartao) return;
+  const id = Number(cartao.dataset.id);
+  if (caixa) {
+    // marcar nao abre o visualizador: a caixa e para juntar o lote de download
+    if (selecao.has(id)) selecao.delete(id); else selecao.add(id);
+    cartao.classList.toggle("marcado", selecao.has(id));
+    assinaturaGaleria = null;
+    atualizarBarraSelecao();
+    return;
+  }
+  abrirVisor(id);
+});
+
+// tocar no hover: o primeiro quadro ja esta na tela, e o movimento e o que diferencia
+// dois takes do mesmo prompt
+$("galeria").addEventListener("mouseover", (ev) => {
+  const v = ev.target.closest("video");
+  if (v) v.play().catch(() => { /* o navegador pode recusar; o quadro parado basta */ });
+});
+$("galeria").addEventListener("mouseout", (ev) => {
+  const v = ev.target.closest("video");
+  if (v) { v.pause(); v.currentTime = 0.1; }
+});
+
+$("baixar-selecao").addEventListener("click", baixarSelecao);
+$("limpar-selecao").addEventListener("click", () => {
+  selecao.clear();
+  assinaturaGaleria = null;
+  pintarGaleria(jobs);
+  atualizarBarraSelecao();
+});
+
+$("form-job").addEventListener("submit", enviar);
+$("job-prompt").addEventListener("input", crescerPrompt);
+$("job-prompt").addEventListener("keydown", (ev) => {
+  // Enter envia, Shift+Enter quebra linha. E o gesto de todo campo de prompt.
+  if (ev.key === "Enter" && !ev.shiftKey) {
+    ev.preventDefault();
+    $("form-job").requestSubmit();
+  }
+});
+
+$("botao-mais").addEventListener("click", abrirSeletor);
+$("tira-anexos").addEventListener("click", (ev) => {
+  const b = ev.target.closest(".tira-x");
+  if (!b) return;
+  anexos = anexos.filter((c) => c !== b.dataset.caminho);
+  pintarAnexos();
+});
+
+$("chip").addEventListener("click", () => alternarPopover("pop-chip", "chip"));
+$("chip-produto").addEventListener("click", () => {
+  pintarProdutos();
+  alternarPopover("pop-produto", "chip-produto");
+});
+
+$("pop-chip").addEventListener("click", (ev) => {
+  const b = ev.target.closest("button");
+  if (!b) return;
+  if (b.dataset.modo) cfg.modo = b.dataset.modo;
+  else if (b.dataset.chave === "quantidade") cfg.quantidade = Number(b.dataset.valor);
+  else if (b.dataset.chave) cfg[b.dataset.chave] = b.dataset.valor;
+  ajustarChip();
+  posicionar($("pop-chip"), $("chip"));   // o popover muda de altura ao esconder grupos
+});
+
+$("pop-produto").addEventListener("click", (ev) => {
+  const b = ev.target.closest("button");
+  if (!b) return;
+  if (b.id === "usar-produto-novo") {
+    const novo = $("produto-novo").value.trim();
+    if (!novo) return;
+    definirProduto(novo);
+    $("produto-novo").value = "";
+    pintarProdutos();
+    fecharPopovers();
+  } else if (b.classList.contains("escolher-produto")) {
+    definirProduto(b.dataset.produto);
+    pintarProdutos();
+    fecharPopovers();
+  }
+});
+$("produto-novo").addEventListener("keydown", (ev) => {
+  if (ev.key === "Enter") { ev.preventDefault(); $("usar-produto-novo").click(); }
+});
+
+document.addEventListener("click", (ev) => {
+  // clique fora fecha os popovers, mas o clique NO chip e tratado pelo proprio chip
+  if (!ev.target.closest(".popover") && !ev.target.closest(".chip")) fecharPopovers();
+});
+
+$("visor").addEventListener("click", (ev) => {
+  if (ev.target === $("visor")) { fecharVisor(); return; }   // clique no fundo fecha
+  const b = ev.target.closest("button");
+  if (!b) return;
+  if (b.id === "visor-fechar") fecharVisor();
+  else if (b.id === "visor-copiar") copiarCaminho();
+  else if (b.id === "visor-renomear") renomear();
+  else if (b.id === "visor-cancelar") cancelar(jobAberto);
+});
+
+$("abrir-contas").addEventListener("click", abrirGaveta);
+$("fechar-contas").addEventListener("click", fecharGaveta);
+$("gaveta-fundo").addEventListener("click", fecharGaveta);
+$("form-conta").addEventListener("submit", cadastrar);
 
 document.addEventListener("click", (ev) => {
   const alvo = ev.target.closest("button");
   if (!alvo) return;
   const id = Number(alvo.dataset.id);
-  if (alvo.classList.contains("abrir-seletor")) abrirSeletor(alvo.dataset.campo, !!alvo.dataset.multiplo);
-  else if (alvo.classList.contains("tira-x")) tirarEscolhido(alvo.dataset.campo, alvo.dataset.caminho);
-  else if (alvo.classList.contains("acao-revalidar")) revalidar(id, alvo.dataset.email);
+  if (alvo.classList.contains("acao-revalidar")) revalidar(id, alvo.dataset.email);
   else if (alvo.classList.contains("acao-saldo")) lerSaldo(id, alvo.dataset.email, alvo);
-  else if (alvo.classList.contains("acao-cancelar")) cancelar(id);
   else if (alvo.classList.contains("acao-proxy")) {
     // O proxy da conta chega MASCARADO da API (`http://usuario:***@host:porta`). Por
     // isso o campo nasce vazio e o valor atual e so texto ao lado: um input preenchido
-    // com o valor mascarado devolveria `***` no lugar da senha ao primeiro Salvar - e
+    // com o valor mascarado devolveria `***` no lugar da senha ao primeiro Salvar — e
     // como `***` forma uma URL perfeitamente valida, ninguem seria avisado; a conta so
     // pararia de autenticar no proxy, calada.
     const campo = document.querySelector(`.campo-proxy[data-id="${id}"]`);
@@ -457,198 +1063,6 @@ document.addEventListener("change", (ev) => {
   else if (alvo.classList.contains("acao-tier")) alterarConta(id, { tier: alvo.value });
 });
 
-$("form-conta").addEventListener("submit", cadastrar);
-$("form-job").addEventListener("submit", enfileirar);
-$("job-modo").addEventListener("change", ajustarFormulario);
-
-ajustarFormulario();
-atualizar();
-setInterval(() => { if (!document.hidden) atualizar(); }, INTERVALO_MS);
-
-/* ---------------- seletor de imagens ----------------
-
-   Por que o servidor navega o disco em vez de o navegador subir o arquivo: o transporte
-   entrega a imagem ao Flow com `set_input_files`, que precisa de um arquivo EM DISCO. E
-   o `<input type="file">` do navegador entrega o conteudo do arquivo e nunca o caminho
-   real — protecao do navegador, nao detalhe que se contorna. Como a API e local, caminho
-   e a moeda natural.
-
-   O CAMPO DE TEXTO continua sendo o dono do valor. Este modal so escreve nele, e a tira
-   de miniaturas abaixo do campo e o reflexo do que esta escrito. Uma fonte de verdade
-   so: quem digita o caminho ve a miniatura aparecer, e nao precisa navegar por nada. */
-
-const CAMPOS_DE_ARQUIVO = ["job-frame-inicial", "job-frame-final", "job-referencias"];
-const MAX_REFERENCIAS = 3;
-
-// A ultima pasta visitada volta na proxima abertura. As referencias do usuario moram em
-// poucas pastas conhecidas; comecar sempre da raiz cobraria a mesma descida toda vez.
-const ULTIMA_PASTA = "flowpool:ultima-pasta";
-
-let seletor = { campo: null, multiplo: false, caminho: "", pai: null, arquivos: [] };
-
-function ehMultiplo(campo) { return campo === "job-referencias"; }
-
-/* Le o campo como LISTA. Referencias sao uma por linha; frame e um caminho so. */
-function caminhosDoCampo(campo) {
-  const valor = $(campo).value;
-  if (ehMultiplo(campo)) return valor.split("\n").map((s) => s.trim()).filter(Boolean);
-  const um = valor.trim();
-  return um ? [um] : [];
-}
-
-function gravarCampo(campo, lista) {
-  $(campo).value = ehMultiplo(campo) ? lista.join("\n") : (lista[0] || "");
-  atualizarTiras();
-}
-
-function urlMiniatura(caminho) {
-  return `/miniatura?caminho=${encodeURIComponent(caminho)}`;
-}
-
-function tamanhoLegivel(n) {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
-  return `${(n / 1048576).toFixed(1)} MB`;
-}
-
-function atualizarTiras() {
-  CAMPOS_DE_ARQUIVO.forEach((campo) => {
-    const alvo = $(`tira-${campo}`);
-    if (!alvo) return;
-    alvo.innerHTML = caminhosDoCampo(campo).map((c) => {
-      const nome = c.split("/").pop();
-      return `<span class="tira" title="${esc(c)}">
-        <img src="${esc(urlMiniatura(c))}" alt="" loading="lazy">
-        <span class="tira-nome">${esc(nome)}</span>
-        <button type="button" class="tira-x" data-campo="${campo}" data-caminho="${esc(c)}"
-                title="tirar esta imagem">&times;</button></span>`;
-    }).join("");
-  });
-}
-
-function tirarEscolhido(campo, caminho) {
-  gravarCampo(campo, caminhosDoCampo(campo).filter((c) => c !== caminho));
-  if (seletor.campo === campo && !$("seletor").classList.contains("oculto")) repintarMarcas();
-}
-
-/* ---- modal ---- */
-
-async function abrirSeletor(campo, multiplo) {
-  seletor = { campo, multiplo, caminho: "", pai: null, arquivos: [] };
-  $("seletor-titulo").textContent = multiplo
-    ? "Escolher referências — até 3" : "Escolher imagem";
-  $("seletor-tres").classList.toggle("oculto", !multiplo);
-  esconder($("seletor-erro"));
-  $("seletor-corpo").innerHTML = `<div class="modal-vazio">Lendo a pasta…</div>`;
-  $("seletor").classList.remove("oculto");
-  // `true`: se a pasta guardada foi renomeada ou apagada desde a ultima vez, cai na raiz
-  // em vez de abrir o modal num erro
-  await navegar(localStorage.getItem(ULTIMA_PASTA) || "", true);
-}
-
-function fecharSeletor() {
-  $("seletor").classList.add("oculto");
-  seletor.campo = null;
-}
-
-async function navegar(caminho, cairNaRaiz = false) {
-  esconder($("seletor-erro"));
-  try {
-    const r = await api(`/arquivos?caminho=${encodeURIComponent(caminho)}`);
-    seletor.caminho = r.caminho;
-    seletor.pai = r.pai;
-    seletor.arquivos = r.arquivos;
-    try { localStorage.setItem(ULTIMA_PASTA, r.caminho); } catch (e) { /* modo privado */ }
-    pintarSeletor(r);
-  } catch (e) {
-    if (cairNaRaiz && caminho) { await navegar("", false); return; }
-    $("seletor-corpo").innerHTML = "";
-    mostrar($("seletor-erro"), e.message);
-  }
-}
-
-function atualizarRestam() {
-  if (!seletor.multiplo) { $("seletor-restam").textContent = ""; return; }
-  const quantas = caminhosDoCampo(seletor.campo).length;
-  const faltam = MAX_REFERENCIAS - quantas;
-  $("seletor-restam").textContent = faltam > 0
-    ? `${quantas} de 3 escolhidas — cabem mais ${faltam}`
-    : "3 de 3 escolhidas — clique numa marcada para tirar";
-}
-
-function pintarSeletor(r) {
-  $("seletor-caminho").textContent = r.caminho ? `/${r.caminho}` : "/ raiz do projeto";
-  $("seletor-voltar").disabled = r.pai === null;
-  $("seletor-tres").disabled = r.arquivos.length === 0;
-  atualizarRestam();
-
-  const escolhidos = caminhosDoCampo(seletor.campo);
-  const pastas = r.pastas.map((p) =>
-    `<button type="button" class="mini item-pasta ir-pasta"
-             data-caminho="${esc(p.caminho)}">${esc(p.nome)}</button>`).join("");
-  const imagens = r.arquivos.map((a) =>
-    `<button type="button" class="item-imagem escolher-imagem${
-        escolhidos.includes(a.caminho) ? " escolhida" : ""}"
-             data-caminho="${esc(a.caminho)}" title="${esc(a.caminho)}">
-       <img src="${esc(urlMiniatura(a.caminho))}" alt="" loading="lazy">
-       <span class="nome">${esc(a.nome)}</span>
-       <span class="tamanho">${tamanhoLegivel(a.tamanho)}</span>
-     </button>`).join("");
-
-  $("seletor-corpo").innerHTML =
-    (pastas ? `<div class="grade-pastas">${pastas}</div>` : "") +
-    (imagens ? `<div class="grade-imagens">${imagens}</div>`
-             : `<div class="modal-vazio">Nenhuma imagem nesta pasta.</div>`);
-}
-
-function repintarMarcas() {
-  const escolhidos = caminhosDoCampo(seletor.campo);
-  document.querySelectorAll("#seletor-corpo .escolher-imagem").forEach((b) => {
-    b.classList.toggle("escolhida", escolhidos.includes(b.dataset.caminho));
-  });
-  atualizarRestam();
-}
-
-function escolherImagem(caminho) {
-  if (!seletor.multiplo) {
-    gravarCampo(seletor.campo, [caminho]);
-    fecharSeletor();
-    return;
-  }
-  const atual = caminhosDoCampo(seletor.campo);
-  const i = atual.indexOf(caminho);
-  if (i >= 0) {
-    atual.splice(i, 1);          // clicar de novo na marcada tira — e como se corrige
-  } else if (atual.length >= MAX_REFERENCIAS) {
-    // impede a quarta AQUI em vez de deixar o 422 do servidor explicar depois
-    mostrar($("seletor-erro"),
-      "Já são 3 referências, e o Flow não aceita a quarta. Clique numa marcada para tirar.");
-    return;
-  } else {
-    atual.push(caminho);
-  }
-  esconder($("seletor-erro"));
-  gravarCampo(seletor.campo, atual);
-  repintarMarcas();
-}
-
-/* As tres primeiras imagens da pasta aberta, de uma vez. E o atalho do caso comum:
-   identidade de personagem se mantem com um trio fixo de referencias, e escolher as
-   mesmas tres a mao toda vez e atrito puro.
-
-   Deliberadamente "as 3 desta pasta" e nao "as 3 do personagem X": nao ha no projeto uma
-   convencao de pasta por personagem que permita descobrir isso sem chutar, e um botao
-   que as vezes pega o arquivo errado e pior do que nenhum botao. Aqui a pasta e a que
-   esta na tela, a ordem e a alfabetica que a grade mostra, e as tres escolhidas aparecem
-   marcadas na hora — nao ha o que adivinhar. */
-function usarTresDaPasta() {
-  const tres = seletor.arquivos.slice(0, MAX_REFERENCIAS).map((a) => a.caminho);
-  if (!tres.length) return;
-  esconder($("seletor-erro"));
-  gravarCampo(seletor.campo, tres);
-  repintarMarcas();
-}
-
 $("seletor").addEventListener("click", (ev) => {
   if (ev.target === $("seletor")) { fecharSeletor(); return; }   // clique no fundo fecha
   const b = ev.target.closest("button");
@@ -661,16 +1075,23 @@ $("seletor").addEventListener("click", (ev) => {
 });
 
 document.addEventListener("keydown", (ev) => {
-  if (ev.key === "Escape" && !$("seletor").classList.contains("oculto")) fecharSeletor();
+  if (ev.key !== "Escape") return;
+  if (!$("seletor").classList.contains("oculto")) fecharSeletor();
+  else if (!$("visor").classList.contains("oculto")) fecharVisor();
+  else if (!$("pop-chip").classList.contains("oculto")
+           || !$("pop-produto").classList.contains("oculto")) fecharPopovers();
+  else if (!$("gaveta").classList.contains("oculto")) fecharGaveta();
 });
 
-/* Digitar continua valendo: a tira e o reflexo do campo, nao o contrario. Com uma
-   espera curta no meio — sem ela, cada tecla de um caminho pela metade viraria um pedido
-   de miniatura que responde 404, e o campo piscaria imagem quebrada enquanto se digita. */
-let tirasAgendadas = null;
-CAMPOS_DE_ARQUIVO.forEach((c) => $(c).addEventListener("input", () => {
-  clearTimeout(tirasAgendadas);
-  tirasAgendadas = setTimeout(atualizarTiras, 300);
-}));
+window.addEventListener("resize", () => { fecharPopovers(); medirGrade(); });
+// a altura do card de texto so se estabiliza quando a fonte real termina de carregar
+if (document.fonts) document.fonts.ready.then(medirGrade);
 
-atualizarTiras();
+/* ---------------- partida ---------------- */
+
+try { definirProduto(localStorage.getItem("flowpool:produto")); }
+catch (e) { definirProduto(null); }
+ajustarChip();
+crescerPrompt();
+atualizar();
+setInterval(() => { if (!document.hidden) atualizar(); }, INTERVALO_MS);

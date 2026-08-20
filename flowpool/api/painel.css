@@ -1,6 +1,9 @@
-/* Painel do FlowPool. Escuro, denso, sobrio - e painel de operacao.
-   Prioridade visual, de cima para baixo: conta que precisa de acao, credito, fila,
-   historico. */
+/* Painel do FlowPool. Escuro, denso, a MIDIA e a protagonista.
+
+   A estrutura e a do proprio Flow, porque e a que serve ao trabalho: a galeria ocupa a
+   tela inteira, a barra de prompt flutua no rodape, e a operacao do pool (contas,
+   sessoes, proxy) mora numa gaveta que so abre quando alguem chama. O que exige acao
+   humana — sessao caida — continua na faixa de cima, sempre visivel. */
 
 :root {
   --fundo: #0A0D0F;
@@ -21,6 +24,11 @@
   --titulo: "Space Grotesk", "Segoe UI", system-ui, sans-serif;
   --corpo: "Inter", "Segoe UI", system-ui, sans-serif;
   --mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+
+  --altura-faixa: 44px;
+  /* Espaco que a barra flutuante ocupa no rodape. A galeria reserva isto no fim para
+     que o ultimo card nao nasca embaixo da barra e sem jeito de alcancar. */
+  --altura-barra: 132px;
 }
 
 * { box-sizing: border-box; }
@@ -36,369 +44,674 @@ body {
 }
 
 .mono { font-family: var(--mono); font-variant-ligatures: none; }
+.mono-peq { font-family: var(--mono); font-size: 11.5px; }
+.leve { color: var(--texto-fraco); font-size: 11.5px; }
 .oculto { display: none !important; }
 
-/* ---------- topo ---------- */
+/* ---------- faixa de cima ---------- */
 
-.topo {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 12px 20px;
-  background: var(--painel);
-  border-bottom: 1px solid var(--borda);
+.faixa {
   position: sticky;
   top: 0;
-  z-index: 20;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  height: var(--altura-faixa);
+  padding: 0 14px;
+  background: rgba(10, 13, 15, 0.92);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--borda);
 }
 
-.marca { display: flex; align-items: baseline; gap: 10px; }
-
-.marca h1 {
+.marca { display: flex; align-items: center; gap: 8px; flex: none; }
+.marca strong {
   font-family: var(--titulo);
-  font-size: 18px;
-  font-weight: 700;
+  font-size: 14px;
   letter-spacing: -0.02em;
-  margin: 0;
 }
 
-.marca .sub { color: var(--texto-fraco); font-size: 12px; }
-
-.ponto {
-  width: 8px; height: 8px;
-  border-radius: 50%;
-  background: var(--texto-fraco);
-  align-self: center;
-}
+.ponto { width: 7px; height: 7px; border-radius: 50%; background: var(--texto-fraco); }
 .ponto.vivo { background: var(--primaria); box-shadow: 0 0 8px var(--primaria); }
 .ponto.morto { background: var(--erro); box-shadow: 0 0 8px var(--erro); }
 
-.estado-conexao { color: var(--texto-fraco); font-size: 12px; }
-.estado-conexao.falha { color: var(--erro); }
+.medidores { display: flex; gap: 14px; flex: none; }
+.medidor { color: var(--texto-fraco); font-size: 11.5px; white-space: nowrap; }
+.medidor b { color: var(--texto); font-size: 13px; font-weight: 600; }
+#credito-total { color: var(--primaria); }
 
-main {
-  max-width: 1500px;
-  margin: 0 auto;
-  padding: 16px 20px 60px;
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-/* ---------- faixa de contas expiradas ---------- */
-
-.faixa-alerta {
-  background: var(--alerta-fraco);
-  border: 1px solid rgba(240, 166, 60, 0.4);
-  border-left: 3px solid var(--alerta);
-  border-radius: 6px;
-  padding: 12px 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.alerta-cabeca { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
-.alerta-cabeca strong { font-family: var(--titulo); color: var(--alerta); font-size: 14px; }
-.alerta-cabeca span { color: var(--texto-fraco); font-size: 12px; }
-
-.lista-expiradas { display: flex; flex-wrap: wrap; gap: 8px; }
-
-.chip-expirada {
+/* Sessao caida e a UNICA coisa do pool que exige gente. Fica na faixa, e nao na gaveta:
+   escondida atras de um botao, a conta ficaria fora do pool sem ninguem perceber. */
+.expiradas {
   display: flex;
   align-items: center;
-  gap: 10px;
-  background: var(--painel);
-  border: 1px solid var(--borda-forte);
-  border-radius: 4px;
-  padding: 5px 6px 5px 10px;
-}
-.chip-expirada .email { font-family: var(--mono); font-size: 12px; }
-
-/* ---------- cartoes de saude ---------- */
-
-.cartoes {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 12px;
-}
-
-.cartao {
-  background: var(--painel);
-  border: 1px solid var(--borda);
-  border-radius: 6px;
-  padding: 14px 16px;
-}
-
-.cartao.destaque { border-color: rgba(15, 214, 140, 0.35); background: linear-gradient(180deg, var(--primaria-fraca), transparent 70%), var(--painel); }
-
-.cartao .rotulo {
-  text-transform: uppercase;
-  letter-spacing: 0.09em;
-  font-size: 10.5px;
-  font-weight: 600;
-  color: var(--texto-fraco);
-}
-
-.numerao {
-  font-size: 38px;
-  font-weight: 600;
-  line-height: 1.1;
-  margin-top: 4px;
-  letter-spacing: -0.02em;
-}
-.cartao.destaque .numerao { color: var(--primaria); }
-
-.cartao .nota { color: var(--texto-fraco); font-size: 11.5px; margin-top: 2px; }
-
-/* ---------- blocos ---------- */
-
-.bloco {
-  background: var(--painel);
-  border: 1px solid var(--borda);
-  border-radius: 6px;
-  overflow: hidden;
-}
-
-.bloco-cabeca {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  padding: 11px 16px;
-  border-bottom: 1px solid var(--borda);
-  background: var(--painel-alto);
-}
-
-.bloco-cabeca h2 {
-  font-family: var(--titulo);
-  font-size: 14px;
-  font-weight: 500;
-  margin: 0;
-  letter-spacing: 0.01em;
-}
-
-.contador { color: var(--texto-fraco); font-size: 11.5px; }
-
-/* ---------- formularios ---------- */
-
-.cadastro { padding: 14px 16px; border-bottom: 1px solid var(--borda); }
-
-fieldset {
-  border: 1px solid var(--borda);
-  border-radius: 5px;
-  padding: 10px 14px 12px;
-  margin: 0;
+  gap: 8px;
   min-width: 0;
+  padding: 3px 8px;
+  background: var(--alerta-fraco);
+  border: 1px solid rgba(240, 166, 60, 0.4);
+  border-radius: 5px;
 }
-fieldset:disabled { opacity: 0.45; }
+.alerta-texto { color: var(--alerta); font-size: 11.5px; white-space: nowrap; }
+.lista-expiradas { display: flex; gap: 6px; overflow-x: auto; }
 
-legend {
-  font-family: var(--titulo);
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.09em;
-  color: var(--texto-fraco);
-  padding: 0 6px;
-}
-
-.linha-campos {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  align-items: flex-end;
-}
-.linha-campos + .linha-campos { margin-top: 10px; }
-
-.campo { display: flex; flex-direction: column; gap: 4px; min-width: 120px; }
-.campo.cresce { flex: 1 1 220px; }
-
-.campo > span {
-  font-size: 10.5px;
-  text-transform: uppercase;
-  letter-spacing: 0.07em;
-  color: var(--texto-fraco);
-}
-
-input, select, textarea {
-  background: var(--fundo);
-  color: var(--texto);
+.chip-expirada {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--painel);
   border: 1px solid var(--borda-forte);
   border-radius: 4px;
-  padding: 6px 8px;
-  font-family: var(--corpo);
-  font-size: 12.5px;
-  width: 100%;
-}
-input.mono, textarea.mono { font-family: var(--mono); font-size: 12px; }
-textarea { resize: vertical; }
-
-input:focus, select:focus, textarea:focus {
-  outline: none;
-  border-color: var(--primaria);
-  box-shadow: 0 0 0 2px var(--primaria-fraca);
-}
-
-.dica { color: var(--texto-fraco); font-size: 11.5px; margin: 10px 0 0; max-width: 90ch; }
-.dica em { color: var(--texto); font-style: normal; }
-
-button {
-  background: var(--painel-alto);
-  color: var(--texto);
-  border: 1px solid var(--borda-forte);
-  border-radius: 4px;
-  padding: 6px 12px;
-  font-family: var(--corpo);
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
+  padding: 1px 3px 1px 7px;
   white-space: nowrap;
 }
-button:hover:not(:disabled) { border-color: var(--primaria); color: var(--primaria); }
-button:disabled { opacity: 0.4; cursor: not-allowed; }
+.chip-expirada .email { font-family: var(--mono); font-size: 11px; }
 
-button.primario {
-  background: var(--primaria);
-  border-color: var(--primaria);
-  color: #05231A;
-  font-weight: 600;
-}
-button.primario:hover:not(:disabled) { background: #23E79E; color: #05231A; }
+.faixa-fim { display: flex; align-items: center; gap: 10px; margin-left: auto; flex: none; }
+.estado-conexao { color: var(--texto-fraco); font-size: 11px; }
+.estado-conexao.falha { color: var(--erro); }
 
-button.alerta { border-color: var(--alerta); color: var(--alerta); }
-button.mini { padding: 3px 8px; font-size: 11px; }
+/* ---------- botoes ---------- */
 
-/* ---------- andamento do cadastro ---------- */
+button, .mini, .primario-link { font-family: inherit; }
 
-.andamento {
-  margin-top: 12px;
-  border: 1px solid rgba(15, 214, 140, 0.35);
-  background: var(--primaria-fraca);
+.mini, .primario-link {
+  background: var(--painel-alto);
+  color: var(--texto);
+  border: 1px solid var(--borda-forte);
   border-radius: 5px;
-  padding: 12px 14px;
+  padding: 4px 9px;
+  font-size: 11.5px;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-block;
+  white-space: nowrap;
+}
+.mini:hover:not(:disabled), .primario-link:hover { border-color: var(--primaria); color: var(--primaria); }
+.mini:disabled { opacity: 0.45; cursor: not-allowed; }
+.mini.alerta { border-color: var(--alerta); color: var(--alerta); }
+
+.primario-link { border-color: var(--primaria); color: var(--primaria); background: var(--primaria-fraca); }
+
+.primario {
+  background: var(--primaria);
+  color: #04150E;
+  border: none;
+  border-radius: 6px;
+  padding: 8px 14px;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.primario:hover:not(:disabled) { filter: brightness(1.1); }
+.primario:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ---------- L1: a galeria ---------- */
+
+.galeria {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  /* Os cards tem ALTURAS DIFERENTES de proposito: 9:16 sai alto, 16:9 sai largo, e a
+     forma do card ja diz o formato do arquivo antes de qualquer texto.
+
+     Numa grade comum isso abre buracos: a linha inteira fica com a altura do card mais
+     alto, e os baixos ficam boiando. A saida e a linha MICROSCOPICA (`grid-auto-rows`)
+     com cada card ocupando quantas couberem — `medirGrade`, no JS, faz a conta. Nao e
+     `columns`, que empilharia o mais recente inteiro na primeira coluna e destruiria a
+     ordem; aqui a leitura continua da esquerda para a direita, do novo para o velho. */
+  grid-auto-rows: 4px;
+  /* `dense` porque sem ele a coluna que termina cedo fica vazia ate o fim da galeria:
+     a colocacao normal do grid nunca volta atras para preencher um buraco. Como todo
+     card ocupa UMA coluna, o unico efeito colateral e um card baixo subir para um vao
+     acima — a ordem do novo para o velho continua de pe no geral, e o vao branco no
+     meio da grade custava mais do que essa troca ocasional. */
+  grid-auto-flow: row dense;
+  align-items: start;
+  gap: 12px;
+  padding: 14px 14px calc(var(--altura-barra) + 14px);
 }
 
-.andamento-cabeca { display: flex; align-items: center; gap: 10px; }
-.andamento-cabeca strong { font-family: var(--titulo); font-size: 14px; color: var(--primaria); }
+.galeria-vazia {
+  grid-column: 1 / -1;
+  color: var(--texto-fraco);
+  text-align: center;
+  padding: 60px 20px;
+}
+.galeria-vazia strong {
+  display: block;
+  font-family: var(--titulo);
+  color: var(--texto);
+  font-size: 15px;
+  margin-bottom: 6px;
+}
+
+.card {
+  position: relative;
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--painel);
+  border: 1px solid var(--borda);
+  cursor: pointer;
+  transition: border-color 0.12s, transform 0.12s;
+}
+.card:hover { border-color: var(--borda-forte); transform: translateY(-1px); }
+.card.marcado { border-color: var(--primaria); box-shadow: 0 0 0 1px var(--primaria); }
+
+.moldura {
+  position: relative;
+  width: 100%;
+  /* `--prop` vem do job (`9/16`, `16/9`, `1/1`…): o card tem a forma do arquivo. */
+  aspect-ratio: var(--prop, 9 / 16);
+  background: #05080A;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.moldura img, .moldura video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+/* Selo de play com a duracao. O `<video preload="metadata">` mostra o primeiro quadro
+   sem baixar o clipe; o selo e o que diz que aquilo se move. */
+.selo {
+  position: absolute;
+  left: 6px;
+  bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(5, 8, 10, 0.75);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--texto);
+  pointer-events: none;
+}
+
+.marcar {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.card:hover .marcar, .card.marcado .marcar { opacity: 1; }
+.marcar input { width: 15px; height: 15px; accent-color: var(--primaria); cursor: pointer; }
+
+.rodape-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 5px 7px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--texto-fraco);
+}
+.rodape-card .credito { color: var(--primaria); flex: none; }
+.rodape-card .modo { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Cards que nao tem arquivo: fila e falha. Ficam na MESMA grade, e nao numa lista
+   separada, porque "o que eu gerei" inclui o que ainda esta saindo e o que nao saiu. */
+/* Sem arquivo nao ha forma a respeitar: o card encolhe para o tamanho do texto em vez
+   de reservar um retangulo 9:16 vazio no meio da galeria. */
+.card.sem-arquivo .moldura { aspect-ratio: auto; min-height: 96px; }
+
+.card-texto {
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  justify-content: center;
+  height: 100%;
+  text-align: left;
+}
+.card-texto .prompt-curto {
+  color: var(--texto-fraco);
+  font-size: 11.5px;
+  display: -webkit-box;
+  -webkit-line-clamp: 5;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.card.falhou .moldura { background: rgba(255, 92, 92, 0.06); }
+.card.falhou .card-texto .prompt-curto { color: #FFB4B4; }
+.card.rodando .moldura { background: rgba(90, 169, 255, 0.06); }
+
+.pilula {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  align-self: flex-start;
+  border: 1px solid var(--borda-forte);
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: lowercase;
+}
+.pilula.viva { color: var(--primaria); border-color: rgba(15, 214, 140, 0.4); background: var(--primaria-fraca); }
+.pilula.expirada { color: var(--alerta); border-color: rgba(240, 166, 60, 0.5); background: var(--alerta-fraco); }
+.pilula.bloqueada { color: var(--erro); border-color: rgba(255, 92, 92, 0.5); background: var(--erro-fraco); }
+.pilula.pendente { color: var(--texto-fraco); }
+.pilula.rodando { color: var(--azul); border-color: rgba(90, 169, 255, 0.5); background: rgba(90, 169, 255, 0.12); }
+.pilula.pronto { color: var(--primaria); border-color: rgba(15, 214, 140, 0.4); background: var(--primaria-fraca); }
+.pilula.falhou { color: var(--erro); border-color: rgba(255, 92, 92, 0.5); background: var(--erro-fraco); }
+.pilula.cancelado { color: var(--texto-fraco); }
 
 .girando {
   width: 12px; height: 12px;
-  border: 2px solid rgba(15, 214, 140, 0.3);
-  border-top-color: var(--primaria);
+  border: 2px solid var(--borda-forte);
+  border-top-color: var(--azul);
   border-radius: 50%;
-  animation: girar 0.8s linear infinite;
+  animation: girar 0.9s linear infinite;
   flex: none;
 }
 @keyframes girar { to { transform: rotate(360deg); } }
 
-.passos { margin: 8px 0 0; padding-left: 20px; }
-.passos li { margin: 3px 0; }
+/* ---------- barra de selecao ---------- */
 
-.andamento-rodape { color: var(--texto-fraco); font-size: 11.5px; margin: 10px 0 0; }
+.barra-selecao {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(var(--altura-barra) + 8px);
+  z-index: 25;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--painel-alto);
+  border: 1px solid var(--borda-forte);
+  border-radius: 999px;
+  padding: 6px 8px 6px 16px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  font-size: 11.5px;
+}
+
+/* ---------- L3: a barra de prompt ---------- */
+
+.barra {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 26;
+  padding: 10px 14px 14px;
+  /* Degrade em vez de fundo chapado: a grade continua visivel por baixo, que e o que
+     faz a barra parecer FLUTUAR sobre a galeria e nao cortar a pagina em duas. */
+  background: linear-gradient(180deg, rgba(10, 13, 15, 0) 0%, rgba(10, 13, 15, 0.9) 40%, var(--fundo) 100%);
+  pointer-events: none;
+}
+.barra > * { pointer-events: auto; }
+
+.caixa {
+  max-width: 900px;
+  margin: 0 auto;
+  background: var(--painel-alto);
+  border: 1px solid var(--borda-forte);
+  border-radius: 14px;
+  padding: 8px 8px 8px 10px;
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.55);
+}
+.caixa:focus-within { border-color: rgba(15, 214, 140, 0.5); }
+
+.linha-caixa { display: flex; align-items: flex-end; gap: 8px; }
+
+.redondo {
+  flex: none;
+  width: 28px; height: 28px;
+  border-radius: 50%;
+  background: transparent;
+  border: 1px solid var(--borda-forte);
+  color: var(--texto-fraco);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.redondo:hover:not(:disabled) { border-color: var(--primaria); color: var(--primaria); }
+.redondo:disabled { opacity: 0.4; cursor: not-allowed; }
+
+#job-prompt {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-height: 168px;
+  background: transparent;
+  border: none;
+  color: var(--texto);
+  font-family: var(--corpo);
+  font-size: 13.5px;
+  line-height: 1.5;
+  padding: 5px 2px;
+  resize: none;
+  outline: none;
+}
+#job-prompt::placeholder { color: var(--texto-fraco); }
+
+.chip {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--painel);
+  border: 1px solid var(--borda-forte);
+  border-radius: 999px;
+  padding: 5px 10px;
+  color: var(--texto);
+  font-family: var(--mono);
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.chip:hover, .chip.aberto { border-color: var(--primaria); color: var(--primaria); }
+.chip .chip-seta { color: var(--texto-fraco); font-size: 9px; }
+.chip.produto { max-width: 160px; }
+.chip.produto span:first-child { overflow: hidden; text-overflow: ellipsis; }
+.chip.produto.faltando { border-color: var(--alerta); color: var(--alerta); }
+
+.enviar {
+  flex: none;
+  width: 30px; height: 30px;
+  border-radius: 50%;
+  border: none;
+  background: var(--primaria);
+  color: #04150E;
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+}
+.enviar:hover:not(:disabled) { filter: brightness(1.1); }
+.enviar:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.barra .aviso { max-width: 900px; margin: 8px auto 0; }
+
+/* ---------- anexos na barra ---------- */
+
+.tira-anexos { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 0 8px 2px; }
+.tira-anexos:empty { display: none; }
+
+.tira {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--painel);
+  border: 1px solid var(--borda);
+  border-radius: 6px;
+  padding: 3px 4px 3px 3px;
+  max-width: 210px;
+}
+.tira img {
+  width: 30px; height: 30px;
+  object-fit: cover;
+  border-radius: 4px;
+  background: #05080A;
+  flex: none;
+}
+.tira-nome {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tira-papel { color: var(--texto-fraco); font-size: 9.5px; display: block; }
+.tira-x {
+  flex: none;
+  background: transparent;
+  border: none;
+  color: var(--texto-fraco);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 3px;
+}
+.tira-x:hover { color: var(--erro); }
+
+/* ---------- popovers ---------- */
+
+.popover {
+  position: fixed;
+  z-index: 40;
+  background: var(--painel-alto);
+  border: 1px solid var(--borda-forte);
+  border-radius: 10px;
+  padding: 12px;
+  width: 320px;
+  max-height: 70vh;
+  overflow-y: auto;
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.6);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.pop-grupo { display: flex; flex-direction: column; gap: 6px; }
+
+.pop-rotulo {
+  color: var(--texto-fraco);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.pop-opcoes { display: flex; flex-wrap: wrap; gap: 5px; }
+.pop-opcoes button {
+  background: var(--painel);
+  border: 1px solid var(--borda);
+  border-radius: 6px;
+  color: var(--texto-fraco);
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 5px 9px;
+  cursor: pointer;
+}
+.pop-opcoes button:hover { border-color: var(--borda-forte); color: var(--texto); }
+.pop-opcoes button.ativo {
+  border-color: var(--primaria);
+  background: var(--primaria-fraca);
+  color: var(--primaria);
+}
+
+.pop-dica { color: var(--texto-fraco); font-size: 11px; margin: 0; }
+.pop-dica .mono-peq { color: var(--texto); }
+
+.pop-lista { display: flex; flex-direction: column; gap: 3px; max-height: 200px; overflow-y: auto; }
+.pop-lista button {
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  color: var(--texto);
+  font-size: 12px;
+  padding: 5px 8px;
+  cursor: pointer;
+}
+.pop-lista button:hover { background: var(--painel); }
+.pop-lista button.ativo { border-color: var(--primaria); color: var(--primaria); }
+.pop-lista .vazio { color: var(--texto-fraco); font-size: 11.5px; padding: 4px 2px; }
+
+.pop-novo { display: flex; gap: 6px; }
+.pop-novo input { flex: 1 1 auto; min-width: 0; }
+
+/* ---------- campos ---------- */
+
+input[type="text"], input[type="email"], select, textarea {
+  background: var(--fundo);
+  color: var(--texto);
+  border: 1px solid var(--borda-forte);
+  border-radius: 5px;
+  padding: 6px 8px;
+  font-family: inherit;
+  font-size: 12.5px;
+  width: 100%;
+}
+input:focus, select:focus, textarea:focus { outline: none; border-color: var(--primaria); }
+input[readonly] { color: var(--texto-fraco); }
+
+.campo { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
+.campo > span { color: var(--texto-fraco); font-size: 11px; }
+
+fieldset { border: 1px solid var(--borda); border-radius: 8px; padding: 12px; margin: 0; }
+fieldset:disabled { opacity: 0.55; }
+legend { font-family: var(--titulo); font-size: 12.5px; padding: 0 6px; color: var(--texto-fraco); }
+
+.dica { color: var(--texto-fraco); font-size: 11px; margin: 10px 0 0; }
+.dica em { color: var(--texto); font-style: normal; }
 
 .aviso {
-  margin-top: 12px;
-  border-radius: 5px;
-  padding: 10px 12px;
-  font-size: 12.5px;
-  border: 1px solid transparent;
+  border: 1px solid var(--borda-forte);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 12px;
   white-space: pre-wrap;
 }
 .aviso.erro { background: var(--erro-fraco); border-color: rgba(255, 92, 92, 0.4); color: #FFB4B4; }
 .aviso.ok { background: var(--primaria-fraca); border-color: rgba(15, 214, 140, 0.4); color: var(--primaria); }
 
-/* ---------- tabelas ---------- */
+/* ---------- visualizador ---------- */
 
-.rolagem { overflow-x: auto; }
+.modal-fundo {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: rgba(4, 6, 8, 0.82);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
 
-.tabela { width: 100%; border-collapse: collapse; }
+.visor {
+  display: flex;
+  gap: 0;
+  width: min(1180px, 100%);
+  height: min(84vh, 100%);
+  background: var(--painel);
+  border: 1px solid var(--borda-forte);
+  border-radius: 12px;
+  overflow: hidden;
+}
 
-.tabela th {
-  text-align: left;
-  font-size: 10.5px;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  font-weight: 600;
-  color: var(--texto-fraco);
-  padding: 8px 12px;
+.visor-palco {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: #05080A;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 14px;
+}
+.visor-palco img, .visor-palco video {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 6px;
+}
+.visor-palco .sem-midia { color: var(--texto-fraco); text-align: center; padding: 30px; }
+
+.visor-lado {
+  flex: none;
+  width: 340px;
+  border-left: 1px solid var(--borda);
+  padding: 14px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.visor-topo { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.visor-topo strong { font-family: var(--titulo); font-size: 14px; }
+
+.visor-linha { display: flex; flex-direction: column; gap: 4px; }
+.visor-prompt { margin: 0; font-size: 12.5px; white-space: pre-wrap; }
+.visor-erro { margin: 0; font-size: 12px; color: #FFB4B4; white-space: pre-wrap; }
+.visor-linha p.mono-peq { margin: 0; word-break: break-all; }
+
+.visor-acoes { display: flex; gap: 6px; flex-wrap: wrap; margin-top: auto; padding-top: 8px; }
+
+.linha-arquivo { display: flex; gap: 6px; align-items: center; }
+.linha-arquivo input { min-width: 0; }
+.linha-arquivo button { flex: none; }
+
+/* ---------- L4: gaveta de contas ---------- */
+
+.gaveta-fundo { position: fixed; inset: 0; z-index: 45; background: rgba(4, 6, 8, 0.6); }
+
+.gaveta {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 46;
+  width: min(560px, 100%);
+  background: var(--painel);
+  border-left: 1px solid var(--borda-forte);
+  display: flex;
+  flex-direction: column;
+  box-shadow: -14px 0 40px rgba(0, 0, 0, 0.5);
+}
+
+.gaveta-topo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
   border-bottom: 1px solid var(--borda);
-  white-space: nowrap;
 }
+.gaveta-topo strong { font-family: var(--titulo); font-size: 14px; }
+.gaveta-topo .contador { color: var(--texto-fraco); font-size: 11px; }
+.gaveta-topo .mini { margin-left: auto; }
 
-.tabela td {
-  padding: 7px 12px;
-  border-bottom: 1px solid rgba(33, 42, 49, 0.6);
-  vertical-align: middle;
+.gaveta-corpo { padding: 14px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+
+.lista-contas { display: flex; flex-direction: column; gap: 8px; }
+
+.conta {
+  border: 1px solid var(--borda);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--painel-alto);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
+.conta.precisa-acao { border-color: rgba(240, 166, 60, 0.5); }
+.conta.inativa { opacity: 0.6; }
 
-.tabela tbody tr:hover { background: rgba(255, 255, 255, 0.02); }
-.tabela .num { text-align: right; font-family: var(--mono); }
-.tabela td select, .tabela td input { padding: 3px 6px; font-size: 11.5px; }
-.tabela .vazio td { color: var(--texto-fraco); text-align: center; padding: 22px; }
+.conta-cabeca { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.conta-cabeca .email-conta { font-family: var(--mono); font-size: 12.5px; }
+.conta-cabeca .saldo { font-family: var(--mono); font-size: 15px; font-weight: 600; margin-left: auto; }
+.conta-cabeca .saldo.zerado { color: var(--texto-fraco); }
+.duvida { color: var(--alerta); font-size: 12px; }
+.falhas { color: var(--erro); font-size: 11px; }
 
-tr.precisa-acao { background: var(--alerta-fraco); }
-tr.inativa { opacity: 0.5; }
+.conta-linha { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.conta-linha select { width: auto; }
+.conta-linha .campo-proxy { flex: 1 1 130px; min-width: 110px; }
 
-.email-conta { font-family: var(--mono); font-size: 12.5px; }
-
-.saldo { font-family: var(--mono); font-size: 16px; font-weight: 600; }
-.saldo.zerado { color: var(--texto-fraco); }
-.saldo .duvida { color: var(--alerta); font-size: 12px; }
-
-.pilula {
-  display: inline-block;
-  border-radius: 3px;
-  padding: 2px 7px;
-  font-size: 10.5px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  border: 1px solid transparent;
-}
-.pilula.viva { color: var(--primaria); border-color: rgba(15, 214, 140, 0.4); background: var(--primaria-fraca); }
-.pilula.expirada { color: var(--alerta); border-color: rgba(240, 166, 60, 0.5); background: var(--alerta-fraco); }
-.pilula.bloqueada { color: var(--erro); border-color: rgba(255, 92, 92, 0.5); background: var(--erro-fraco); }
-.pilula.pendente { color: var(--texto-fraco); border-color: var(--borda-forte); }
-.pilula.rodando { color: var(--azul); border-color: rgba(90, 169, 255, 0.5); background: rgba(90, 169, 255, 0.12); }
-.pilula.pronto { color: var(--primaria); border-color: rgba(15, 214, 140, 0.4); background: var(--primaria-fraca); }
-.pilula.falhou { color: var(--erro); border-color: rgba(255, 92, 92, 0.5); background: var(--erro-fraco); }
-.pilula.cancelado { color: var(--texto-fraco); border-color: var(--borda-forte); }
-
-.falhas { color: var(--erro); font-size: 11px; margin-left: 6px; }
-.leve { color: var(--texto-fraco); font-size: 11.5px; }
-.mono-peq { font-family: var(--mono); font-size: 11.5px; }
-
-.corta {
-  display: inline-block;
-  max-width: 34ch;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  vertical-align: bottom;
-}
-
-.acoes { display: flex; gap: 6px; flex-wrap: wrap; }
-
-.linha-proxy { display: flex; gap: 6px; align-items: center; }
-.linha-proxy input { min-width: 110px; max-width: 150px; }
-
-/* O valor atual e TEXTO, nao campo: ele chega mascarado da API, e um input preenchido
-   com ele devolveria `***` no lugar da senha ao primeiro Salvar. */
+/* O valor atual do proxy e TEXTO, nao campo: ele chega MASCARADO da API, e um input
+   preenchido com o valor mascarado devolveria `***` no lugar da senha ao primeiro
+   Salvar — e `***` forma uma URL valida, entao ninguem seria avisado. */
 .proxy-atual {
-  display: inline-block;
-  max-width: 26ch;
+  color: var(--texto-fraco);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  max-width: 100%;
 }
 
-/* Interruptor de ativa/inativa. */
-.interruptor { display: inline-flex; align-items: center; cursor: pointer; }
+.interruptor { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; font-size: 11.5px; color: var(--texto-fraco); }
 .interruptor input { position: absolute; opacity: 0; width: 0; height: 0; }
 .interruptor .trilho {
   width: 32px; height: 17px;
+  border-radius: 999px;
   background: var(--borda-forte);
-  border-radius: 9px;
   position: relative;
   transition: background 0.15s;
 }
@@ -414,86 +727,38 @@ tr.inativa { opacity: 0.5; }
 .interruptor input:checked + .trilho { background: rgba(15, 214, 140, 0.35); }
 .interruptor input:checked + .trilho::after { transform: translateX(15px); background: var(--primaria); }
 
+.andamento {
+  background: var(--painel-alto);
+  border: 1px solid rgba(90, 169, 255, 0.4);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+.andamento-cabeca { display: flex; align-items: center; gap: 10px; }
+.andamento-cabeca strong { font-family: var(--titulo); font-size: 13px; color: var(--primaria); }
+.andamento .girando { border-top-color: var(--primaria); }
+.passos { margin: 8px 0 0; padding-left: 20px; }
+.passos li { margin: 3px 0; }
+.andamento-rodape { color: var(--texto-fraco); font-size: 11px; margin: 10px 0 0; }
+
 /* ---------- seletor de imagens ---------- */
 
-/* O campo de texto continua sendo o dono do valor; o botao so abre o navegador de
-   imagens, e a tira abaixo e o REFLEXO do que esta escrito no campo. Uma fonte de
-   verdade so: quem digita ve a miniatura aparecer, e quem tira a miniatura ve o texto
-   sumir. */
-.linha-arquivo { display: flex; gap: 6px; align-items: flex-start; }
-.linha-arquivo input, .linha-arquivo textarea { min-width: 0; }
-.linha-arquivo button { flex: none; margin-top: 1px; }
-
-.tiras { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
-.tiras:empty { display: none; }
-
-.tira {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  background: var(--fundo);
-  border: 1px solid var(--borda-forte);
-  border-radius: 4px;
-  padding: 3px 4px 3px 3px;
-  max-width: 240px;
-}
-.tira img {
-  width: 34px; height: 34px;
-  object-fit: cover;
-  border-radius: 3px;
-  background: var(--painel-alto);
-  flex: none;
-}
-.tira .tira-nome {
-  font-family: var(--mono);
-  font-size: 11px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.tira .tira-x {
-  flex: none;
-  padding: 0 5px;
-  line-height: 1.4;
-  font-size: 13px;
-  border-color: transparent;
-  background: transparent;
-  color: var(--texto-fraco);
-}
-.tira .tira-x:hover:not(:disabled) { color: var(--erro); border-color: var(--erro); }
-
-/* ---------- modal ---------- */
-
-.modal-fundo {
-  position: fixed;
-  inset: 0;
-  z-index: 50;
-  background: rgba(5, 8, 10, 0.7);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 24px;
-}
-
 .modal {
+  width: min(980px, 100%);
+  max-height: 84vh;
   background: var(--painel);
   border: 1px solid var(--borda-forte);
-  border-radius: 8px;
-  width: min(980px, 100%);
-  max-height: 100%;
+  border-radius: 12px;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
 }
 
 .modal-topo {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
-  padding: 11px 14px;
-  background: var(--painel-alto);
+  padding: 12px 14px;
   border-bottom: 1px solid var(--borda);
 }
 .modal-titulo strong { font-family: var(--titulo); font-size: 14px; font-weight: 500; }
@@ -503,64 +768,69 @@ tr.inativa { opacity: 0.5; }
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 9px 14px;
+  padding: 8px 14px;
   border-bottom: 1px solid var(--borda);
-  flex-wrap: wrap;
 }
 
 .modal-corpo { overflow-y: auto; padding: 12px 14px 16px; }
 .modal .aviso { margin: 0 14px 14px; }
 
 .grade-pastas { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
-
-.item-pasta {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-family: var(--mono);
-  font-size: 11.5px;
-}
+.item-pasta { display: inline-flex; align-items: center; gap: 5px; }
 .item-pasta::before { content: "▸"; color: var(--texto-fraco); }
 
-/* A miniatura nao e enfeite: a pessoa escolhe a referencia OLHANDO a imagem, nao
-   lembrando o nome do arquivo. Por isso a grade e de imagem, com o nome embaixo. */
+/* A miniatura nao e enfeite: a pessoa escolhe a referencia OLHANDO a imagem. */
 .grade-imagens {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(124px, 1fr));
-  gap: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 8px;
 }
 
 .item-imagem {
-  padding: 0;
-  background: var(--fundo);
-  border: 1px solid var(--borda);
-  border-radius: 5px;
-  overflow: hidden;
-  text-align: left;
   display: flex;
   flex-direction: column;
-}
-.item-imagem img {
-  width: 100%;
-  aspect-ratio: 1 / 1;
-  object-fit: cover;
   background: var(--painel-alto);
-  display: block;
+  border: 1px solid var(--borda);
+  border-radius: 7px;
+  overflow: hidden;
+  cursor: pointer;
+  color: var(--texto-fraco);
+  padding: 0;
 }
+.item-imagem img { width: 100%; aspect-ratio: 1; object-fit: cover; background: #05080A; display: block; }
 .item-imagem .nome {
   font-family: var(--mono);
   font-size: 10.5px;
-  padding: 5px 6px;
+  padding: 5px 6px 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--texto-fraco);
 }
-.item-imagem .tamanho { font-size: 10px; color: var(--texto-fraco); padding: 0 6px 5px; }
+.item-imagem .tamanho { font-size: 10px; padding: 0 6px 5px; }
 .item-imagem:hover:not(:disabled) { border-color: var(--primaria); color: var(--texto); }
-
 .item-imagem.escolhida { border-color: var(--primaria); box-shadow: 0 0 0 1px var(--primaria); }
 .item-imagem.escolhida .nome { color: var(--primaria); }
 .item-imagem.escolhida .nome::before { content: "✓ "; }
 
 .modal-vazio { color: var(--texto-fraco); padding: 26px 0; text-align: center; }
+
+/* ---------- tela estreita ---------- */
+
+@media (max-width: 900px) {
+  .visor { flex-direction: column; height: 100%; }
+  .visor-palco { flex: 1 1 45%; min-height: 0; }
+  .visor-lado { width: 100%; border-left: none; border-top: 1px solid var(--borda); }
+}
+
+@media (max-width: 720px) {
+  :root { --altura-barra: 150px; }
+  .faixa { height: auto; flex-wrap: wrap; gap: 8px 12px; padding: 8px 12px; }
+  .expiradas { order: 3; width: 100%; }
+  .faixa-fim { margin-left: auto; }
+  .estado-conexao { display: none; }
+  .galeria { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; padding: 10px 10px calc(var(--altura-barra) + 10px); }
+  .linha-caixa { flex-wrap: wrap; }
+  #job-prompt { flex: 1 1 100%; order: -1; }
+  .chip.produto { max-width: none; flex: 1 1 auto; }
+  .popover { width: calc(100vw - 24px); }
+}
