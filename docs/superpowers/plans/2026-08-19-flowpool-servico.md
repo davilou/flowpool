@@ -25,8 +25,12 @@
 | `flowpool/transporte/base.py` | `FlowTransport` (Protocol), `Pedido`, `Estado`, exceções |
 | `flowpool/transporte/falso.py` | transporte em memória que simula latência, saldo e falhas |
 | `flowpool/transporte/pw/seletores.py` | **todos** os seletores da UI do Flow, em um lugar só |
-| `flowpool/transporte/pw/sessao.py` | abrir Chrome com perfil da conta, cadastro, revalidação |
+| `flowpool/transporte/pw/dom.py` | varredura de DOM sem `<script>` e mascaramento de token. Todo caminho de leitura passa por aqui. |
+| `flowpool/transporte/pw/mapear.py` | sonda manual, para descobrir seletor novo |
+| `flowpool/transporte/pw/conferir.py` | checa que cada seletor ainda casa. Primeira coisa a rodar quando o Google mexer no layout. |
+| `flowpool/transporte/pw/sessao.py` | cadastro por `chrome.exe` comum, validação por Playwright, perfil da conta |
 | `flowpool/transporte/pw/transporte.py` | implementação real do `FlowTransport` |
+| `flowpool/transporte/pw/fumaca.py` | fumaça contra o Flow real, pelo transporte de verdade |
 | `flowpool/motor/orquestrador.py` | workers, retry, troca de conta, transições de job |
 | `flowpool/api/esquemas.py` | modelos Pydantic de entrada/saída |
 | `flowpool/api/app.py` | rotas FastAPI |
@@ -460,6 +464,10 @@ git commit -m "feat: tipos do dominio do flowpool"
 
 O custo depende do par (modelo, tier): conta Ultra paga menos por Lite e Fast. O teto diário do free é o que impede Quality de rodar em conta grátis.
 
+> **Nota de revisão (2026-08-20).** Este task já foi executado com os números **estimados**. A medição ao vivo desempatou duas linhas: **imagem custa 0** (saldo 50 → 50, e o Flow nem pede confirmação) e **Omni Flash custa 12** em conta grátis a 720p/8s/9:16/x1 (saldo 50 → 38). A tabela abaixo já está corrigida; a correção do código e dos valores esperados em `tests/test_custos.py` acontece no **Step 6 da Task 11**, junto da medição que a justifica. A **contagem de casos de teste não muda** — só os valores.
+>
+> Uma limitação que a medição expôs e que esta tabela **não** modela: o custo de vídeo depende da **configuração** (duração, proporção), não só do modelo — pelo agente conversacional, a mesma família de pedido anunciou 7 e 15 créditos em ajustes diferentes. Modelar isso exigiria `duracao` no domínio, o que é um task próprio. Enquanto não for, a tabela continua sendo o que sempre foi: uma **reserva** anterior ao despacho, corrigida pela reconciliação.
+
 `custo_de` recusa par desconhecido com `ModeloSemCusto` em vez de deixar vazar um `KeyError`. Motivo: `custo_de` roda dentro de `apta()`, que roda para CADA conta dentro de `escolher()` — um `KeyError` cru não derruba um job, derruba a avaliação do pool inteiro e trava a fila. E o spec já promete acomodar um modelo novo (Gemini Omni) sem migração, então o dia em que alguém acrescenta um modelo e esquece o custo vai chegar. `ModeloSemCusto` vem de `flowpool/nucleo/erros.py`, criado no Step 0 da Task 1.
 
 - [ ] **Step 1: Escrever o teste que falha**
@@ -489,8 +497,9 @@ def test_teto_diario_do_free():
         (Modelo.VEO_QUALITY, Tier.FREE, 100),
         (Modelo.VEO_QUALITY, Tier.PRO, 100),
         (Modelo.VEO_QUALITY, Tier.ULTRA, 100),
-        (Modelo.NANO_BANANA, Tier.FREE, 2),
-        (Modelo.NANO_BANANA, Tier.ULTRA, 2),
+        # MEDIDO: imagem sai de graca (saldo 50 -> 50)
+        (Modelo.NANO_BANANA, Tier.FREE, 0),
+        (Modelo.NANO_BANANA, Tier.ULTRA, 0),
     ],
 )
 def test_custo_por_modelo_e_tier(modelo, tier, esperado):
@@ -516,14 +525,18 @@ def test_o_resto_cabe_em_conta_gratis(modelo):
     assert cabe_no_free(modelo) is True
 
 
-@pytest.mark.parametrize("tier,esperado", [(Tier.FREE, 20), (Tier.PRO, 20), (Tier.ULTRA, 10)])
+@pytest.mark.parametrize("tier,esperado", [(Tier.FREE, 12), (Tier.PRO, 12), (Tier.ULTRA, 6)])
 def test_omni_flash_tem_custo_nos_tres_tiers(tier, esperado):
-    # estimativa na faixa do Veo Fast; o numero real sai da reconciliacao
+    # FREE e PRO sao MEDIDOS (50 -> 38 em 720p/8s/9:16/x1); ULTRA e extrapolado da
+    # razao de Lite e Fast. O numero verdadeiro de cada configuracao sai da
+    # reconciliacao — esta tabela e reserva, nao preco de tabela.
     assert custo_de(Modelo.OMNI_FLASH, tier) == esperado
 
 
 def test_quatro_imagens_ainda_cabem_no_teto_do_free():
-    # 4 x 2 = 8 contra teto de 50 — cabe, mas o calculo tem que ser explicito
+    # 4 x 0 = 0 contra teto de 50. O caso continua valendo justamente porque a
+    # multiplicacao tem que ser explicita: se o custo da imagem deixar de ser zero,
+    # e este teste que precisa mudar junto — nao o comportamento em producao.
     assert cabe_no_free(Modelo.NANO_BANANA, quantidade=4) is True
 
 
@@ -544,10 +557,13 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'flowpool.nucleo.custos
 ```python
 """Custo em creditos por (modelo, tier), e o teto diario da conta gratuita.
 
-Os numeros vem do suporte do Flow e de medicao publica (ver o spec). O custo da
-imagem e o mais incerto: ha fonte dizendo que sai de graca. Por isso o valor aqui e
-so uma ESTIMATIVA para reservar saldo antes de despachar — quem manda e a leitura
-real, reconciliada em `nucleo/credito.py`.
+Duas linhas sao MEDIDAS (2026-08-20, conta gratuita, ao vivo no Flow); o resto e
+ESTIMATIVA vinda do suporte do Flow e de medicao publica. Cada entrada diz qual e.
+
+Mesmo as medidas continuam sendo so uma RESERVA anterior ao despacho: o custo de
+video depende da configuracao (duracao, proporcao), nao so do modelo — pelo agente
+conversacional, a mesma familia de pedido anunciou 7 e 15 creditos em ajustes
+diferentes. Quem manda e a leitura real, reconciliada em `nucleo/credito.py`.
 """
 
 from __future__ import annotations
@@ -558,13 +574,11 @@ from flowpool.nucleo.tipos import Modelo, Tier
 TETO_DIARIO_FREE = 50
 
 _CUSTO: dict[tuple[Modelo, Tier], int] = {
-    # ESTIMATIVA, a confirmar pela reconciliacao: o Omni Flash e o padrao de video do
-    # Flow e ninguem mediu o custo dele ainda. Usa a faixa do Veo Fast enquanto isso —
-    # errar por alto so reserva credito a mais, e o valor lido corrige na primeira
-    # execucao real.
-    (Modelo.OMNI_FLASH, Tier.FREE): 20,
-    (Modelo.OMNI_FLASH, Tier.PRO): 20,
-    (Modelo.OMNI_FLASH, Tier.ULTRA): 10,
+    # MEDIDO 2026-08-20, conta FREE, 720p / 8s / 9:16 / x1: saldo 50 -> 38.
+    (Modelo.OMNI_FLASH, Tier.FREE): 12,
+    (Modelo.OMNI_FLASH, Tier.PRO): 12,
+    (Modelo.OMNI_FLASH, Tier.ULTRA): 6,   # EXTRAPOLADO: Ultra paga metade em Lite/Fast
+    # ESTIMATIVA — nenhum Veo foi medido ainda.
     (Modelo.VEO_LITE, Tier.FREE): 10,
     (Modelo.VEO_LITE, Tier.PRO): 10,
     (Modelo.VEO_LITE, Tier.ULTRA): 5,
@@ -574,9 +588,12 @@ _CUSTO: dict[tuple[Modelo, Tier], int] = {
     (Modelo.VEO_QUALITY, Tier.FREE): 100,
     (Modelo.VEO_QUALITY, Tier.PRO): 100,
     (Modelo.VEO_QUALITY, Tier.ULTRA): 100,
-    (Modelo.NANO_BANANA, Tier.FREE): 2,
-    (Modelo.NANO_BANANA, Tier.PRO): 2,
-    (Modelo.NANO_BANANA, Tier.ULTRA): 2,
+    # MEDIDO 2026-08-20: imagem custa ZERO. Saldo 50 antes e 50 depois, e o Flow nem
+    # pede confirmacao. Desempata a divergencia que o spec carregava (1-2 vs zero).
+    # Consequencia de dominio: job de imagem deixa de discriminar conta por saldo.
+    (Modelo.NANO_BANANA, Tier.FREE): 0,
+    (Modelo.NANO_BANANA, Tier.PRO): 0,
+    (Modelo.NANO_BANANA, Tier.ULTRA): 0,
 }
 
 
@@ -3828,50 +3845,322 @@ git commit -m "feat: api http de jobs e contas"
 
 ---
 
-### Task 9: Mapear os seletores do Flow
+### Task 9: Completar e validar o mapa de seletores
 
 **Files:**
-- Create: `flowpool/transporte/pw/seletores.py`, `flowpool/transporte/pw/mapear.py`
+- Modify: `flowpool/transporte/pw/seletores.py`, `flowpool/transporte/pw/mapear.py`, `flowpool/transporte/pw/dom.py` (existe, ainda não commitado)
+- Create: `flowpool/transporte/pw/conferir.py`
 
-Este task é **manual e assistido** — não tem teste automatizado porque depende do site do Google. O produto dele é um arquivo de seletores preenchido com valores reais. Todos os seletores moram aqui e em nenhum outro lugar: quando o Google mexer no layout, só este arquivo muda.
+**Este task não cria o mapa do zero — ele já existe.** O mapeamento ao vivo aconteceu em 2026-08-20, numa conta gratuita, locale pt, e o resultado está em `flowpool/transporte/pw/seletores.py`. O que falta é: (a) trazer para o arquivo o **chip de configuração**, que foi descoberto depois e hoje mora solto em `fumaca.py`; (b) medir os seis itens que ainda estão em aberto; (c) escrever o script que **confere** se cada seletor ainda casa — é a primeira coisa a rodar no dia em que o Google mexer no layout, e sem ele o sintoma de um deploy do Google é um job que falha três vezes sem dizer o porquê.
 
-Observação de campo (20/08): a app vive em `labs.google/fx/pt/tools/flow/project/[id]` — o `[id]` é o **projeto**, e toda geração acontece dentro de um. Por isso o mapeamento também precisa cobrir a tela de projetos: lista, botão de novo projeto e campo de nome. Sem esses três, o transporte real não consegue cumprir o `listar_projetos`/`criar_projeto`/`abrir_projeto` que o motor já chama (Tasks 6 e 7), e cada geração abriria um projeto novo.
+As seis regras do cabeçalho de `seletores.py` continuam valendo e são a referência viva. Duas ganharam consequência prática desde então e viram código neste task:
 
-Seis regras aprendidas na primeira passada de mapeamento (20/08), e que valem para qualquer sessão futura deste task — o cabeçalho de `flowpool/transporte/pw/seletores.py` é a referência viva delas:
+- **Regra 2 (não varrer `<script>`) virou módulo.** O `__NEXT_DATA__` carrega o access_token OAuth em texto puro. Isso vazou **duas vezes** no mapeamento — a segunda depois de a regra já estar escrita num comentário. Comentário não basta: o filtro precisa ser código que todo caminho de leitura importa. É o `dom.py`.
+- **Regra 1 (nada de classe) ganhou uma irmã:** casar sempre pela **ligadura do ícone** (`videocam`, `crop_free`, `add_2`), nunca pelo rótulo acentuado. "Vídeo" impresso num console cp1252 vira "V?deo", e um seletor montado a partir daí nunca casa — o erro aparece como "botão não existe" e manda a pessoa procurar no lugar errado.
 
-1. **Nada de seletor por classe.** Classes são styled-components com hash (`button.sc-e8425ea6-0.hOBPaw`) e mudam a cada deploy do Google. O texto vem de um dicionário i18n versionado — é por ele que se navega.
-2. **Nunca varrer `<script>`, `<style>` ou `<noscript>`.** O `__NEXT_DATA__` carrega o access_token OAuth em texto puro, mais nome e e-mail do usuário. Uma varredura de DOM que não exclui essas tags vaza o token — já aconteceu, para disco, nesta primeira passada.
-3. **Nunca `page.goto` direto para dentro de um projeto.** Derruba a app com "Application error: a client-side exception has occurred". Entra-se pela lista e **clica-se no card**.
-4. **A janela precisa estar visível de verdade**, não só não-headless: minimizada ou fora de tela deixa `document.visibilityState == 'hidden'`, e o `IntersectionObserver` que libera o onboarding e renderiza a lista de projetos não dispara.
-5. **Login não acontece sob Playwright.** O Google recusa com "esse navegador ou app pode não ser seguro" qualquer Chrome dirigido por CDP. O login manual acontece num `chrome.exe` comum, fora do Playwright — ver Task 10.
-6. **A URL tem locale.** `labs.google/fx/pt/tools/flow` — fixar `pt` evita que o Google escolha o idioma por conta e derrube os seletores por texto (regra 1).
+#### O que já está medido e não se mexe
 
-- [ ] **Step 1: Instalar o Chromium do Playwright e confirmar o Chrome real**
+| grupo | estado |
+|---|---|
+| URLs, locale `pt`, padrão do projeto | medido |
+| lista de projetos, card, "Novo projeto" | medido |
+| onboarding (duas telas de boas-vindas) | medido |
+| campo de prompt, enviar, anexar | medido |
+| menu do avatar e regex de créditos | medido |
+| menu do projeto (Renomear / Lixeira / Excluir) | medido |
+| menu do card (imagem e vídeo) e submenu de download | medido |
+| banner de alta demanda | medido |
+| confirmação do agente e o custo no texto | medido |
 
-```bash
-.venv/Scripts/playwright install-deps
-```
+#### A descoberta que reorganiza o arquivo: o chip
 
-O Chrome de verdade já está instalado na máquina (é o navegador do Davi). Confirme o caminho:
+O painel de geração **não** é o `tune Configurações`. `tune` é onde mora a política de confirmação do agente ("Sempre"/"Nunca") — e ele de fato só aparece depois do primeiro prompt. A configuração da geração está num **chip** na barra do prompt, que mostra o estado atual em texto (`Vídeo · 720p · 8s crop_9_16 x1`) e, ao ser clicado, abre um painel com **tudo**: modo, proporção, duração, quantidade e o dropdown de modelo.
 
-```bash
-ls "/c/Program Files/Google/Chrome/Application/chrome.exe"
-```
+Isso desfaz três suposições das versões anteriores deste plano:
 
-Expected: o arquivo existe. Se não existir, procure em `/c/Program Files (x86)/Google/Chrome/Application/`.
+1. **Não existem "dois dropdowns de modelo", um de imagem e um de vídeo.** Existe **um** dropdown, e a lista dentro dele muda conforme o modo selecionado: em vídeo lista Omni Flash / Veo 3.1 Lite / Fast / Quality; em imagem lista Nano Banana Pro / 2 / 2 Lite.
+2. **A armadilha de ordem do `tune` some do caminho da geração.** O chip existe desde o primeiro instante do projeto. A sequência "enviar prompt → esperar o agente → abrir tune" era uma volta desnecessária e frágil.
+3. **A confirmação do agente deixa de ser obstáculo.** Configurando pelo chip, o Flow **não pergunta nada**: debita e gera. O radio "Sempre"/"Nunca" só governa o agente conversacional, que o transporte não usa. Ver o trade-off na Task 11.
 
-- [ ] **Step 2: Escrever o script de mapeamento**
+Os quatro modos do spec são os quatro do chip, e cada um tem uma ligadura própria: `image Imagem`, `videocam Vídeo`, `crop_free Frames`, `chrome_extension Elementos`.
 
-**O login não acontece dentro deste script.** Um Chrome dirigido pelo Playwright — mesmo `channel="chrome"`, mesmo sem nenhuma flag suspeita — é dirigido por CDP, e é o CDP que o Google detecta e recusa no login ("esse navegador ou app pode não ser seguro"). Esse script só **inspeciona** uma sessão que já está logada. A sequência é sempre: login manual num Chrome comum primeiro (Step 3), inspeção com este script depois (Step 4).
+- [ ] **Step 1: Criar o módulo de leitura segura de DOM**
 
-`flowpool/transporte/pw/mapear.py`:
+`flowpool/transporte/pw/dom.py`:
 
 ```python
-"""Abre o Flow com Chrome real, num perfil JA LOGADO, para inspecao com o Playwright
-Inspector. Nao faz login: o Playwright e recusado no fluxo de login (ver Step 3).
+"""Leitura segura do DOM do Flow.
+
+Existe por um motivo concreto: o `__NEXT_DATA__` da pagina carrega o access_token
+OAuth em texto puro, junto com nome e e-mail. Uma varredura ingenua
+(`[...document.querySelectorAll('*')].filter(e => !e.children.length)`) INCLUI
+`<script>`, porque script nao tem filhos *elemento* — e o token vaza para o log.
+
+Isso ja aconteceu duas vezes durante o mapeamento. A segunda foi depois de a regra
+estar escrita num comentario, o que prova que comentario nao basta: o filtro precisa
+ser codigo compartilhado que todo caminho de leitura usa.
+
+Use `TEXTOS_VISIVEIS` em vez de escrever a varredura a mao.
+"""
+
+from __future__ import annotations
+
+import re
+import unicodedata
+
+# Devolve o texto de todos os nos-folha visiveis, ja sem script/style/noscript.
+TEXTOS_VISIVEIS = r"""
+() => {
+  const PROIBIDO = new Set(['SCRIPT','STYLE','NOSCRIPT','TEMPLATE','IFRAME']);
+  return [...document.querySelectorAll('body *')]
+    .filter(e => !e.children.length && !PROIBIDO.has(e.tagName))
+    .map(e => (e.innerText || '').trim())
+    .filter(Boolean);
+}
+"""
+
+# Mesma varredura, mas ja aplicando um limite de tamanho — texto legitimo de interface
+# e curto. Um "texto" de 3 KB e quase sempre payload que escapou do filtro.
+TEXTOS_CURTOS = r"""
+(limite) => {
+  const PROIBIDO = new Set(['SCRIPT','STYLE','NOSCRIPT','TEMPLATE','IFRAME']);
+  return [...document.querySelectorAll('body *')]
+    .filter(e => !e.children.length && !PROIBIDO.has(e.tagName))
+    .map(e => (e.innerText || '').trim())
+    .filter(t => t && t.length <= limite);
+}
+"""
+
+
+def sem_segredo(texto: str) -> str:
+    """Ultima linha de defesa antes de qualquer log ou arquivo.
+
+    Mesmo com o filtro de tags, um texto pode carregar token por outro caminho
+    (atributo, JSON embutido num data-*). Mascarar e barato; vazar nao.
+    """
+    texto = re.sub(r"ya29\.[A-Za-z0-9_\-]+", "ya29.<MASCARADO>", texto)
+    texto = re.sub(r'"access_token"\s*:\s*"[^"]+"', '"access_token":"<MASCARADO>"', texto)
+    return texto
+
+
+def sem_acento(texto: str) -> str:
+    """Minusculas e sem acento, para comparar e para IMPRIMIR.
+
+    O texto do chip vem acentuado ("Video" com acento). Comparar acentuado em Python
+    funciona — o arquivo e UTF-8 —, mas IMPRIMIR acentuado num console cp1252 troca a
+    letra por '?', e a pessoa que le o log monta o seletor a partir do texto trocado.
+    Normalizar dos dois lados elimina a classe inteira de erro.
+    """
+    plano = unicodedata.normalize("NFKD", texto)
+    return "".join(c for c in plano if not unicodedata.combining(c)).lower()
+
+
+def seguro(texto: str) -> str:
+    """O que se imprime: sem segredo e sem acento, nessa ordem."""
+    return sem_acento(sem_segredo(texto))
+```
+
+- [ ] **Step 2: Fazer o `mapear.py` passar tudo pelo filtro antes de gravar**
+
+`mapear.py` grava `sonda.json` **em disco**. Hoje ele só varre `button`, `a`, `input` e `[contenteditable]`, então não pega `<script>` — mas grava `aria-label` e `innerText` crus, e foi exatamente uma gravação em disco que vazou token na primeira passada. Acrescente o import e troque a gravação:
+
+```python
+from flowpool.transporte.pw.dom import sem_segredo
+```
+
+```python
+            bruto = json.dumps(dados, ensure_ascii=False, indent=2)
+            # regra 2, aplicada onde dói: sonda.json vai para disco e sobrevive a
+            # sessao. Mascarar aqui e o que impede o vazamento de virar arquivo.
+            saida.write_text(sem_segredo(bruto), encoding="utf-8")
+```
+
+- [ ] **Step 3: Trazer o chip para dentro de `seletores.py`**
+
+Hoje o chip está espalhado em literais dentro de `fumaca.py` (`ICONE_MODO`, `'button:has-text("crop_"), button:has-text("720p")'`, os `get_by_role` de duração e quantidade). Isso quebra a única regra estrutural do módulo: **seletor mora em `seletores.py`, sequência mora no transporte**. Um seletor duplicado em dois arquivos é um seletor que vai ser corrigido em um só no dia do deploy do Google.
+
+Substitua a seção `--- painel de configuracao da geracao ---` de `seletores.py` pelo bloco abaixo. Note as trocas de `:has-text` para `:text-is` — e o porquê, que é concreto:
+
+```python
+# --- chip de configuracao da geracao (A PECA CENTRAL) -------------------
+# Na barra do prompt ha um botao que MOSTRA o estado atual em texto:
+#     "Video · 720p · 8s crop_9_16 x1"
+# Clicar nele abre um painel com modo, proporcao, duracao, quantidade e o dropdown de
+# modelo. E por aqui que a geracao se configura — NAO pelo `tune Configuracoes`, que
+# so guarda a politica de confirmacao do agente conversacional.
+#
+# O chip serve tambem de VERIFICACAO: depois de configurar, le-se o texto dele e
+# confere-se que bate com o pedido. Ver a regra dura na Task 11.
+CHIP_CONFIG = 'button:has-text("crop_")'
+
+# O `720p` do chip NAO e configuravel: nao ha grupo de resolucao no painel. Sai
+# derivado do modelo. Vale registrar no evento, nao tentar mudar.
+
+# Container do painel aberto. TUDO que se clica no painel e escopado por ele: sem
+# escopo, `crop_9_16` casa tambem o proprio CHIP_CONFIG (o texto do chip contem a
+# ligadura), e o clique fecharia o painel em vez de escolher a proporcao.
+PAINEL_CHIP = '[role=dialog], [role=menu]'   # CONFIRMAR no Step 5
+
+# Modos: casar pela LIGADURA, nunca pelo rotulo. "Video" acentuado nao sobrevive a um
+# console cp1252, e um seletor montado a partir do texto trocado nunca casa.
+# As chaves sao os valores de `Modo` (nucleo/tipos.py) — este arquivo nao importa
+# dominio, so espelha os nomes.
+MODO_ICONE = {
+    "imagem": "image",
+    "t2v": "videocam",
+    "frames2v": "crop_free",            # primeiro e (opcional) ultimo frame
+    "ingredients2v": "chrome_extension",  # referencias de personagem/produto
+}
+BOTAO_MODO = {k: f'button:has-text("{lig}")' for k, lig in MODO_ICONE.items()}
+
+# O rotulo que o CHIP mostra para cada modo, ja normalizado (dom.sem_acento). E o que
+# a verificacao procura no texto do chip depois de configurar.
+ROTULO_MODO_NO_CHIP = {
+    "imagem": "imagem", "t2v": "video",
+    "frames2v": "frames", "ingredients2v": "elementos",
+}
+
+# Proporcao. `:text-is` e exato de proposito: `:has-text("crop_9_16")` casaria tambem
+# o proprio chip, cujo texto TERMINA em "crop_9_16 x1".
+PROPORCAO = {
+    "16:9": 'button:text-is("crop_16_9")',
+    "4:3": 'button:text-is("crop_landscape")',
+    "1:1": 'button:text-is("crop_square")',
+    "3:4": 'button:text-is("crop_portrait")',
+    "9:16": 'button:text-is("crop_9_16")',
+}
+# MEDIDO: em modo VIDEO o painel oferece so 9:16 e 16:9. Em modo IMAGEM, as cinco.
+PROPORCOES_POR_MODO = {
+    "imagem": ("16:9", "4:3", "1:1", "3:4", "9:16"),
+    "t2v": ("9:16", "16:9"),
+    "frames2v": ("9:16", "16:9"),
+    "ingredients2v": ("9:16", "16:9"),
+}
+
+# Duracao — so existe em modo video.
+DURACAO = {d: f'button:text-is("{d}")' for d in ("4s", "6s", "8s", "10s")}
+
+# Quantidade. `:text-is` pelo mesmo motivo da proporcao: o chip termina em "x1", entao
+# `:has-text("x1")` casaria o chip e o clique fecharia o painel.
+QUANTIDADE = {n: f'button:text-is("x{n}")' for n in (1, 2, 3, 4)}
+
+# UM dropdown de modelo, nao dois. A lista dentro dele muda conforme o modo escolhido.
+DROPDOWN_MODELO = 'button:has-text("arrow_drop_down")'
+
+# Rotulos exatos, medidos em 2026-08-20 numa conta gratuita.
+OPCAO_MODELO = {
+    # video
+    "omni-flash": '[role=menuitem]:text-is("Omni Flash")',
+    "veo-lite": '[role=menuitem]:text-is("Veo 3.1 - Lite")',
+    "veo-fast": '[role=menuitem]:text-is("Veo 3.1 - Fast")',
+    "veo-quality": '[role=menuitem]:text-is("Veo 3.1 - Quality")',
+    # imagem
+    "nano-banana-pro": '[role=menuitem]:text-is("Nano Banana Pro")',
+    "nano-banana-2": '[role=menuitem]:text-is("Nano Banana 2")',
+    "nano-banana": '[role=menuitem]:text-is("Nano Banana 2 Lite")',
+}
+# `:text-is` aqui nao e capricho: "Nano Banana 2" e prefixo de "Nano Banana 2 Lite", e
+# com `:has-text` pedir o 2 escolheria o Lite — mais barato, mais feio, sem erro.
+```
+
+E **apague** do arquivo o bloco `--- confirmacao do agente (ARMADILHA) ---` com `CONFIG_AGENTE`/`AGENTE_SEMPRE`/`AGENTE_NUNCA`, mais o `BOTAO_CONFIGURACOES` e o `BOTAO_SALVAR_CONFIG`. Eles descrevem um caminho que o transporte não vai percorrer, e seletor que ninguém usa é seletor que ninguém conserta — no dia do deploy do Google, o `conferir.py` acusaria falha em algo irrelevante e mandaria a pessoa investigar o lugar errado. O texto sobre o agente conversacional continua útil, mas como **nota de trade-off no spec**, não como seletor.
+
+Acrescente também, na seção de URLs, o host que falta para montar a chamada de sessão da Task 10:
+
+```python
+URL_BASE = "https://labs.google"    # URL_SESSAO e um caminho; a Task 10 concatena
+```
+
+- [ ] **Step 4: Registrar o que a grade e o download exigem**
+
+Substitua a seção `--- card de midia na grade ---` por:
+
+```python
+# --- card de midia na grade ---------------------------------------------
+# A grade e a fonte de verdade do estado, NAO a conversa: o agente so responde quando
+# perguntado; a grade atualiza sozinha.
+#
+# NAO contar elementos <video> soltos. Da falso positivo: o Flow usa <video> em outros
+# lugares da tela (previa, cabecalho de cena), e um contador de <video> declara
+# "pronto" antes de existir card nenhum. Conta-se CARD DA GRADE.
+CARD_GRADE = "..."          # MEDIR no Step 5 — o container clicavel de um item
+CARD_MIDIA = 'img[src*="media.getMedia"], img[src*="trpc"]'   # a miniatura dentro dele
+CARD_FALHA = 'text="Ops! Algo deu errado"'
+BOTAO_REPETIR_CARD = 'button:has-text("redo")'   # repete a geracao SEM cobrar de novo
+
+# Onde o card recem-nascido entra na grade. MEDIR no Step 5 — errar isso NAO da erro:
+# o app baixa um clipe antigo, grava o caminho no banco e marca o job como pronto.
+CARDS_NOVOS_PRIMEIRO = True   # CONFIRMAR
+
+# Menu do card: clique DIREITO. O <video> em si nao e clicavel (e miniatura); o alvo e
+# o centro do container, por coordenada da bounding box.
+MENU_CARD = '[role=menu]'
+MENU_ITEM = '[role=menuitem]'
+
+# Itens medidos. Imagem: favorite, redo, `motion_blur Animar`, add, `download Baixar`,
+# Renomear, share, photo_library, flag, `delete Mover para a lixeira`.
+# Video: os mesmos, mais `split_scene` e `smart_display`.
+MENU_ANIMAR = '[role=menuitem]:has-text("Animar")'      # imagem -> video (i2v)
+MENU_BAIXAR = '[role=menuitem]:has-text("Baixar")'
+MENU_LIXEIRA_CARD = '[role=menuitem]:has-text("Mover para a lixeira")'
+
+# "Baixar" abre SUBMENU de resolucao.
+#   imagem: "1K Tamanho original", "2K Aumentada", "4K" (exige plano pago)
+#   video:  "270p", "720p", "1080p", "4K"
+#
+# OS ROTULOS TEM QUEBRA DE LINHA: "270p\nGIF animado". Passar o rotulo inteiro para um
+# seletor CSS estoura o parser. Casar SO A PRIMEIRA LINHA.
+BAIXAR = {
+    "1k": '[role=menuitem]:has-text("Tamanho original")',
+    "2k": '[role=menuitem]:has-text("2K")',
+    "270p": '[role=menuitem]:has-text("270p")',
+    "720p": '[role=menuitem]:has-text("720p")',
+    "1080p": '[role=menuitem]:has-text("1080p")',
+}
+# 4K fica FORA do dicionario de proposito: exige plano pago, e um item que existe no
+# menu mas falha ao clicar e pior do que um item que nao existe no mapa.
+
+# REGRA DURA: NUNCA escolher item de menu por posicao. Um `.last` mandou um video do
+# usuario para a lixeira, porque o ultimo item do menu e "Mover para a lixeira".
+# Sempre por texto; e quando o texto casar com mais de um candidato, ERRO — nao
+# "pega o primeiro". A Task 11 tem o helper `_unico` que faz valer isso.
+
+# O Flow nomeia o arquivo pelo conteudo e escolhe a extensao sozinho:
+#   Red_ceramic_mug_on_table_202608201311.mp4   (video)
+#   Red_ceramic_mug_on_table_202608201158.jpeg  (imagem — JPEG, nao PNG)
+# Respeitar `download.suggested_filename` em vez de assumir extensao.
+```
+
+- [ ] **Step 5: Medir os sete itens em aberto**
+
+Suba o Chrome do perfil de mapeamento — **por `subprocess`, não pelo Playwright** (regra 5; o comando exato está na Task 10, Step 6) — ou rode `mapear.py` num perfil já logado, com a **janela visível de verdade** (regra 4). Depois meça, nesta ordem:
+
+1. **`PAINEL_CHIP`** — abra o chip e leia o `role` do container que aparece. É `dialog`, `menu`, ou nenhum dos dois? Anote o seletor real. **Bloqueia a Task 11**: sem escopo, todo clique no painel corre o risco de acertar o próprio chip.
+2. **`CARD_GRADE`** — o container clicável de um item da grade. Precisa ser o elemento que responde ao clique direito e que tem `bounding_box`. Confirme contando: com N gerações no projeto, `count()` tem que dar N — não N+2 por causa de `<video>` de prévia.
+3. **`AVISO_SEM_CREDITO`** — só aparece com a conta realmente em zero. É o último a medir, e a hora natural é o Step 5 da Task 14, que esvazia a conta de propósito. Até lá fica `"..."`, e o `conferir.py` o reporta como **pendente**, não como quebrado.
+4. **Ordem da grade** — o card novo entra no **início** ou no **fim**? Gere uma vez, conte, gere de novo e veja onde o novo apareceu. Grave em `CARDS_NOVOS_PRIMEIRO: bool`. Errar isso baixa o clipe errado, e o arquivo existe e parece certo — o pior modo de falha deste app.
+5. **Texto do chip em modo Imagem** — o âncora `button:has-text("crop_")` foi medido em modo vídeo. Confirme que em modo imagem o chip continua trazendo uma ligadura `crop_*`. Se não trouxer, o âncora precisa de um segundo termo.
+6. **Rótulo do modelo dentro do painel** — o chip **não** mostra o modelo. A verificação do modelo tem que acontecer com o painel ainda aberto, lendo o texto do próprio dropdown. Anote de onde esse texto sai (`innerText` do `DROPDOWN_MODELO`, ou um irmão dele).
+7. **`src` da miniatura carrega id estável?** Anote um `src` real de um card pronto. Se houver um id de mídia ali, ele vira o `id_remoto` do job e a retomada depois de restart passa a funcionar. Se não houver, a retomada fica limitada — ver a pendência declarada na Task 11.
+
+- [ ] **Step 6: Escrever o conferidor**
+
+`flowpool/transporte/pw/conferir.py`:
+
+```python
+"""Confere que cada seletor de `seletores.py` ainda casa com o Flow de hoje.
+
+E a PRIMEIRA coisa a rodar quando alguma coisa parar de funcionar. Sem ele, o sintoma
+de um deploy do Google e um job que falha tres vezes, troca de conta, falha de novo e
+morre com "TimeoutError" — que nao diz qual seletor morreu. Com ele, o diagnostico e
+uma linha.
+
+Nao gera nada e nao gasta credito: so navega, abre paineis e conta.
 
 Uso:
-    python -m flowpool.transporte.pw.mapear perfis/mapeamento
+    python -m flowpool.transporte.pw.conferir <perfil> [<uuid-do-projeto>]
+
+Sem o uuid, confere so a lista de projetos e o menu da conta.
 """
 
 from __future__ import annotations
@@ -3882,246 +4171,204 @@ from pathlib import Path
 
 from playwright.async_api import async_playwright
 
-FLOW = "https://labs.google/fx/pt/tools/flow"   # locale fixo: seletores sao por texto
+from flowpool.transporte.pw import dom
+from flowpool.transporte.pw import seletores as sel
+
+PENDENTE = "..."   # marcador dos seletores que a Step 5 ainda nao mediu
 
 
-async def main(perfil: str) -> None:
-    Path(perfil).mkdir(parents=True, exist_ok=True)
+class Placar:
+    def __init__(self) -> None:
+        self.ok = 0
+        self.faltando: list[str] = []
+        self.pendentes: list[str] = []
+
+    async def checar(self, escopo, contexto: str, nome: str, seletor: str,
+                     minimo: int = 1) -> None:
+        if not seletor or seletor == PENDENTE:
+            self.pendentes.append(f"{contexto}.{nome}")
+            print(f"[{contexto:9}] {nome:24} PENDENTE (nunca medido)")
+            return
+        try:
+            n = await escopo.locator(seletor).count()
+        except Exception as e:                       # seletor malformado
+            self.faltando.append(f"{contexto}.{nome}")
+            print(f"[{contexto:9}] {nome:24} INVALIDO ({type(e).__name__})")
+            return
+        if n >= minimo:
+            self.ok += 1
+            print(f"[{contexto:9}] {nome:24} OK ({n})")
+        else:
+            self.faltando.append(f"{contexto}.{nome}")
+            print(f"[{contexto:9}] {nome:24} FALTA")
+
+
+async def _candidatos(pagina) -> None:
+    """Imprime o texto curto e visivel da tela, para achar o rotulo que mudou.
+
+    Passa por `dom.seguro`: sem segredo (regra 2) e sem acento (console cp1252).
+    """
+    textos = await pagina.evaluate(dom.TEXTOS_CURTOS, 40)
+    vistos = sorted({dom.seguro(t) for t in textos})
+    print("\ncandidatos visiveis na tela:")
+    for t in vistos:
+        print("   ", t)
+
+
+async def main(perfil: str, uuid: str | None = None) -> int:
+    p = Placar()
     async with async_playwright() as pw:
         ctx = await pw.chromium.launch_persistent_context(
-            user_data_dir=perfil,
-            channel="chrome",      # o Chromium empacotado e recusado pelo auth do Google
-            headless=False,
-            args=["--start-maximized"],
-            no_viewport=True,
-        )
+            user_data_dir=str(Path(perfil).resolve()), channel="chrome",
+            headless=False, no_viewport=True, args=["--start-maximized"])
         pagina = ctx.pages[0] if ctx.pages else await ctx.new_page()
-        await pagina.goto(FLOW)
-        print("Se isto cair na tela de login, feche e faca o login pelo Step 3 antes.")
-        print("Ja logado: use o inspector para pegar seletores (por texto, nao classe).")
-        print("Para inspecionar: rode com PWDEBUG=1 para abrir o Inspector.")
-        await pagina.pause()   # abre o Playwright Inspector
+        await pagina.goto(sel.URL_FLOW, wait_until="domcontentloaded")
+        await pagina.wait_for_selector(sel.CARD_PROJETO, timeout=30_000)
+
+        await p.checar(pagina, "lista", "CARD_PROJETO", sel.CARD_PROJETO)
+        await p.checar(pagina, "lista", "BOTAO_NOVO_PROJETO", sel.BOTAO_NOVO_PROJETO)
+        await p.checar(pagina, "lista", "AVATAR_CONTA", sel.AVATAR_CONTA)
+
+        # saldo: abre e fecha o menu do avatar. Dois cliques por leitura — e por isso
+        # que o transporte le saldo uma vez por job, e nao a cada polling.
+        await pagina.locator(sel.AVATAR_CONTA).first.click()
+        await pagina.wait_for_timeout(1500)
+        textos = await pagina.evaluate(dom.TEXTOS_CURTOS, 60)
+        import re
+        achou = any(re.search(sel.PADRAO_CREDITOS, t) for t in textos)
+        print(f"[{'conta':9}] {'PADRAO_CREDITOS':24} {'OK' if achou else 'FALTA'}")
+        if achou:
+            p.ok += 1
+        else:
+            p.faltando.append("conta.PADRAO_CREDITOS")
+        await pagina.keyboard.press("Escape")
+
+        if uuid:
+            # regra 3: entra-se CLICANDO no card, nunca por goto direto
+            await pagina.locator(f'a[href*="{uuid}"]').first.click()
+            await pagina.wait_for_timeout(8000)
+
+            await p.checar(pagina, "projeto", "CAMPO_PROMPT", sel.CAMPO_PROMPT)
+            await p.checar(pagina, "projeto", "BOTAO_ENVIAR", sel.BOTAO_ENVIAR)
+            await p.checar(pagina, "projeto", "BOTAO_ANEXAR", sel.BOTAO_ANEXAR)
+            await p.checar(pagina, "projeto", "BOTAO_MAIS_OPCOES", sel.BOTAO_MAIS_OPCOES)
+            await p.checar(pagina, "projeto", "CHIP_CONFIG", sel.CHIP_CONFIG)
+            await p.checar(pagina, "projeto", "CARD_GRADE", sel.CARD_GRADE, minimo=0)
+
+            await pagina.locator(sel.CHIP_CONFIG).first.click()
+            await pagina.wait_for_timeout(2000)
+            painel = pagina.locator(sel.PAINEL_CHIP).first
+            await p.checar(pagina, "chip", "PAINEL_CHIP", sel.PAINEL_CHIP)
+            for modo, seletor in sel.BOTAO_MODO.items():
+                await p.checar(painel, "chip", f"MODO[{modo}]", seletor)
+            for razao, seletor in sel.PROPORCAO.items():
+                await p.checar(painel, "chip", f"PROPORCAO[{razao}]", seletor)
+            for d, seletor in sel.DURACAO.items():
+                await p.checar(painel, "chip", f"DURACAO[{d}]", seletor)
+            for n, seletor in sel.QUANTIDADE.items():
+                await p.checar(painel, "chip", f"QUANTIDADE[x{n}]", seletor)
+            await p.checar(painel, "chip", "DROPDOWN_MODELO", sel.DROPDOWN_MODELO)
+
+            await painel.locator(sel.DROPDOWN_MODELO).first.click()
+            await pagina.wait_for_timeout(1500)
+            for chave, seletor in sel.OPCAO_MODELO.items():
+                # o dropdown lista so os modelos DO MODO ATUAL: os de imagem faltarem
+                # aqui e esperado, nao quebra
+                await p.checar(pagina, "modelos", chave, seletor, minimo=0)
+            await pagina.keyboard.press("Escape")
+            await pagina.keyboard.press("Escape")
+
+        await p.checar(pagina, "pendente", "AVISO_SEM_CREDITO", sel.AVISO_SEM_CREDITO)
+
+        print(f"\nresumo: {p.ok} ok, {len(p.faltando)} faltando, "
+              f"{len(p.pendentes)} pendentes")
+        if p.faltando:
+            print("faltando:", ", ".join(p.faltando))
+            await _candidatos(pagina)
         await ctx.close()
+    return 1 if p.faltando else 0
 
 
 if __name__ == "__main__":
-    asyncio.run(main(sys.argv[1] if len(sys.argv) > 1 else "perfis/mapeamento"))
+    sys.exit(asyncio.run(main(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else None)))
 ```
 
-- [ ] **Step 3: Logar na mão, fora do Playwright**
-
-O login acontece num Chrome comum, subido por fora do Playwright — exatamente como a Task 10 faz em produção (`cadastrar()`):
+- [ ] **Step 7: Rodar o conferidor**
 
 ```bash
-"/c/Program Files/Google/Chrome/Application/chrome.exe" \
-  --user-data-dir="$(pwd)/flowpool/perfis/mapeamento" \
-  --no-first-run --no-default-browser-check \
-  "https://labs.google/fx/pt/tools/flow"
+.venv/Scripts/python -m flowpool.transporte.pw.conferir flowpool/perfis/mapeamento <uuid-do-projeto>
 ```
 
-Faça o login manual numa conta **grátis** (não a principal), passe as telas de boas-vindas, confirme que a lista de projetos carrega, e **feche essa janela** — o perfil não pode ficar aberto em dois Chromes ao mesmo tempo (o Playwright do Step 4 falharia com `TargetClosedError`).
+Expected — o formato, não os números exatos:
 
-- [ ] **Step 4: Rodar o script de inspeção**
+```
+[lista    ] CARD_PROJETO             OK (3)
+[lista    ] BOTAO_NOVO_PROJETO       OK (1)
+[lista    ] AVATAR_CONTA             OK (1)
+[conta    ] PADRAO_CREDITOS          OK
+[projeto  ] CAMPO_PROMPT             OK (1)
+[projeto  ] BOTAO_ENVIAR             OK (1)
+[projeto  ] CHIP_CONFIG              OK (1)
+[chip     ] PAINEL_CHIP              OK (1)
+[chip     ] MODO[t2v]                OK (1)
+[chip     ] PROPORCAO[9:16]          OK (1)
+[chip     ] DURACAO[4s]              OK (1)
+[chip     ] QUANTIDADE[x1]           OK (1)
+[modelos  ] omni-flash               OK (1)
+[modelos  ] nano-banana              OK (0)
+[pendente ] AVISO_SEM_CREDITO        PENDENTE (nunca medido)
+
+resumo: 27 ok, 0 faltando, 1 pendentes
+```
+
+`AVISO_SEM_CREDITO` **pendente** é o estado correto até a Task 14. `faltando` em zero é o critério de saída deste task; o processo devolve 1 se houver qualquer `FALTA`, o que o torna usável num script.
+
+- [ ] **Step 8: Commit**
 
 ```bash
-.venv/Scripts/python -m flowpool.transporte.pw.mapear flowpool/perfis/mapeamento
-```
-
-Confirme que o Flow carrega direto na lista de projetos, sem tela de login — se cair no login, o perfil não ficou autenticado ou dois Chromes disputaram o mesmo `--user-data-dir` no Step 3.
-
-- [ ] **Step 5: Coletar os seletores, um a um**
-
-Com o Inspector aberto, use o modo *Pick locator* e anote o localizador de cada item abaixo. Prefira **texto ou role** ao localizador que o *Pick locator* sugerir primeiro — ele costuma sugerir a classe, e classe é regra 1 quebrada (styled-components com hash, muda a cada deploy). Anote o texto exato dos rótulos, porque a interface está em português (`pt` fixo na URL — regra 6):
-
-1. Indicador de créditos — **não está na tela do projeto**; procurar em "Mais opções" ou nas configurações da conta
-2. Campo de prompt
-3. Seletor de modelo (o dropdown com Veo / Nano Banana) e a opção de cada modelo
-4. Botão de gerar
-5. O **único** `input[type=file]` de upload (`multiple`, `accept="image/*"`) — não são três campos separados; anote também **por onde** a UI distingue "isto é referência" de "isto é frame inicial/final" (aba, botão, ordem de clique — o que for)
-6. O card de resultado enquanto está gerando (spinner) e quando termina
-7. Botão de download do resultado
-8. O aviso de "créditos insuficientes"
-9. A tela de login (para detectar sessão caída)
-10. A lista de projetos na tela inicial, e o card/link de **um** projeto dentro dela (o localizador precisa dar tanto o nome visível quanto o id/href)
-11. O botão de **novo projeto**
-12. O campo de **nome do projeto** e o botão que confirma a criação
-13. O padrão da URL com o projeto aberto — anote uma URL real e confira onde o id cai (é para achar o card certo na lista; **não** vira `page.goto` — regra 3)
-
-Nos itens 10 a 12, anote também **de onde sai o id do projeto**: do `href` do card, da URL após abrir, ou de um atributo. É esse id que vai para `projeto.id_remoto` no banco, e um id errado faz o app abrir o projeto de outro produto — ou, pior, tentar abrir um que a conta da vez nem enxerga.
-
-- [ ] **Step 6: Preencher o arquivo de seletores**
-
-`flowpool/transporte/pw/seletores.py` — substitua cada `...` pelo localizador real coletado no passo anterior. Não invente: use o que o Inspector mostrou, e prefira texto/role a classe (regra 1).
-
-```python
-"""Seletores da UI do Flow. Quando o Google mexer no layout, so este arquivo muda.
-
-Mapeado ao vivo em <DATA DO MAPEAMENTO>, conta gratuita, locale pt.
-
-REGRAS APRENDIDAS NO MAPEAMENTO — leia antes de mexer:
-
-1. NAO usar seletor por classe. As classes sao styled-components com hash
-   (`button.sc-e8425ea6-0.hOBPaw`) e mudam a cada deploy do Google. O texto vem de um
-   dicionario i18n versionado; e por texto que se navega.
-
-2. NAO varrer <script>. O `__NEXT_DATA__` da pagina carrega o access_token OAuth em
-   texto puro. Qualquer varredura de DOM tem que excluir SCRIPT/STYLE/NOSCRIPT, senao
-   o token vaza para log em producao.
-
-3. NAO entrar por deep link. `page.goto(url_do_projeto)` derruba a aplicacao com
-   "Application error: a client-side exception has occurred". O caminho e ir na lista
-   e CLICAR no card — roteamento interno do Next.
-
-4. A janela precisa estar VISIVEL, nao so nao-headless. Varias partes da interface
-   (portao do aviso de privacidade, carregamento da lista de projetos) dependem de
-   IntersectionObserver, que nao dispara com `document.visibilityState == 'hidden'`.
-   Janela minimizada ou fora de tela conta como oculta.
-
-5. Login NAO acontece sob Playwright. O Google recusa com "esse navegador ou app pode
-   nao ser seguro". Cadastro de conta sobe um chrome.exe comum por subprocess; o
-   Playwright so reaproveita o perfil depois. A checagem e exclusiva do fluxo de login:
-   uma vez autenticado, o Playwright dirige a sessao sem reclamacao.
-
-6. Existe reCAPTCHA na pagina (`textarea.g-recaptcha-response`).
-"""
-
-# --- URLs ---------------------------------------------------------------
-# O locale entra na URL. Fixar em pt evita depender da deteccao de idioma do Google,
-# que varia por conta e derrubaria os seletores por texto.
-URL_FLOW = "https://labs.google/fx/pt/tools/flow"
-URL_SESSAO = "/fx/api/auth/session"          # devolve user, expires e access_token
-PADRAO_PROJETO = "/fx/pt/tools/flow/project/"  # id_remoto e o UUID no fim
-
-# --- sessao ---------------------------------------------------------------
-LOGIN_VISIVEL = "..."          # so aparece deslogado
-
-# --- lista de projetos ------------------------------------------------------
-CARD_PROJETO = "..."           # f'a[href*="{PADRAO_PROJETO}"]' — um item da lista
-BOTAO_NOVO_PROJETO = "..."
-
-# --- onboarding de perfil novo ---------------------------------------------
-# Duas telas em sequencia. A segunda so libera o "Continuar" depois que o fim do texto
-# entra em viewport DE VERDADE (IntersectionObserver) — ver regra 4.
-DIALOGO = "..."
-BOTAO_AVANCAR = "..."
-BOTAO_CONTINUAR = "..."
-CAIXA_CONSENTIMENTO = "..."   # deixar sempre DESMARCADA
-
-# --- dentro do projeto -------------------------------------------------------
-# ATENCAO: `input[aria-label="Texto editável"]` NAO e o campo de prompt — e o editor do
-# NOME DO PROJETO. Escrever nele renomeia o projeto em vez de gerar, e o sintoma e
-# "nada acontece". Ja aconteceu no mapeamento.
-CAMPO_NOME_PROJETO = 'input[aria-label="Texto editável"]'
-CAMPO_PROMPT = '[contenteditable=true]'   # o unico contenteditable visivel da pagina
-BOTAO_ENVIAR = 'button:has-text("arrow_forward")'
-BOTAO_ANEXAR = 'button:has-text("add_2")'  # dois botoes tem "Criar"; a ligadura separa
-
-# Um unico input de arquivo serve referencias E frames: multiple=True, accept=image/*.
-UPLOAD = 'input[type=file]'
-
-# --- painel de configuracao da geracao --------------------------------------
-# ARMADILHA DE ORDEM: `tune Configurações` NAO existe numa sessao nova. So aparece
-# DEPOIS que o primeiro prompt foi enviado ao agente. Abrir antes da TimeoutError.
-#
-# O painel tem quatro grupos: confirmacao, proporcao, quantidade e os DOIS dropdowns
-# de modelo (um de imagem, um de video). Fecha em "Salvar".
-BOTAO_CONFIGURACOES = 'button:has-text("tune Configurações")'
-BOTAO_SALVAR_CONFIG = 'button:has-text("Salvar")'
-
-# Confirmacao (ARMADILHA): o padrao e "Sempre" — o agente pede confirmacao antes de
-# gastar credito. Um robo nessa configuracao NAO falha com erro: fica pendurado ate o
-# timeout, queima as tres tentativas e marca o job como falho sem dizer o porque.
-AGENTE_SEMPRE = '[role=radio]:has-text("Sempre")'
-AGENTE_NUNCA = '[role=radio]:has-text("Nunca")'
-
-# Proporcao — 9:16 e o formato do TikTok e o padrao do FlowPool (`Job.proporcao`).
-PROPORCAO = {
-    "16:9": 'button:has-text("crop_16_9")',
-    "4:3": 'button:has-text("crop_landscape")',
-    "1:1": 'button:has-text("crop_square")',
-    "3:4": 'button:has-text("crop_portrait")',
-    "9:16": 'button:has-text("crop_9_16")',
-}
-
-# Quantidade de variacoes por geracao (`Job.quantidade`). Custa N x credito — nunca
-# deixar implicito. Video sai sempre em x1 pela regra de negocio (Task 1).
-QUANTIDADE = {1: 'button:has-text("x1")', 2: 'button:has-text("x2")',
-              3: 'button:has-text("x3")', 4: 'button:has-text("x4")'}
-
-# Dois dropdowns separados. O de video vem em "Omni Flash" por PADRAO, nao em Veo — se
-# o transporte nao trocar explicitamente, todo job sai no modelo errado.
-DROPDOWN_MODELO_IMAGEM = 'button:has-text("Nano Banana")'
-DROPDOWN_MODELO_VIDEO = 'button:has-text("Omni")'
-
-# Rotulos exatos, medidos em 2026-08-20 numa conta gratuita.
-OPCAO_MODELO = {
-    # video
-    "omni-flash": '[role=menuitem]:has-text("Omni Flash")',
-    "veo-lite": '[role=menuitem]:has-text("Veo 3.1 - Lite")',
-    "veo-fast": '[role=menuitem]:has-text("Veo 3.1 - Fast")',
-    "veo-quality": '[role=menuitem]:has-text("Veo 3.1 - Quality")',
-    # imagem
-    "nano-banana-pro": '[role=menuitem]:has-text("Nano Banana Pro")',
-    "nano-banana-2": '[role=menuitem]:has-text("Nano Banana 2")',
-    "nano-banana": '[role=menuitem]:has-text("Nano Banana 2 Lite")',
-}
-# ATENCAO ao casar por texto: "Nano Banana 2" e prefixo de "Nano Banana 2 Lite".
-# Usar correspondencia exata, senao o Lite e escolhido quando se pediu o 2.
-
-# --- menu da conta ------------------------------------------------------
-# O saldo NAO fica na tela do projeto. Esta no menu do avatar, que rende
-# "50 Créditos do Google Flow". Ler saldo custa dois cliques por geracao.
-AVATAR_CONTA = 'img[src*="googleusercontent"]'
-PADRAO_CREDITOS = r"(\d[\d.,]*)\s+Créditos"   # aplicar no innerText do menu aberto
-
-# --- A PREENCHER --------------------------------------------------------
-# So aparecem quando uma geracao acontece de verdade.
-BOTAO_CONFIRMAR_GERACAO = "..."   # o agente pergunta antes de gastar (modo "Sempre")
-CARD_GERANDO = "..."
-CARD_PRONTO = "..."
-BOTAO_DOWNLOAD = "..."
-AVISO_SEM_CREDITO = "..."
-BOTAO_PARAR = 'button:has-text("stop Parar")'   # aparece enquanto o agente trabalha
-```
-
-Note que este template já reflete o que a primeira passada de campo (20/08) encontrou: URLs, sessão, lista de projetos, onboarding, campo de prompt, upload único, saldo no menu do avatar e **o painel de configuração inteiro** têm seletor conhecido para preencher direto. A seção **A PREENCHER** é a pendência real e explícita desta task — só o que aparece durante uma geração de verdade: confirmação do agente, card gerando, card pronto, botão de download e aviso de saldo insuficiente. Uma sessão futura de mapeamento com a janela realmente aberta (regra 4) resolve essa seção; o resto já está provado.
-
-Três achados do painel que mudam o domínio do app, e já estão nas Tasks 1–8:
-
-1. **O dropdown de vídeo abre em "Omni Flash", não em Veo.** Daí `Modelo.OMNI_FLASH` e o padrão de vídeo da API. Um transporte que não troque explicitamente gera nele.
-2. **Existem dois dropdowns de modelo**, um de imagem e um de vídeo — não um só. O transporte mexe no que corresponde ao modo do job.
-3. **Proporção e quantidade são grupos do mesmo painel**, e a quantidade multiplica o crédito. `Job.proporcao` e `Job.quantidade` existem por causa disso.
-
-Uma quarta armadilha, de ordem e não de domínio: `tune Configurações` **não existe numa sessão nova** — só aparece depois que o primeiro prompt foi enviado ao agente. A sequência do transporte real (Task 11) é sempre: enviar prompt → esperar resposta → abrir `tune` → configurar → salvar.
-
-O que **não** pode ficar em aberto é de onde sai o id do projeto — anote isso no comentário de `CARD_PROJETO` junto com o localizador.
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add flowpool/transporte/pw/seletores.py flowpool/transporte/pw/mapear.py
-git commit -m "feat: mapa de seletores da ui do flow"
+git add flowpool/transporte/pw/seletores.py flowpool/transporte/pw/dom.py \
+        flowpool/transporte/pw/mapear.py flowpool/transporte/pw/conferir.py
+git commit -m "feat: chip de configuracao no mapa e conferidor de seletores"
 ```
 
 ---
 
-### Task 10: Sessão real e cadastro de conta
+### Task 10: Cadastro de conta — Chrome por subprocess, validação por Playwright
 
 **Files:**
 - Create: `flowpool/transporte/pw/sessao.py`
 - Modify: `flowpool/api/app.py` (adicionar `POST /contas` e `POST /contas/{id}/revalidar`)
 - Test: `tests/test_sessao.py`
 
-Só o que dá para testar sem rede é testado: a montagem do caminho de perfil e a recusa quando o Chrome não existe.
+**O login não acontece sob Playwright.** Não é questão de flag, de `channel="chrome"` nem de user-agent: o Google detecta o CDP e recusa com *"esse navegador ou app pode não ser seguro"*. Qualquer versão deste task que abra o navegador de login pelo Playwright está errada por construção.
+
+O fluxo validado em 2026-08-20 tem quatro partes, e cada uma existe por um motivo medido:
+
+1. **`subprocess.Popen` de `chrome.exe`** com `--user-data-dir=<perfil>`, `--no-first-run`, `--no-default-browser-check`, apontando para a URL do Flow. Chrome comum, sem CDP, sem Playwright. É o único jeito de o login passar.
+2. **A pessoa loga e passa duas telas de boas-vindas.** Consentimento (duas caixas — **deixar desmarcadas** — e botão "Avançar") e aviso de privacidade (botão "Continuar", que **só habilita depois de o fim do texto entrar em viewport de verdade**). Esse portão é `IntersectionObserver`: janela minimizada, fora de tela ou ocluída conta como oculta, e o botão nunca habilita. É a regra 4 aparecendo já no cadastro.
+3. **A pessoa fecha o Chrome, e o app espera o perfil ficar livre.** Dois Chromes no mesmo `--user-data-dir` fazem o segundo entregar a URL para o primeiro e morrer; o Playwright que vier depois falha com `TargetClosedError` — um erro que não menciona perfil nem Chrome e manda procurar no lugar errado.
+4. **Validação por Playwright:** abrir o perfil e conferir que `GET /fx/api/auth/session` devolve `access_token`. É a única prova de que a sessão está de pé. E o token **nunca** sai da função — o que volta é a data de expiração.
+
+**Medido: a sessão expira em ~48 h** (`expires` dois dias à frente). A revalidação é exatamente o mesmo fluxo do cadastro, então `revalidar` reusa `cadastrar` e a rota da API é a mesma função com outro nome.
+
+Testável sem rede: o caminho do perfil, a recusa quando o Chrome não existe, a montagem dos argumentos, a detecção de perfil ocupado e a interpretação da resposta de sessão. O que sobra — Chrome subindo, humano logando — não se testa, se roda.
 
 - [ ] **Step 1: Escrever o teste que falha**
 
 `tests/test_sessao.py`:
 
 ```python
+from datetime import datetime, timezone
+
 import pytest
 
-from flowpool.transporte.pw.sessao import ChromeAusente, caminho_perfil, checar_chrome
+from flowpool.transporte.base import SessaoMorta
+from flowpool.transporte.pw.sessao import (
+    ChromeAusente, argumentos_chrome, caminho_perfil, checar_chrome,
+    interpretar_sessao, perfil_em_uso,
+)
+
+TOKEN = "ya29.a0AfB_byQFAKE_TOKEN_DE_TESTE"
 
 
 def test_caminho_de_perfil_e_derivado_do_email(tmp_path):
@@ -4132,9 +4379,7 @@ def test_caminho_de_perfil_e_derivado_do_email(tmp_path):
 
 
 def test_emails_diferentes_dao_perfis_diferentes(tmp_path):
-    a = caminho_perfil(tmp_path, "a@gmail.com")
-    b = caminho_perfil(tmp_path, "b@gmail.com")
-    assert a != b
+    assert caminho_perfil(tmp_path, "a@gmail.com") != caminho_perfil(tmp_path, "b@gmail.com")
 
 
 def test_mesmo_email_da_sempre_o_mesmo_perfil(tmp_path):
@@ -4145,6 +4390,59 @@ def test_checar_chrome_levanta_quando_nao_acha(monkeypatch):
     monkeypatch.setattr("flowpool.transporte.pw.sessao._CANDIDATOS", [])
     with pytest.raises(ChromeAusente, match="Chrome"):
         checar_chrome()
+
+
+def test_argumentos_do_chrome_levam_perfil_e_url(tmp_path):
+    args = argumentos_chrome(tmp_path / "chrome.exe", tmp_path / "perfil", "https://x/y")
+    assert args[0].endswith("chrome.exe")
+    assert any(a.startswith("--user-data-dir=") and "perfil" in a for a in args)
+    assert args[-1] == "https://x/y"
+
+
+def test_argumentos_do_chrome_nao_pedem_porta_de_depuracao(tmp_path):
+    # --remote-debugging-port e o que faz o Google recusar o login. Uma flag dessas
+    # entrando aqui por engano reproduziria exatamente o bug que este task existe para
+    # evitar, e o sintoma seria "o Google nao deixa logar", nao "flag errada".
+    args = argumentos_chrome(tmp_path / "chrome.exe", tmp_path / "perfil", "https://x")
+    assert not any("remote-debugging" in a or "--headless" in a for a in args)
+
+
+def test_perfil_livre_quando_nenhum_chrome_usa_a_pasta(tmp_path, monkeypatch):
+    monkeypatch.setattr("flowpool.transporte.pw.sessao._linhas_de_comando",
+                        lambda: ['chrome.exe --user-data-dir="C:\\outro"'])
+    assert perfil_em_uso(tmp_path / "perfil") is False
+
+
+def test_perfil_ocupado_quando_um_chrome_usa_a_pasta(tmp_path, monkeypatch):
+    alvo = (tmp_path / "perfil").resolve()
+    monkeypatch.setattr("flowpool.transporte.pw.sessao._linhas_de_comando",
+                        lambda: [f'chrome.exe --user-data-dir={alvo}'])
+    assert perfil_em_uso(tmp_path / "perfil") is True
+
+
+def test_sessao_valida_devolve_a_expiracao():
+    quando = interpretar_sessao(
+        {"access_token": TOKEN, "expires": "2026-08-22T15:04:05.000Z"})
+    assert quando == datetime(2026, 8, 22, 15, 4, 5, tzinfo=timezone.utc)
+
+
+def test_sessao_morta_quando_falta_access_token():
+    with pytest.raises(SessaoMorta):
+        interpretar_sessao({"user": {"email": "a@b.com"}})
+
+
+def test_sessao_morta_quando_a_resposta_vem_vazia():
+    # deslogado, o Flow devolve `{}` com 200 — nao um erro HTTP. Tratar so o status
+    # deixaria uma sessao morta passar por viva ate a primeira geracao falhar.
+    with pytest.raises(SessaoMorta):
+        interpretar_sessao({})
+
+
+def test_interpretar_sessao_nao_devolve_o_token():
+    # o valor de retorno vai para log e para evento. Se o token puder sair por aqui,
+    # a regra 2 nao adianta nada: o vazamento so muda de porta.
+    quando = interpretar_sessao({"access_token": TOKEN, "expires": "2026-08-22T15:04:05Z"})
+    assert TOKEN not in repr(quando)
 ```
 
 - [ ] **Step 2: Rodar e ver falhar**
@@ -4157,16 +4455,32 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'flowpool.transporte.pw
 `flowpool/transporte/pw/sessao.py`:
 
 ```python
-"""Abrir Chrome real com o perfil de uma conta. Login e sempre manual."""
+"""Perfil de conta: cadastro (Chrome comum) e validacao (Playwright).
+
+A divisao nao e estilistica. MEDIDO em 2026-08-20: o Google recusa o login em qualquer
+Chrome dirigido por CDP — "esse navegador ou app pode nao ser seguro" — e nao adianta
+`channel="chrome"`, user-agent nem flag nenhuma. Entao:
+
+    login    -> chrome.exe comum, por subprocess, humano na frente
+    operacao -> Playwright reaproveitando o MESMO perfil
+
+Uma vez autenticado, o Playwright dirige a sessao sem reclamacao. A checagem e
+exclusiva do fluxo de login.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import re
+import subprocess
+import time
+from datetime import datetime
 from pathlib import Path
 
-from playwright.async_api import BrowserContext, async_playwright
+from playwright.async_api import async_playwright
 
+from flowpool.transporte.base import SessaoMorta
 from flowpool.transporte.pw import seletores as sel
 
 _CANDIDATOS = [
@@ -4174,9 +4488,34 @@ _CANDIDATOS = [
     Path(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"),
 ]
 
+# Quanto tempo esperar a pessoa logar e passar as duas telas de boas-vindas.
+TETO_LOGIN_S = 900.0
+# Quanto esperar o perfil ficar livre depois que a janela fecha. Chrome deixa processo
+# filho vivo por alguns segundos depois de a janela sumir.
+TETO_LIBERAR_S = 120.0
+
+INSTRUCOES = """
+Uma janela do Chrome abriu no perfil desta conta.
+
+  1. Faca o login na conta Google.
+  2. Tela de consentimento: DEIXE AS DUAS CAIXAS DESMARCADAS e clique em "Avancar".
+  3. Aviso de privacidade: ROLE ATE O FIM DO TEXTO — o botao "Continuar" so habilita
+     depois que o fim do texto entra na tela de verdade. Janela minimizada ou coberta
+     por outra nao conta: o portao e IntersectionObserver.
+  4. Confirme que a lista de projetos do Flow carregou.
+  5. FECHE A JANELA DO CHROME. O cadastro continua sozinho a partir dai.
+
+Nao abra este mesmo perfil em outro Chrome enquanto isso: o segundo entrega a URL
+para o primeiro e morre, e a validacao falharia com TargetClosedError.
+"""
+
 
 class ChromeAusente(RuntimeError):
     """O Google recusa o Chromium empacotado do Playwright; precisa do Chrome instalado."""
+
+
+class PerfilOcupado(RuntimeError):
+    """Ja existe um Chrome usando este --user-data-dir."""
 
 
 def checar_chrome() -> Path:
@@ -4196,65 +4535,178 @@ def caminho_perfil(raiz: Path, email: str) -> Path:
     return Path(raiz) / f"{slug}-{digest}"
 
 
-async def abrir_contexto(perfil: Path, headless: bool = False) -> tuple[object, BrowserContext]:
-    """Devolve (playwright, contexto). Quem chama fecha os dois."""
+def argumentos_chrome(exe: Path, perfil: Path, url: str) -> list[str]:
+    """A linha de comando do Chrome de LOGIN.
+
+    Nenhuma flag de automacao entra aqui. `--remote-debugging-port` e o que faz o
+    Google recusar; `--headless` mata o IntersectionObserver que libera o aviso de
+    privacidade. As tres que ficam sao so para o perfil novo nao abrir assistente.
+    """
+    return [
+        str(exe),
+        f"--user-data-dir={Path(perfil).resolve()}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        url,
+    ]
+
+
+def _linhas_de_comando() -> list[str]:
+    """CommandLine de cada chrome.exe vivo. Isolado para o teste poder trocar."""
+    consulta = ("Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | "
+                "ForEach-Object { $_.CommandLine }")
+    saida = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", consulta],
+        capture_output=True, text=True, timeout=60)
+    return [l for l in saida.stdout.splitlines() if l.strip()]
+
+
+def perfil_em_uso(perfil: Path) -> bool:
+    """Se algum Chrome vivo esta com este --user-data-dir.
+
+    Nao da para usar arquivo de lock: `SingletonLock` e coisa de POSIX, e o
+    `Default/LOCK` do Windows e do LevelDB e existe com o Chrome fechado. Sobra olhar
+    a linha de comando dos processos.
+    """
+    alvo = str(Path(perfil).resolve()).lower()
+    try:
+        return any(alvo in linha.lower() for linha in _linhas_de_comando())
+    except Exception:
+        # sem conseguir consultar, o seguro e assumir livre e deixar o erro real
+        # aparecer na validacao — travar o cadastro por causa da consulta seria pior
+        return False
+
+
+def esperar_perfil_livre(perfil: Path, teto_s: float = TETO_LIBERAR_S) -> None:
+    limite = time.monotonic() + teto_s
+    while time.monotonic() < limite:
+        if not perfil_em_uso(perfil):
+            return
+        time.sleep(2.0)
+    raise PerfilOcupado(
+        f"ainda ha Chrome usando {perfil}. Feche todas as janelas desse perfil.")
+
+
+def interpretar_sessao(dados: dict) -> datetime:
+    """Le a resposta de `/fx/api/auth/session` e devolve SO a data de expiracao.
+
+    O token NAO sai daqui. A resposta inteira carrega o access_token OAuth em texto
+    puro, e o valor de retorno desta funcao vai para log e para evento — devolver o
+    dicionario seria abrir a mesma porta que a regra 2 fecha no DOM.
+
+    Deslogado, o Flow devolve `{}` com HTTP 200. Conferir so o status deixaria uma
+    sessao morta passar por viva ate a primeira geracao falhar, tres tentativas
+    depois, com a conta marcada por um erro que nao era dela.
+    """
+    if not dados.get("access_token"):
+        raise SessaoMorta("sessao sem access_token — a conta nao esta logada")
+    bruto = str(dados.get("expires") or "")
+    if not bruto:
+        raise SessaoMorta("sessao sem campo `expires`")
+    return datetime.fromisoformat(bruto.replace("Z", "+00:00"))
+
+
+async def abrir_contexto(perfil: Path, headless: bool = False):
+    """Devolve (playwright, contexto). Quem chama fecha os dois.
+
+    `headless` existe so na assinatura, e o default e o unico valor sensato: sem
+    janela visivel o IntersectionObserver nao dispara, a lista de projetos nao termina
+    de renderizar e nada disso da erro — so nao aparece.
+    """
     checar_chrome()
-    perfil.mkdir(parents=True, exist_ok=True)
+    Path(perfil).mkdir(parents=True, exist_ok=True)
     pw = await async_playwright().start()
     ctx = await pw.chromium.launch_persistent_context(
-        user_data_dir=str(perfil),
-        channel="chrome",
+        user_data_dir=str(Path(perfil).resolve()),
+        channel="chrome",              # o Chromium empacotado e recusado pelo auth
         headless=headless,
         no_viewport=True,
         args=["--start-maximized"],
+        accept_downloads=True,
     )
     return pw, ctx
 
 
-async def esta_logado(ctx: BrowserContext) -> bool:
-    pagina = ctx.pages[0] if ctx.pages else await ctx.new_page()
-    await pagina.goto(sel.URL_PROJETO, wait_until="domcontentloaded")
-    return not await pagina.locator(sel.LOGIN_VISIVEL).is_visible(timeout=5000)
-
-
-async def cadastrar(raiz_perfis: Path, email: str) -> Path:
-    """Abre janela para login manual e so volta quando a sessao estiver de pe."""
-    perfil = caminho_perfil(raiz_perfis, email)
-    pw, ctx = await abrir_contexto(perfil, headless=False)
+async def validar_perfil(perfil: Path) -> datetime:
+    """Abre o perfil com Playwright e prova que a sessao esta viva."""
+    pw, ctx = await abrir_contexto(perfil)
     try:
         pagina = ctx.pages[0] if ctx.pages else await ctx.new_page()
-        await pagina.goto(sel.URL_FLOW)
-        # espera ate 5 min pelo login humano
-        await pagina.locator(sel.CREDITOS).wait_for(timeout=300_000)
-        return perfil
+        await pagina.goto(sel.URL_FLOW, wait_until="domcontentloaded")
+        resposta = await pagina.request.get(sel.URL_BASE + sel.URL_SESSAO)
+        return interpretar_sessao(await resposta.json())
     finally:
         await ctx.close()
         await pw.stop()
+
+
+async def cadastrar(raiz_perfis: Path, email: str) -> tuple[Path, datetime]:
+    """Sobe o Chrome de login, espera a pessoa, e valida. Devolve (perfil, expira_em).
+
+    Revalidar sessao caida e a MESMA coisa: mesmo perfil, mesmo fluxo. Por isso nao ha
+    duas funcoes.
+    """
+    perfil = caminho_perfil(raiz_perfis, email)
+    perfil.mkdir(parents=True, exist_ok=True)
+    exe = checar_chrome()
+    if perfil_em_uso(perfil):
+        raise PerfilOcupado(f"{perfil} ja esta aberto em outro Chrome — feche antes")
+
+    proc = subprocess.Popen(argumentos_chrome(exe, perfil, sel.URL_FLOW))
+    print(INSTRUCOES)
+
+    # `to_thread` nao e detalhe: `cadastrar` e aguardado dentro de uma rota do FastAPI,
+    # e o motor roda no MESMO event loop. Um `proc.wait()` direto congelaria a fila
+    # inteira pelos minutos que a pessoa levar para logar.
+    await asyncio.wait_for(asyncio.to_thread(proc.wait), timeout=TETO_LOGIN_S)
+    if perfil_em_uso(perfil):
+        # o Chrome que subimos morreu na hora porque outro ja tinha o perfil e ficou
+        # com a janela. Continuar daria TargetClosedError na validacao.
+        raise PerfilOcupado(
+            f"{perfil} continua em uso depois de o Chrome de login sair — "
+            "outro Chrome pegou a janela. Feche tudo e repita.")
+    await asyncio.to_thread(esperar_perfil_livre, perfil)
+    return perfil, await validar_perfil(perfil)
 ```
 
 - [ ] **Step 4: Rodar e ver passar**
 
 Run: `.venv/Scripts/pytest tests/test_sessao.py -q`
-Expected: `4 passed`
+Expected: `12 passed`
 
 - [ ] **Step 5: Adicionar as rotas de conta na API**
 
-Em `flowpool/api/app.py`, adicione o import e as duas rotas, logo abaixo de `listar_contas`:
+Em `flowpool/api/app.py`, os imports (o `json` ainda não existe lá) e as duas rotas, logo abaixo de `listar_contas`:
 
 ```python
-from flowpool.transporte.pw.sessao import cadastrar, caminho_perfil
+import json
+
+from flowpool.transporte.base import SessaoMorta
+from flowpool.transporte.pw.sessao import ChromeAusente, PerfilOcupado, cadastrar
 ```
 
 ```python
     @app.post("/contas", response_model=RespostaConta, status_code=201)
     async def nova_conta(p: NovaConta) -> RespostaConta:
         raiz_perfis = Path(raiz) / "flowpool" / "perfis"
-        perfil = await cadastrar(raiz_perfis, p.email)
+        try:
+            perfil, expira_em = await cadastrar(raiz_perfis, p.email)
+        except (ChromeAusente, PerfilOcupado) as e:
+            raise HTTPException(409, str(e)) from e
+        except SessaoMorta as e:
+            # a pessoa fechou a janela antes de terminar o login. 409, nao 500: nao e
+            # defeito do servico, e passo faltando — e a mensagem tem que dizer isso.
+            raise HTTPException(409, f"login nao concluiu: {e}") from e
         try:
             id_ = repo.criar_conta(p.email, p.tier, str(perfil))
         except ValueError as e:
             raise HTTPException(409, str(e)) from e
         c = repo.conta(id_)
+        # a expiracao vai para evento, nao para coluna: a sessao vive ~48h e quem
+        # descobre que caiu e a propria geracao, marcando `expirada`. Guardar a data
+        # numa coluna exigiria migracao para uma informacao que ninguem consulta.
+        repo.registrar_evento(None, c.id, "sessao_validada",
+                              json.dumps({"expira_em": expira_em.isoformat()}))
         return RespostaConta(id=c.id, email=c.email, tier=c.tier, saldo=c.saldo,
                              saldo_confiavel=c.saldo_confiavel, saude=c.saude,
                              ativa=c.ativa, falhas=c.falhas)
@@ -4264,58 +4716,100 @@ from flowpool.transporte.pw.sessao import cadastrar, caminho_perfil
         c = repo.conta(id_)
         if c is None:
             raise HTTPException(404, "conta nao existe")
-        await cadastrar(Path(c.perfil).parent, c.email)
+        # revalidar E cadastrar: mesmo perfil, mesmo Chrome, mesmas duas telas. A
+        # sessao expira em ~48h medidas, entao isto vira rotina, nao excecao.
+        _, expira_em = await cadastrar(Path(c.perfil).parent, c.email)
         c.saude = SaudeSessao.VIVA
         c.falhas = 0
         repo.salvar_conta(c)
+        repo.registrar_evento(None, c.id, "sessao_revalidada",
+                              json.dumps({"expira_em": expira_em.isoformat()}))
         return RespostaConta(id=c.id, email=c.email, tier=c.tier, saldo=c.saldo,
                              saldo_confiavel=c.saldo_confiavel, saude=c.saude,
                              ativa=c.ativa, falhas=c.falhas)
 ```
 
-- [ ] **Step 6: Rodar a suíte**
+- [ ] **Step 6: Cadastrar o perfil de mapeamento à mão, uma vez**
+
+O mesmo comando que `cadastrar()` monta, para ter um perfil logado antes de a API existir — é o perfil que a Task 9 e a Task 11 usam:
+
+```bash
+"/c/Program Files/Google/Chrome/Application/chrome.exe" \
+  --user-data-dir="$(pwd)/flowpool/perfis/mapeamento" \
+  --no-first-run --no-default-browser-check \
+  "https://labs.google/fx/pt/tools/flow"
+```
+
+Logue numa conta **grátis** (não a principal), passe as duas telas de boas-vindas como descrito em `INSTRUCOES`, confirme que a lista de projetos carrega, e **feche a janela**.
+
+- [ ] **Step 7: Provar que o perfil vale**
+
+```bash
+.venv/Scripts/python -c "import asyncio,pathlib;from flowpool.transporte.pw.sessao import validar_perfil;print(asyncio.run(validar_perfil(pathlib.Path('flowpool/perfis/mapeamento'))))"
+```
+
+Expected: uma data ~48 h à frente, por exemplo `2026-08-22 15:04:05+00:00`. Se sair `SessaoMorta`, o login não completou — refaça o Step 6 e confirme que a lista de projetos apareceu antes de fechar.
+
+- [ ] **Step 8: Rodar a suíte**
 
 Run: `.venv/Scripts/pytest -q`
-Expected: `176 passed` (146 + 26 da api + 4 da sessão)
+Expected: `184 passed` (172 das Tasks 0–8 + 12 da sessão)
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
 git add flowpool/transporte/pw/sessao.py flowpool/api/app.py tests/test_sessao.py
-git commit -m "feat: sessao real com chrome e cadastro de conta"
+git commit -m "feat: cadastro de conta por chrome comum e validacao por playwright"
 ```
 
 ---
 
-### Task 11: Transporte Playwright — saldo e text-to-video
+### Task 11: Transporte Playwright — chip, geração e download
 
 **Files:**
 - Create: `flowpool/transporte/pw/transporte.py`
 - Test: manual, contra o Flow
 
-Os quatro modos compartilham o mesmo esqueleto: preencher prompt → escolher modelo → (subir arquivos) → gerar → esperar → baixar. Este task fecha o esqueleto e o modo mais simples.
+Este é o transporte real. Ele satisfaz o `FlowTransport` da Task 6 sem mudar nem uma linha do orquestrador, e a sequência de cada método vem do que foi medido em 2026-08-20.
 
-Antes do esqueleto vem o projeto: `listar_projetos`, `criar_projeto` e `abrir_projeto` fecham o contrato que o motor já usa desde a Task 7. `abrir_projeto` é navegação pura (`URL_PROJETO_ABERTO.format(...)`); `criar_projeto` é botão → nome → confirmar, e **devolve o id lido da URL depois que o projeto abre** — é esse id que vai para o banco. Se a URL não mudar, a criação falhou: devolver um id inventado gravaria no banco um vínculo que nunca abre.
+#### A decisão que organiza o task: modo direto, não agente
 
-`gerar` passa a assumir que a página **já está dentro do projeto certo** — quem colocou foi `_resolver_projeto`, no orquestrador. O transporte não decide projeto: ele só lista, cria e abre.
+O Flow tem dois caminhos para gerar:
 
-**O painel de configuração é obrigatório, e a ordem importa.** O mapeamento (Task 9) mostrou que `tune Configurações` não existe numa sessão nova: só aparece **depois** que o primeiro prompt foi enviado ao agente. Tentar abri-lo antes dá `TimeoutError`. A sequência de `gerar` é portanto: escrever o prompt → enviar → esperar a resposta do agente → abrir `tune` → configurar → salvar → confirmar a geração.
+| caminho | pergunta antes? | diz o preço? | determinístico? |
+|---|---|---|---|
+| **chip** (modo direto) | não — debita e gera | não | sim |
+| **agente conversacional** | sim, com Aprovar / Rejeitar | **sim, o custo exato vem no texto** | não — depende de interpretação |
 
-Três coisas se configuram ali, e nenhuma pode ficar no default:
+O padrão do transporte é o **modo direto**. O motivo é o modo de falha: o agente pode responder qualquer coisa, inclusive pedir esclarecimento, e um robô esperando "Aprovar" fica pendurado até o timeout, queima as três tentativas e marca o job como falho sem dizer o porquê. O chip é uma máquina de estados pequena e legível.
 
-- **Modelo.** São **dois** dropdowns, um de imagem e um de vídeo. O transporte mexe no que corresponde ao modo do job. O de vídeo abre em **Omni Flash** — quem não trocar explicitamente gera nele, e o job sai no modelo errado sem nenhum erro.
-- **Proporção** (`p.proporcao`). O padrão do app é 9:16; o painel tem um botão por valor.
-- **Quantidade** (`p.quantidade`). Custa N × crédito — é o número que `escolher` e `reservar` já usaram para reservar saldo (Tasks 3 e 4). Deixar a UI escolher faria o Flow cobrar o que o app não previu.
+O preço disso é ser **cego ao preço**: o modo direto não anuncia quanto vai custar. Quem cobre esse buraco é a reconciliação de saldo que já existe (`nucleo/credito.py`, evento `divergencia`) — leitura real depois de cada job, e a tabela de custos serve só para reservar antes. O trade-off está registrado no spec.
 
-Uma quarta, do cadastro e não da geração: a confirmação do agente vem em **"Sempre"** por padrão. Nessa configuração o robô não falha com erro — ele fica pendurado até o timeout, queima as três tentativas e marca o job como falho sem dizer o porquê. Ou o cadastro de conta (Task 10) deixa em "Nunca", ou o transporte aprende a clicar em `BOTAO_CONFIRMAR_GERACAO` (ainda por mapear).
+#### A regra dura: configurou, confere
+
+**Depois de configurar, ler o texto do chip e conferir que bate com o pedido.** Se não bater, é **erro**, não aviso.
+
+Isso não é zelo abstrato. A versão anterior de `fumaca.py` tinha um `ajustar()` tolerante — `except Exception: print("sem efeito — seguindo")` — pensado para o caso benigno de "essa opção já estava assim". O que ele fez de verdade foi engolir um clique que não pegou: uma geração pedida em **4s saiu em 8s**, com saldo debitado, arquivo na pasta e ninguém percebendo. Passo tolerante em configuração de geração é o pior padrão possível neste app, porque a saída existe e parece certa.
+
+O modelo **não aparece no texto do chip** (`Vídeo · 720p · 8s crop_9_16 x1`), então a verificação acontece em dois momentos: o modelo é conferido com o painel ainda aberto, lendo o rótulo do dropdown; modo, proporção, duração e quantidade são conferidos no chip depois de fechar.
+
+#### Pendências declaradas
+
+Três coisas ficam de fora **de propósito**, e ficam escritas aqui para não virarem surpresa:
+
+1. **`Pedido` não tem `duracao`.** O chip aceita 4s/6s/8s/10s; o domínio não modela isso. Até modelar, o transporte fixa `DURACAO_PADRAO = "8s"` e **verifica**. Acrescentar o campo depois toca `nucleo/tipos.py` (`Job`), `transporte/base.py` (`Pedido`), `dados/esquema.sql` + `repo.py`, `api/esquemas.py` e `cliente.py` — cinco arquivos e quatro arquivos de teste. É um task próprio, não um remendo aqui.
+2. **`id_remoto` é posicional** (`card-{n}`), porque a grade não expõe id na UI. Consequência honesta: a **retomada depois de restart** que o orquestrador implementa (`recuperado_com_geracao`) só funciona enquanto o processo vive. O Step 5 da Task 9 mede se o `src` da miniatura carrega um id estável; se carregar, trocar `_identificar` é uma mudança de dez linhas e a retomada passa a valer de verdade.
+3. **Vídeo só aceita 9:16 e 16:9**, e a API aceita as cinco proporções para qualquer modo. O transporte recusa cedo (antes de tocar no chip, com a reserva ainda estornável), mas o lugar certo de recusar é o 422 do `POST /jobs`. Fica para o mesmo task do item 1.
 
 - [ ] **Step 1: Implementar**
 
 `flowpool/transporte/pw/transporte.py`:
 
 ```python
-"""Implementacao real do FlowTransport. Unico modulo que importa Playwright
-alem de sessao.py.
+"""Implementacao real do FlowTransport.
+
+Sequencias medidas ao vivo em 2026-08-20. Seletor NENHUM mora aqui: quando o Google
+mexer no layout, o conserto e em `seletores.py` e o diagnostico e `conferir.py`.
 """
 
 from __future__ import annotations
@@ -4327,178 +4821,374 @@ from flowpool.nucleo.tipos import Conta, Modo
 from flowpool.transporte.base import (
     Estado, GeracaoFalhou, Pedido, ProjetoRemoto, SaldoInsuficiente, Sessao, SessaoMorta,
 )
+from flowpool.transporte.pw import dom
 from flowpool.transporte.pw import seletores as sel
-from flowpool.transporte.pw.sessao import abrir_contexto
+from flowpool.transporte.pw.sessao import abrir_contexto, interpretar_sessao
+
+# Fixa ate `Pedido` ganhar o campo — ver "Pendencias declaradas".
+DURACAO_PADRAO = "8s"
+# Chave de `sel.BAIXAR` por modo. 4K fica de fora dos dois: exige plano pago.
+RESOLUCAO = {
+    Modo.IMAGEM: "1k",          # "1K Tamanho original"
+    Modo.T2V: "720p",
+    Modo.FRAMES2V: "720p",
+    Modo.INGREDIENTS2V: "720p",
+}
+# Quantas vezes repetir um card falho pelo proprio botao `redo`, que NAO cobra de novo.
+MAX_REPETICOES = 2
 
 
 class TransportePlaywright:
     def __init__(self, timeout_ms: int = 600_000) -> None:
         self.timeout_ms = timeout_ms
+        self._repeticoes: dict[str, int] = {}
+        # `baixar` recebe so o id_remoto, e o menu de resolucao e diferente entre
+        # imagem e video. Guardar o modo no momento de gerar e mais barato do que
+        # adivinhar pelo DOM — e adivinhar errado baixaria a resolucao errada calado.
+        self._modo_do_card: dict[str, Modo] = {}
 
+    # ------------------------------------------------------------------ sessao
     async def abrir_sessao(self, conta: Conta) -> Sessao:
-        pw, ctx = await abrir_contexto(Path(conta.perfil), headless=False)
+        pw, ctx = await abrir_contexto(Path(conta.perfil))
         pagina = ctx.pages[0] if ctx.pages else await ctx.new_page()
-        await pagina.goto(sel.URL_PROJETO, wait_until="domcontentloaded")
-        if await pagina.locator(sel.LOGIN_VISIVEL).is_visible(timeout=5000):
+        await pagina.goto(sel.URL_FLOW, wait_until="domcontentloaded")
+        try:
+            # a prova de sessao viva e a API, nao a tela: deslogado o Flow devolve {}
+            # com HTTP 200, e a tela leva segundos para trocar para o botao de login
+            resposta = await pagina.request.get(sel.URL_BASE + sel.URL_SESSAO)
+            interpretar_sessao(await resposta.json())
+        except SessaoMorta:
             await ctx.close()
             await pw.stop()
             raise SessaoMorta(f"sessao de {conta.email} caiu")
         return Sessao(conta=conta, handle=(pw, ctx, pagina))
 
-    async def saldo(self, s: Sessao) -> int:
-        _, _, pagina = s.handle
-        texto = await pagina.locator(sel.CREDITOS).inner_text(timeout=15_000)
-        numeros = re.findall(r"\d[\d.,]*", texto)
-        if not numeros:
-            raise GeracaoFalhou(f"nao achei numero em {texto!r}")
-        return int(re.sub(r"[.,]", "", numeros[0]))
+    async def fechar(self, s: Sessao) -> None:
+        pw, ctx, _ = s.handle
+        await ctx.close()
+        await pw.stop()
 
+    # ------------------------------------------------------------------- saldo
+    async def saldo(self, s: Sessao) -> int:
+        """O saldo NAO fica na tela do projeto: mora no menu do avatar.
+
+        Custa dois cliques (abrir e fechar). Por isso o orquestrador le uma vez por
+        job, na reconciliacao, e nao a cada volta do polling.
+        """
+        _, _, pagina = s.handle
+        await pagina.locator(sel.AVATAR_CONTA).first.click(timeout=15_000)
+        try:
+            await pagina.wait_for_timeout(1200)
+            for texto in await pagina.evaluate(dom.TEXTOS_CURTOS, 60):
+                achado = re.search(sel.PADRAO_CREDITOS, texto)
+                if achado:
+                    return int(re.sub(r"[.,]", "", achado.group(1)))
+            raise GeracaoFalhou("nao achei o saldo no menu da conta")
+        finally:
+            # sem fechar, o menu fica por cima do chip e do prompt na proxima geracao
+            await pagina.keyboard.press("Escape")
+
+    # ---------------------------------------------------------------- projetos
     async def listar_projetos(self, s: Sessao) -> list[ProjetoRemoto]:
-        """Projetos DESTA conta. Nao existe lista global: cada conta ve so os seus."""
         _, _, pagina = s.handle
         await pagina.goto(sel.URL_FLOW, wait_until="domcontentloaded")
-        await pagina.locator(sel.LISTA_PROJETOS).wait_for(timeout=30_000)
-        achados = []
+        await pagina.locator(sel.CARD_PROJETO).first.wait_for(timeout=30_000)
+        achados: list[ProjetoRemoto] = []
         for card in await pagina.locator(sel.CARD_PROJETO).all():
             href = await card.get_attribute("href") or ""
-            nome = (await card.inner_text()).strip()
             id_remoto = href.rstrip("/").split("/")[-1]
+            nome = dom.sem_segredo((await card.inner_text()).strip()).splitlines()[0]
             if id_remoto:
                 achados.append(ProjetoRemoto(id_remoto=id_remoto, nome=nome))
         return achados
 
     async def criar_projeto(self, s: Sessao, nome: str) -> str:
-        """Cria e devolve o id lido DA URL depois que o projeto abre.
+        """SAO DUAS ETAPAS. "Novo projeto" cria e ENTRA direto, sem pedir nome.
 
-        Inventar o id (ou devolver o nome) gravaria no banco um vinculo que nunca abre,
-        e na geracao seguinte o app criaria outro projeto do mesmo produto.
+        Renomear e depois, por "Mais opcoes" -> "Renomear". Quem tratar isso como uma
+        etapa so acaba com uma conta cheia de "Projeto sem titulo", e a adocao por nome
+        (Task 7) para de funcionar — a proxima geracao do mesmo produto cria outro.
         """
         _, _, pagina = s.handle
         await pagina.goto(sel.URL_FLOW, wait_until="domcontentloaded")
-        await pagina.locator(sel.BOTAO_NOVO_PROJETO).click()
-        campo = pagina.locator(sel.CAMPO_NOME_PROJETO)
+        await pagina.locator(sel.BOTAO_NOVO_PROJETO).first.click(timeout=30_000)
+        await pagina.wait_for_url(re.compile(re.escape(sel.PADRAO_PROJETO)), timeout=30_000)
+        id_remoto = pagina.url.rstrip("/").split("/")[-1]
+        if not id_remoto or sel.PADRAO_PROJETO not in pagina.url:
+            raise GeracaoFalhou(f"projeto {nome!r} nao abriu depois de criado")
+
+        await pagina.locator(sel.BOTAO_MAIS_OPCOES).first.click(timeout=15_000)
+        await pagina.locator(sel.MENU_RENOMEAR).first.click(timeout=15_000)
+        campo = pagina.locator(sel.CAMPO_NOME_PROJETO).first
         await campo.wait_for(timeout=15_000)
         await campo.fill(nome)
-        await pagina.locator(sel.BOTAO_CRIAR_PROJETO).click()
-        await pagina.wait_for_url(re.compile(r"/flow/[^/]+$"), timeout=30_000)
-        id_remoto = pagina.url.rstrip("/").split("/")[-1]
-        if not id_remoto or id_remoto == "flow":
-            raise GeracaoFalhou(f"projeto {nome!r} nao abriu depois de criado")
+        await pagina.locator(sel.BOTAO_CONCLUIR_NOME).first.click(timeout=15_000)
+        await pagina.wait_for_timeout(1500)
         return id_remoto
 
     async def abrir_projeto(self, s: Sessao, id_remoto: str) -> None:
-        _, _, pagina = s.handle
-        await pagina.goto(sel.URL_PROJETO_ABERTO.format(id_remoto=id_remoto),
-                          wait_until="domcontentloaded")
-        # projeto de outra conta nao carrega: cai no login ou em erro. Deixar passar
-        # faria a geracao seguinte acontecer no projeto errado, ou em nenhum.
-        if await pagina.locator(sel.LOGIN_VISIVEL).is_visible(timeout=5000):
-            raise SessaoMorta(f"sessao de {s.conta.email} caiu ao abrir projeto")
-        await pagina.locator(sel.CAMPO_PROMPT).wait_for(timeout=30_000)
+        """NUNCA por goto. Deep link derruba a app com "Application error".
 
+        O Next espera chegar por navegacao interna. Vai-se a lista e CLICA-SE no card.
+        """
+        _, _, pagina = s.handle
+        if sel.PADRAO_PROJETO + id_remoto in pagina.url:
+            return
+        await pagina.goto(sel.URL_FLOW, wait_until="domcontentloaded")
+        card = pagina.locator(f'a[href*="{id_remoto}"]')
+        if await card.count() == 0:
+            # projeto de outra conta simplesmente nao aparece na lista. Seguir daqui
+            # geraria no projeto errado — ou em nenhum.
+            raise GeracaoFalhou(
+                f"projeto {id_remoto} nao esta na lista de {s.conta.email}")
+        await card.first.click()
+        await pagina.locator(sel.CAMPO_PROMPT).first.wait_for(timeout=30_000)
+
+    # -------------------------------------------------------------------- chip
+    def _painel(self, pagina):
+        return pagina.locator(sel.PAINEL_CHIP).first
+
+    async def _texto_do_chip(self, pagina) -> str:
+        bruto = await pagina.locator(sel.CHIP_CONFIG).first.inner_text(timeout=15_000)
+        return dom.seguro(bruto.replace("\n", " "))
+
+    async def _clicar_unico(self, escopo, seletor: str, o_que: str) -> None:
+        """Clica so quando ha EXATAMENTE um candidato.
+
+        E aqui que a regra "nunca por posicao" vira codigo. Um `.first`/`.last` num
+        menu ambiguo ja mandou um video do usuario para a lixeira, porque o ultimo item
+        do menu do card e "Mover para a lixeira". Ambiguidade e erro, nao escolha.
+        """
+        loc = escopo.locator(seletor)
+        n = await loc.count()
+        if n != 1:
+            raise GeracaoFalhou(f"{o_que}: esperava 1 candidato para {seletor!r}, achei {n}")
+        await loc.click(timeout=15_000)
+
+    async def _configurar(self, pagina, p: Pedido) -> str:
+        """Abre o chip, ajusta tudo e CONFERE. Devolve o texto final do chip.
+
+        Nada de passo tolerante. Um `except: segue` engoliu um clique de duracao que
+        nao pegou e entregou 8s onde foram pedidos 4s — com credito debitado, arquivo
+        na pasta e ninguem percebendo. Se o chip nao confirmar o estado, e erro.
+        """
+        modo = p.modo.value
+        permitidas = sel.PROPORCOES_POR_MODO[modo]
+        if p.proporcao not in permitidas:
+            raise GeracaoFalhou(
+                f"modo {modo} aceita so {permitidas}, e o job pediu {p.proporcao}")
+
+        await pagina.locator(sel.CHIP_CONFIG).first.click(timeout=15_000)
+        painel = self._painel(pagina)
+        await painel.wait_for(timeout=15_000)
+
+        # ordem importa: o modo redefine as listas de proporcao, duracao e modelo
+        await self._clicar_unico(painel, sel.BOTAO_MODO[modo], "modo")
+        await pagina.wait_for_timeout(1200)
+
+        await self._clicar_unico(painel, sel.DROPDOWN_MODELO, "dropdown de modelo")
+        await pagina.wait_for_timeout(1000)
+        await self._clicar_unico(pagina, sel.OPCAO_MODELO[p.modelo.value], "modelo")
+        await pagina.wait_for_timeout(1000)
+
+        # o modelo NAO aparece no texto do chip: confere-se aqui, com o painel aberto
+        rotulo = dom.seguro(await painel.locator(sel.DROPDOWN_MODELO).first.inner_text())
+        esperado = dom.sem_acento(sel.OPCAO_MODELO[p.modelo.value].split('"')[1])
+        if esperado not in rotulo:
+            raise GeracaoFalhou(f"modelo nao trocou: dropdown diz {rotulo!r}, "
+                                f"esperado {esperado!r}")
+
+        await self._clicar_unico(painel, sel.PROPORCAO[p.proporcao], "proporcao")
+        if p.modo is not Modo.IMAGEM:
+            await self._clicar_unico(painel, sel.DURACAO[DURACAO_PADRAO], "duracao")
+        await self._clicar_unico(painel, sel.QUANTIDADE[p.quantidade], "quantidade")
+
+        await pagina.keyboard.press("Escape")
+        await pagina.wait_for_timeout(1200)
+
+        chip = await self._texto_do_chip(pagina)
+        faltando = [
+            alvo for alvo in (
+                sel.ROTULO_MODO_NO_CHIP[modo],
+                sel.PROPORCAO[p.proporcao].split('"')[1],
+                f"x{p.quantidade}",
+                *(() if p.modo is Modo.IMAGEM else (DURACAO_PADRAO,)),
+            ) if alvo not in chip
+        ]
+        if faltando:
+            raise GeracaoFalhou(
+                f"chip nao confirma a configuracao: diz {chip!r}, faltou {faltando}")
+        return chip
+
+    # ------------------------------------------------------------------- gerar
     async def gerar(self, s: Sessao, p: Pedido) -> str:
-        # a pagina ja esta dentro do projeto certo: quem colocou foi o orquestrador
         _, _, pagina = s.handle
+        antes = await pagina.locator(sel.CARD_GRADE).count()
 
-        await self._subir_arquivos(pagina, p)
+        await self._configurar(pagina, p)
+        await self._anexar(pagina, p)
 
-        campo = pagina.locator(sel.CAMPO_PROMPT)
-        await campo.click()
-        await campo.fill(p.prompt)
+        # ARMADILHA: `input[aria-label="Texto editavel"]` e o NOME DO PROJETO. Escrever
+        # ali renomeia o projeto em vez de gerar, e o sintoma e "nada acontece" — que e
+        # o pior tipo de bug aqui. O campo certo e o unico contenteditable visivel.
+        campo = pagina.locator(sel.CAMPO_PROMPT).first
+        await campo.click(timeout=15_000)
+        await campo.fill("")
+        await campo.type(p.prompt, delay=8)
 
-        antes = await pagina.locator(sel.CARD_PRONTO).count()
-        await pagina.locator(sel.BOTAO_ENVIAR).click()
+        # dois botoes contem a palavra "Criar": anexar e enviar. So a ligadura separa.
+        await pagina.locator(sel.BOTAO_ENVIAR).first.click(timeout=15_000)
 
-        # ORDEM OBRIGATORIA: `tune Configuracoes` so existe depois que o agente
-        # respondeu ao primeiro prompt. Abrir antes da TimeoutError (Task 9).
-        await self._configurar_painel(pagina, p)
-
-        if await pagina.locator(sel.AVISO_SEM_CREDITO).is_visible(timeout=5000):
+        if await pagina.locator(sel.AVISO_SEM_CREDITO).count() > 0:
             raise SaldoInsuficiente(f"conta {s.conta.email} sem credito")
 
-        await pagina.locator(sel.CARD_GERANDO).first.wait_for(timeout=30_000)
-        # o "id remoto" aqui e o indice do card novo; o Flow nao expoe id na UI
-        return f"card-{antes}"
+        # o card novo aparecendo e a UNICA confirmacao de que o Flow aceitou o pedido
+        await self._esperar_card_novo(pagina, antes)
+        indice = 0 if sel.CARDS_NOVOS_PRIMEIRO else antes
+        id_remoto = f"card-{indice}"
+        self._repeticoes[id_remoto] = 0
+        self._modo_do_card[id_remoto] = p.modo
+        return id_remoto
 
-    async def _configurar_painel(self, pagina, p: Pedido) -> None:
-        """Modelo, proporcao e quantidade — nenhum dos tres pode ficar no default.
+    async def _esperar_card_novo(self, pagina, antes: int, teto_ms: int = 120_000) -> None:
+        gasto = 0
+        while gasto < teto_ms:
+            if await pagina.locator(sel.CARD_GRADE).count() > antes:
+                return
+            await pagina.wait_for_timeout(2000)
+            gasto += 2000
+        raise GeracaoFalhou("o Flow nao criou card novo depois do envio")
 
-        O dropdown de video abre em Omni Flash: sem trocar explicitamente, todo job
-        sai no modelo errado e sem erro nenhum. A quantidade multiplica o credito, e
-        o saldo ja foi reservado com o numero do job (Tasks 3 e 4) — deixar a UI
-        escolher faria o Flow cobrar o que o app nao previu.
+    async def _anexar(self, pagina, p: Pedido) -> None:
+        """Um unico `input[type=file]` (multiple, accept=image/*) serve a tudo.
+
+        Quem decide o que cada arquivo significa e o MODO ja escolhido no chip, nao o
+        seletor: em `crop_free` os arquivos viram frame inicial e final, em
+        `chrome_extension` viram referencias. Por isso `_configurar` roda ANTES daqui.
         """
-        tune = pagina.locator(sel.BOTAO_CONFIGURACOES)
-        await tune.wait_for(timeout=60_000)
-        await tune.click()
-
-        dropdown = (sel.DROPDOWN_MODELO_IMAGEM if p.modo is Modo.IMAGEM
-                    else sel.DROPDOWN_MODELO_VIDEO)
-        await pagina.locator(dropdown).click()
-        # correspondencia exata: "Nano Banana 2" e prefixo de "Nano Banana 2 Lite"
-        await pagina.locator(sel.OPCAO_MODELO[p.modelo.value]).first.click()
-
-        await pagina.locator(sel.PROPORCAO[p.proporcao]).click()
-        await pagina.locator(sel.QUANTIDADE[p.quantidade]).click()
-
-        await pagina.locator(sel.BOTAO_SALVAR_CONFIG).click()
-
-    async def _subir_arquivos(self, pagina, p: Pedido) -> None:
         if p.modo is Modo.INGREDIENTS2V:
-            await pagina.locator(sel.UPLOAD_REFERENCIA).set_input_files(
-                [str(Path(r)) for r in p.referencias[:3]]
-            )
+            arquivos = [str(Path(r)) for r in p.referencias[:3]]
         elif p.modo is Modo.FRAMES2V:
-            await pagina.locator(sel.UPLOAD_FRAME_INICIAL).set_input_files(
-                str(Path(p.frame_inicial))
-            )
-            if p.frame_final:
-                await pagina.locator(sel.UPLOAD_FRAME_FINAL).set_input_files(
-                    str(Path(p.frame_final))
-                )
+            arquivos = [str(Path(x)) for x in (p.frame_inicial, p.frame_final) if x]
+        else:
+            return
+        if not arquivos:
+            raise GeracaoFalhou(f"modo {p.modo.value} sem arquivo para anexar")
+        await pagina.locator(sel.UPLOAD).first.set_input_files(arquivos)
+        await pagina.wait_for_timeout(3000)
+
+    # --------------------------------------------------------------- consultar
+    async def _card(self, pagina, id_remoto: str):
+        indice = int(id_remoto.split("-")[1])
+        cards = pagina.locator(sel.CARD_GRADE)
+        if await cards.count() <= indice:
+            raise GeracaoFalhou(f"{id_remoto} sumiu da grade")
+        return cards.nth(indice)
 
     async def consultar(self, s: Sessao, id_remoto: str) -> Estado:
-        _, _, pagina = s.handle
-        indice = int(id_remoto.split("-")[1])
-        card = pagina.locator(sel.CARD_PRONTO).nth(indice)
-        if await card.count() > 0 and await card.is_visible():
-            return Estado.PRONTO
-        if await pagina.locator(sel.CARD_GERANDO).count() > 0:
-            return Estado.RODANDO
-        return Estado.FALHOU
+        """Le o estado pela GRADE, nunca pela conversa.
 
+        O agente so responde quando perguntado; a grade atualiza sozinha. E nao se
+        contam elementos <video> soltos: o Flow usa <video> em outros lugares da tela,
+        e o contador declararia "pronto" antes de existir card.
+        """
+        _, _, pagina = s.handle
+        card = await self._card(pagina, id_remoto)
+
+        if await card.locator(sel.CARD_FALHA).count() > 0:
+            vezes = self._repeticoes.get(id_remoto, 0)
+            if vezes < MAX_REPETICOES:
+                # `redo` repete SEM cobrar de novo. Repetir aqui, dentro de `consultar`,
+                # e o que faz o orquestrador nem tomar conhecimento: `_esperar` ve
+                # RODANDO e continua o polling, sem gastar tentativa do job nem
+                # reabrir navegador. O usuario decidiu que nao quer notificacao — entao
+                # a repeticao tem que ser invisivel e barata.
+                self._repeticoes[id_remoto] = vezes + 1
+                await self._clicar_unico(card, sel.BOTAO_REPETIR_CARD,
+                                         f"repetir {id_remoto}")
+                await pagina.wait_for_timeout(3000)
+                return Estado.RODANDO
+            # Sob o banner de alta demanda a falha e do Google, nao da conta. Levantar
+            # SaldoInsuficiente ou SessaoMorta aqui marcaria a conta seca ou expirada e
+            # um pico do Google derrubaria o pool inteiro. GeracaoFalhou nao marca nada.
+            if await pagina.locator(sel.AVISO_ALTA_DEMANDA).count() > 0:
+                raise GeracaoFalhou(
+                    "Flow em alta demanda: falha do Google, a conta esta boa")
+            return Estado.FALHOU
+
+        if await card.locator(sel.CARD_MIDIA).count() > 0:
+            return Estado.PRONTO
+        return Estado.RODANDO
+
+    # ------------------------------------------------------------------ baixar
     async def baixar(self, s: Sessao, id_remoto: str, destino: Path) -> Path:
         _, _, pagina = s.handle
-        indice = int(id_remoto.split("-")[1])
-        destino.parent.mkdir(parents=True, exist_ok=True)
-        card = pagina.locator(sel.CARD_PRONTO).nth(indice)
-        async with pagina.expect_download(timeout=self.timeout_ms) as espera:
-            await card.locator(sel.BOTAO_DOWNLOAD).click()
-        download = await espera.value
-        await download.save_as(destino)
-        return destino
+        card = await self._card(pagina, id_remoto)
 
-    async def fechar(self, s: Sessao) -> None:
-        pw, ctx, _ = s.handle
-        await ctx.close()
-        await pw.stop()
+        # o <video> nao e clicavel (e miniatura). O alvo e o centro do container.
+        caixa = await card.bounding_box()
+        if caixa is None:
+            raise GeracaoFalhou(f"{id_remoto} sem caixa na tela — nao da para clicar")
+        await pagina.mouse.click(caixa["x"] + caixa["width"] / 2,
+                                 caixa["y"] + caixa["height"] / 2, button="right")
+        menu = pagina.locator(sel.MENU_CARD).last
+        await menu.wait_for(timeout=15_000)
+        await self._logar_menu(pagina, menu)
+
+        await self._clicar_unico(menu, sel.MENU_BAIXAR, "item Baixar")
+        await pagina.wait_for_timeout(1500)
+
+        # assumir VIDEO quando o modo nao e conhecido e o default seguro: pedir "720p"
+        # num menu de imagem da zero candidatos e o `_clicar_unico` grita, enquanto
+        # pedir "Tamanho original" num menu de video baixaria em silencio o errado.
+        chave = RESOLUCAO[self._modo_do_card.get(id_remoto, Modo.T2V)]
+        async with pagina.expect_download(timeout=self.timeout_ms) as espera:
+            # os rotulos do submenu tem QUEBRA DE LINHA ("270p\nGIF animado"): passar o
+            # rotulo inteiro para um seletor CSS estoura o parser. `sel.BAIXAR` ja
+            # guarda so a primeira linha.
+            await self._clicar_unico(pagina, sel.BAIXAR[chave], f"resolucao {chave}")
+        download = await espera.value
+
+        # o Flow escolhe a extensao: jpeg para imagem, mp4 para video. O orquestrador
+        # montou `destino` com .png/.mp4 a partir do modo — se salvassemos ali, o banco
+        # apontaria para um .png que na verdade e JPEG. Devolver o caminho REAL faz
+        # `job.arquivo` ficar verdadeiro sem tocar na Task 7.
+        sufixo = Path(download.suggested_filename).suffix or destino.suffix
+        real = destino.with_suffix(sufixo)
+        real.parent.mkdir(parents=True, exist_ok=True)
+        await download.save_as(real)
+        return real
+
+    async def _logar_menu(self, pagina, menu) -> None:
+        """Imprime os candidatos ANTES de clicar. Barato, e ja teria evitado um
+        clipe do usuario indo para a lixeira."""
+        itens = [dom.seguro(t) for t in
+                 await menu.locator(sel.MENU_ITEM).all_inner_texts()]
+        print("menu do card:", [i.splitlines()[0] for i in itens if i])
 ```
 
-- [ ] **Step 2: Escrever o script de fumaça**
+Uma nota sobre `menu = pagina.locator(sel.MENU_CARD).last`: aqui `.last` **não** viola a regra do "nunca por posição". A regra é sobre escolher **item** de menu — foi um `.last` sobre itens que mandou um clipe para a lixeira. `.last` sobre o conjunto de menus abertos escolhe o submenu que acabou de nascer, e o item dentro dele continua sendo escolhido por texto, com `_clicar_unico` recusando ambiguidade.
+
+- [ ] **Step 2: Reescrever a fumaça em cima do transporte**
+
+A `fumaca.py` de hoje é um script solto que fala com o Flow direto — foi assim que o chip foi descoberto, e cumpriu o papel. A partir daqui ela passa a exercitar o **transporte**, senão são dois códigos concorrentes e só um é o que roda em produção.
 
 `flowpool/transporte/pw/fumaca.py`:
 
 ```python
-"""Teste de fumaca contra o Flow de verdade. Gasta credito.
+"""Fumaca contra o Flow real, pelo transporte de verdade.
+
+GASTA CREDITO em video. Imagem e gratuita (MEDIDO em 2026-08-20: saldo 50 -> 50).
 
 Uso:
-    python -m flowpool.transporte.pw.fumaca <perfil> <modelo> "<prompt>"
+    python -m flowpool.transporte.pw.fumaca <perfil> <modo> <modelo> "<prompt>" \
+        [arquivos...] [--proporcao 9:16] [--quantidade 1]
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
-import sys
 from pathlib import Path
 
 from flowpool.nucleo.tipos import Conta, Modelo, Modo, Tier
@@ -4509,10 +5199,10 @@ PRODUTO_FUMACA = "Fumaca"
 
 
 async def entrar_no_projeto(t: TransportePlaywright, s: Sessao, produto: str) -> str:
-    """Adota o projeto pelo nome, e so cria se nao existir.
+    """Adota pelo nome e so cria se nao existir — a MESMA ordem do orquestrador.
 
-    E a mesma ordem do orquestrador (`_resolver_projeto`), de proposito: rodar a
-    fumaca duas vezes nao pode deixar dois projetos "Fumaca" na conta.
+    De proposito: rodar a fumaca duas vezes nao pode deixar dois "Fumaca" na conta, e
+    e essa a unica forma de a fumaca provar a adocao.
     """
     achado = next((p for p in await t.listar_projetos(s) if p.nome == produto), None)
     id_remoto = achado.id_remoto if achado else await t.criar_projeto(s, produto)
@@ -4521,156 +5211,235 @@ async def entrar_no_projeto(t: TransportePlaywright, s: Sessao, produto: str) ->
     return id_remoto
 
 
-async def main(perfil: str, modelo: str, prompt: str) -> None:
+async def main(a: argparse.Namespace) -> None:
     t = TransportePlaywright()
-    conta = Conta(id=1, email="fumaca", tier=Tier.FREE, perfil=perfil)
+    conta = Conta(id=1, email="fumaca", tier=Tier.FREE, perfil=a.perfil)
+    modo = Modo(a.modo)
+    pedido = Pedido(
+        modo=modo, modelo=Modelo(a.modelo), prompt=a.prompt,
+        referencias=a.arquivos if modo is Modo.INGREDIENTS2V else [],
+        frame_inicial=a.arquivos[0] if modo is Modo.FRAMES2V and a.arquivos else None,
+        frame_final=a.arquivos[1] if modo is Modo.FRAMES2V and len(a.arquivos) > 1 else None,
+        proporcao=a.proporcao, quantidade=a.quantidade,
+    )
     s = await t.abrir_sessao(conta)
     try:
-        print("saldo antes:", await t.saldo(s))
-        # a fumaca tambem passa pelo projeto: gerar fora de um nao existe no Flow
+        antes = await t.saldo(s)
+        print("saldo antes:", antes)
         await entrar_no_projeto(t, s, PRODUTO_FUMACA)
-        # proporcao e quantidade explicitas: e o que o painel vai receber, e o que
-        # decide quanto credito a fumaca gasta
-        id_remoto = await t.gerar(s, Pedido(modo=Modo.T2V, modelo=Modelo(modelo),
-                                            prompt=prompt, proporcao="9:16",
-                                            quantidade=1))
+        id_remoto = await t.gerar(s, pedido)
         print("gerando:", id_remoto)
         while await t.consultar(s, id_remoto) is Estado.RODANDO:
-            await asyncio.sleep(5)
+            await asyncio.sleep(10)
             print("...")
-        destino = Path("scratch/fumaca.mp4")
-        print("arquivo:", await t.baixar(s, id_remoto, destino))
-        print("saldo depois:", await t.saldo(s))
+        # extensao de mentira de proposito: o transporte troca pela real do Flow
+        print("arquivo:", await t.baixar(s, id_remoto, Path("scratch/fumaca.mp4")))
+        depois = await t.saldo(s)
+        print(f"saldo depois: {depois}  (custo real: {antes - depois})")
     finally:
         await t.fechar(s)
 
 
 if __name__ == "__main__":
-    asyncio.run(main(sys.argv[1], sys.argv[2], sys.argv[3]))
+    p = argparse.ArgumentParser()
+    p.add_argument("perfil")
+    p.add_argument("modo", choices=[m.value for m in Modo])
+    p.add_argument("modelo", choices=[m.value for m in Modelo])
+    p.add_argument("prompt")
+    p.add_argument("arquivos", nargs="*")
+    p.add_argument("--proporcao", default="9:16")
+    p.add_argument("--quantidade", type=int, default=1)
+    asyncio.run(main(p.parse_args()))
 ```
 
-- [ ] **Step 3: Rodar a fumaça com o modelo mais barato**
+- [ ] **Step 3: Fumaça de imagem primeiro — é grátis**
 
 ```bash
-.venv/Scripts/python -m flowpool.transporte.pw.fumaca flowpool/perfis/mapeamento veo-lite "a cat walking on a wooden table, cinematic"
+.venv/Scripts/python -m flowpool.transporte.pw.fumaca flowpool/perfis/mapeamento \
+  imagem nano-banana "a red ceramic mug on a linen tablecloth"
 ```
 
-Expected: imprime saldo antes, gera, imprime `scratch/fumaca.mp4` e um saldo 10 menor. Se algum seletor falhar, corrija **em `seletores.py`**, nunca no transporte.
+Expected:
 
-- [ ] **Step 4: Anotar o custo real da imagem**
+```
+saldo antes: 50
+criado projeto: 6f0c...-...
+gerando: card-0
+...
+arquivo: scratch\fumaca.jpeg
+saldo depois: 50  (custo real: 0)
+```
 
-Rode a fumaça de novo com `nano-banana` e um prompt de imagem, e compare os saldos. Isso resolve a divergência anotada no spec (1–2 créditos vs zero). Registre o número medido num comentário em `flowpool/nucleo/custos.py` e ajuste `_CUSTO` se necessário.
+Repare em duas coisas: a extensão saiu **`.jpeg`**, não o `.mp4` que o comando pediu — é o transporte respeitando `suggested_filename`; e o custo saiu **0**, confirmando a medição. Se a extensão vier `.mp4`, `download.suggested_filename` não foi respeitado e o banco vai apontar para um arquivo mentiroso.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 4: Fumaça de vídeo — a que gasta**
 
 ```bash
-git add flowpool/transporte/pw/transporte.py flowpool/transporte/pw/fumaca.py flowpool/nucleo/custos.py
-git commit -m "feat: transporte playwright com saldo, t2v e download"
+.venv/Scripts/python -m flowpool.transporte.pw.fumaca flowpool/perfis/mapeamento \
+  t2v omni-flash "a slow push-in on a ceramic mug, soft window light"
+```
+
+Expected: `adotado projeto:` com o **mesmo** id do Step 3 (a adoção funcionando), `scratch/fumaca.mp4`, e `custo real: 12`. O vídeo tem que sair **vertical** — abra o arquivo e confirme. Saída em 16:9 significa que o clique na proporção não pegou e o `_configurar` não pegou o erro; nesse caso o defeito está na verificação, não só no clique.
+
+- [ ] **Step 5: Provar que a verificação do chip morde**
+
+Peça uma configuração que o modo não aceita e confirme que o transporte **recusa antes de gastar**:
+
+```bash
+.venv/Scripts/python -m flowpool.transporte.pw.fumaca flowpool/perfis/mapeamento \
+  t2v omni-flash "teste" --proporcao 1:1
+```
+
+Expected: `GeracaoFalhou: modo t2v aceita so ('9:16', '16:9'), e o job pediu 1:1`, **sem** o Chrome chegar a clicar no chip e **sem** crédito gasto. Esse passo é o que separa este plano do anterior: o comportamento antigo era clicar, não achar o botão, seguir em frente e gerar em 9:16 sem avisar.
+
+- [ ] **Step 6: Corrigir a tabela de custos com o que foi medido**
+
+A Task 2 rodou com os números **estimados** e o texto dela já foi corrigido para os medidos — este step é onde a correção chega ao código. Em `flowpool/nucleo/custos.py`, troque as entradas medidas e marque o que continua estimativa:
+
+```python
+_CUSTO: dict[tuple[Modelo, Tier], int] = {
+    # MEDIDO 2026-08-20, conta FREE, 720p / 8s / 9:16 / x1: saldo 50 -> 38.
+    # ATENCAO: o custo do video depende da CONFIGURACAO, nao so do modelo — pelo agente
+    # conversacional, a mesma familia de pedido anunciou 7 e 15 creditos em ajustes
+    # diferentes. Esta tabela e por modelo porque e so uma RESERVA anterior ao
+    # despacho; quem manda e a reconciliacao (`nucleo/credito.py`).
+    (Modelo.OMNI_FLASH, Tier.FREE): 12,
+    (Modelo.OMNI_FLASH, Tier.PRO): 12,
+    (Modelo.OMNI_FLASH, Tier.ULTRA): 6,   # EXTRAPOLADO: Ultra paga metade em Lite/Fast
+    # ESTIMATIVA — nenhum Veo foi medido ainda.
+    (Modelo.VEO_LITE, Tier.FREE): 10,
+    (Modelo.VEO_LITE, Tier.PRO): 10,
+    (Modelo.VEO_LITE, Tier.ULTRA): 5,
+    (Modelo.VEO_FAST, Tier.FREE): 20,
+    (Modelo.VEO_FAST, Tier.PRO): 20,
+    (Modelo.VEO_FAST, Tier.ULTRA): 10,
+    (Modelo.VEO_QUALITY, Tier.FREE): 100,
+    (Modelo.VEO_QUALITY, Tier.PRO): 100,
+    (Modelo.VEO_QUALITY, Tier.ULTRA): 100,
+    # MEDIDO 2026-08-20: imagem custa ZERO. Saldo 50 antes e 50 depois, e o Flow nem
+    # pede confirmacao. Desempata a divergencia que o spec carregava (1-2 vs zero).
+    (Modelo.NANO_BANANA, Tier.FREE): 0,
+    (Modelo.NANO_BANANA, Tier.PRO): 0,
+    (Modelo.NANO_BANANA, Tier.ULTRA): 0,
+}
+```
+
+E em `tests/test_custos.py`, os mesmos números — **a contagem de casos não muda**, só os valores esperados:
+
+- `(Modelo.NANO_BANANA, Tier.FREE, 2)` → `0` e `(Modelo.NANO_BANANA, Tier.ULTRA, 2)` → `0`
+- `test_omni_flash_tem_custo_nos_tres_tiers`: `(FREE, 20), (PRO, 20), (ULTRA, 10)` → `(FREE, 12), (PRO, 12), (ULTRA, 6)`
+
+`cabe_no_free` continua verdadeiro em todos os casos testados (0 × 4 = 0 ≤ 50; 12 ≤ 50), então nenhum outro teste muda.
+
+**Consequência de domínio, e ela é boa:** com imagem a **zero**, a escolha de conta deixa de discriminar por saldo em job de imagem — qualquer conta viva serve. Era exatamente o que o spec previa em *Notas de custo*, e agora está confirmado.
+
+- [ ] **Step 7: Rodar a suíte**
+
+Run: `.venv/Scripts/pytest -q`
+Expected: `184 passed` — o mesmo total do Task 10. Valores mudaram, casos não.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add flowpool/transporte/pw/transporte.py flowpool/transporte/pw/fumaca.py \
+        flowpool/nucleo/custos.py tests/test_custos.py
+git commit -m "feat: transporte playwright pelo chip, com verificacao e custos medidos"
 ```
 
 ---
 
-### Task 12: Fumaça dos outros três modos
+### Task 12: Fumaça dos quatro modos do chip
 
 **Files:**
-- Modify: `flowpool/transporte/pw/fumaca.py`, `flowpool/transporte/pw/seletores.py` (correções)
+- Modify: `flowpool/transporte/pw/seletores.py` (correções e os slots de upload), `flowpool/transporte/pw/transporte.py` (só se um modo exigir passo extra)
 
-- [ ] **Step 1: Estender o script de fumaça para aceitar modo e arquivos**
+Os quatro modos do spec são os quatro do **chip** — `image Imagem`, `videocam Vídeo`, `crop_free Frames`, `chrome_extension Elementos`. Não existem três `input[type=file]` distintos para referência, frame inicial e frame final: existe **um** input (`multiple`, `accept="image/*"`), e quem dá significado aos arquivos é o **modo já selecionado no chip**. Por isso `_configurar` roda antes de `_anexar` no transporte, e não o contrário.
 
-Substitua o `main` de `fumaca.py` por:
+O que ainda não está medido dentro de cada modo são os **slots**: em `crop_free`, como a UI separa "primeiro frame" de "último frame"; em `chrome_extension`, como ela lista as até três referências. Este task mede isso gerando de verdade.
+
+- [ ] **Step 1: Mapear os slots dos modos Frames e Elementos**
+
+Com o `conferir.py` da Task 9 aberto no projeto, troque o chip para `crop_free` e depois para `chrome_extension`, e anote em cada um: quantos `input[type=file]` a página passa a ter, e que rótulo/ligadura identifica cada slot. Registre em `seletores.py`:
 
 ```python
-async def main(perfil: str, modo: str, modelo: str, prompt: str,
-               arquivos: list[str], proporcao: str = "9:16",
-               quantidade: int = 1) -> None:
-    t = TransportePlaywright()
-    conta = Conta(id=1, email="fumaca", tier=Tier.FREE, perfil=perfil)
-    m = Modo(modo)
-    pedido = Pedido(
-        modo=m, modelo=Modelo(modelo), prompt=prompt,
-        referencias=arquivos if m is Modo.INGREDIENTS2V else [],
-        frame_inicial=arquivos[0] if m is Modo.FRAMES2V and arquivos else None,
-        frame_final=arquivos[1] if m is Modo.FRAMES2V and len(arquivos) > 1 else None,
-        # explicitos de proposito: e o que o painel vai receber, e a quantidade decide
-        # quanto credito a fumaca gasta
-        proporcao=proporcao, quantidade=quantidade,
-    )
-    s = await t.abrir_sessao(conta)
-    try:
-        print("saldo antes:", await t.saldo(s))
-        await entrar_no_projeto(t, s, PRODUTO_FUMACA)
-        id_remoto = await t.gerar(s, pedido)
-        while await t.consultar(s, id_remoto) is Estado.RODANDO:
-            await asyncio.sleep(5)
-            print("...")
-        ext = ".png" if m is Modo.IMAGEM else ".mp4"
-        print("arquivo:", await t.baixar(s, id_remoto, Path(f"scratch/fumaca{ext}")))
-        print("saldo depois:", await t.saldo(s))
-    finally:
-        await t.fechar(s)
-
-
-if __name__ == "__main__":
-    asyncio.run(main(sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5:]))
+# --- slots de upload por modo -------------------------------------------
+# UM input serve a tudo (multiple, accept=image/*). O MODO decide o significado:
+#   crop_free          -> primeiro e ultimo frame, na ordem em que sao enviados
+#   chrome_extension   -> ate 3 referencias de personagem/produto
+# Se a UI mostrar slots nomeados, eles entram aqui e `_anexar` passa a enviar um a um.
+SLOT_FRAME_INICIAL = "..."   # MEDIR neste task
+SLOT_FRAME_FINAL = "..."     # MEDIR neste task
+SLOT_REFERENCIA = "..."      # MEDIR neste task
 ```
 
-- [ ] **Step 2: Fumaça de imagem**
+Se os três continuarem `"..."` depois da medição porque a UI realmente usa um input só e ordem posicional, **deixe assim e escreva isso no comentário** — um seletor inventado é pior do que um campo vazio, porque o `conferir.py` passa a acusar quebra em algo que nunca existiu.
+
+- [ ] **Step 2: Fumaça do modo Imagem (`image`)**
 
 ```bash
-.venv/Scripts/python -m flowpool.transporte.pw.fumaca flowpool/perfis/mapeamento imagem nano-banana "a red ceramic mug on a linen tablecloth"
+.venv/Scripts/python -m flowpool.transporte.pw.fumaca flowpool/perfis/mapeamento \
+  imagem nano-banana "a red ceramic mug on a linen tablecloth"
 ```
 
-Expected: `scratch/fumaca.png` existe.
+Expected: `scratch/fumaca.jpeg`, `custo real: 0`, e o chip confirmado com `imagem`, `crop_9_16`, `x1` — sem `8s`, porque imagem não tem duração.
 
-- [ ] **Step 3: Fumaça de frames-to-video**
-
-Use uma imagem que já existe no projeto:
+- [ ] **Step 3: Fumaça do modo Frames (`crop_free`)**
 
 ```bash
-.venv/Scripts/python -m flowpool.transporte.pw.fumaca flowpool/perfis/mapeamento frames2v veo-lite "she slowly turns toward the mirror" "_Personagens/imagens/Clara/clara_01_frontal.jpg"
+.venv/Scripts/python -m flowpool.transporte.pw.fumaca flowpool/perfis/mapeamento \
+  frames2v omni-flash "she slowly turns toward the mirror" \
+  "_Personagens/imagens/Clara/clara_01_frontal.jpg"
 ```
 
-Expected: `scratch/fumaca.mp4` existe e o primeiro frame é a foto da Clara.
+Expected: `scratch/fumaca.mp4` e o **primeiro frame é a foto da Clara**. Se o vídeo começar em outra coisa, o arquivo foi para o slot errado (ou o modo não trocou) — volte ao Step 1.
 
-- [ ] **Step 4: Fumaça de ingredients-to-video**
+- [ ] **Step 4: Fumaça do modo Elementos (`chrome_extension`)**
 
 ```bash
-.venv/Scripts/python -m flowpool.transporte.pw.fumaca flowpool/perfis/mapeamento ingredients2v veo-lite "she walks toward the camera in a bright studio" "_Personagens/imagens/Clara/clara_01_frontal.jpg" "_Personagens/imagens/Clara/clara_02_tresquartos.jpg" "_Personagens/imagens/Clara/clara_03_perfil.jpg"
+.venv/Scripts/python -m flowpool.transporte.pw.fumaca flowpool/perfis/mapeamento \
+  ingredients2v omni-flash "she walks toward the camera in a bright studio" \
+  "_Personagens/imagens/Clara/clara_01_frontal.jpg" \
+  "_Personagens/imagens/Clara/clara_02_tresquartos.jpg" \
+  "_Personagens/imagens/Clara/clara_03_perfil.jpg"
 ```
 
-Expected: `scratch/fumaca.mp4` existe e o rosto é o da Clara. Três referências é o teto do Flow — o quarto arquivo é ignorado pelo `[:3]` no transporte, e a API já recusa com 422.
+Expected: `scratch/fumaca.mp4` com o rosto da Clara. Três referências é o teto do Flow — o quarto arquivo é cortado pelo `[:3]` no transporte, e a API já recusa com 422.
 
-- [ ] **Step 4b: Fumaça do painel — Omni Flash, vertical e lote**
-
-Duas rodadas, para provar que o painel foi mesmo configurado e não ficou no default:
+- [ ] **Step 5: Fumaça do modo Vídeo (`videocam`) em lote de imagem — a prova da quantidade**
 
 ```bash
-# 1) video no padrao do app: Omni Flash em 9:16, uma saida
-.venv/Scripts/python -m flowpool.transporte.pw.fumaca flowpool/perfis/mapeamento t2v omni-flash "a slow push-in on a ceramic mug, soft window light"
-
-# 2) imagem em lote: quatro variacoes, e o saldo tem que cair 4x
-.venv/Scripts/python -m flowpool.transporte.pw.fumaca flowpool/perfis/mapeamento imagem nano-banana "a red ceramic mug on linen" --quantidade 4
+# quatro variacoes de imagem: a grade tem que ganhar QUATRO cards
+.venv/Scripts/python -m flowpool.transporte.pw.fumaca flowpool/perfis/mapeamento \
+  imagem nano-banana "a red ceramic mug on linen" --quantidade 4
 ```
 
-Expected: o vídeo sai **vertical** (não 16:9) e o dropdown de vídeo mostra Omni Flash; a rodada de imagem devolve quatro variações e a diferença entre "saldo antes" e "saldo depois" é **quatro vezes** o custo de uma. Se a diferença for de uma só, o clique em `QUANTIDADE` não pegou — e é isso que faria o app reservar 8 e gastar 2 (ou o contrário) sem ninguém notar.
+Expected: quatro cards novos na grade e o chip confirmando `x4`. Com imagem a zero crédito, a prova aqui **não** é o saldo — é a contagem de cards. Um único card significa que o clique em `QUANTIDADE` não pegou, e é isso que faria o app reservar 4× o custo de um modelo pago e gastar 1× (ou o contrário) sem ninguém notar.
 
-Este é também o passo que mede o **custo real do Omni Flash**: `_CUSTO` o cadastra em 20/20/10 como estimativa declarada (Task 2). Anote o número medido e corrija a tabela.
+- [ ] **Step 6: Confirmar a ordem da grade**
 
-- [ ] **Step 5: Fumaça de projeto — reuso e adoção**
+Depois do Step 5 a grade tem vários cards de idades diferentes. Confirme onde o card novo entrou e ajuste `sel.CARDS_NOVOS_PRIMEIRO`. O teste é direto: gere mais um, e veja se `card-0` é o recém-nascido ou o mais velho.
 
-Rode qualquer uma das fumaças acima **duas vezes seguidas** e olhe a tela inicial do Flow depois.
+Errar isso é o modo de falha mais caro do transporte inteiro, porque **não dá erro**: o app baixa um clipe antigo, grava o caminho no banco, marca o job como pronto, e o vídeo errado entra no vídeo final.
 
-Expected: a segunda execução imprime `adotado projeto: <mesmo id>`, e a lista de projetos da conta contém **um** único "Fumaca". Dois projetos com o mesmo nome significam que `listar_projetos` não está devolvendo nome ou id direito — corrija `CARD_PROJETO` em `seletores.py`, nunca o transporte. Apague o duplicado na mão antes de seguir: o app não apaga projeto nenhum, de propósito.
+- [ ] **Step 7: Fumaça de projeto — reuso e adoção**
 
-- [ ] **Step 6: Corrigir os seletores que falharam**
+Rode qualquer uma das fumaças acima **duas vezes seguidas** e olhe a tela inicial do Flow.
 
-Toda correção vai em `seletores.py`. Se um modo exigir um passo extra na UI (por exemplo, abrir uma aba antes de aparecer o campo de upload), acrescente o seletor e o passo em `_subir_arquivos`, mantendo a regra: seletor no `seletores.py`, sequência no `transporte.py`.
+Expected: a segunda execução imprime `adotado projeto: <mesmo id>` e a lista da conta tem **um** único "Fumaca". Dois "Fumaca" significam que `listar_projetos` não devolveu nome ou id direito — ou que `criar_projeto` parou na primeira etapa e deixou o projeto com o nome padrão. Corrija em `seletores.py`; apague o duplicado à mão antes de seguir, porque o app não apaga projeto nenhum, de propósito.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Rodar o conferidor de novo**
+
+```bash
+.venv/Scripts/python -m flowpool.transporte.pw.conferir flowpool/perfis/mapeamento <uuid>
+```
+
+Expected: `0 faltando`. Depois de quatro modos exercitados, um seletor faltando aqui é seletor que só existia na cabeça de quem escreveu.
+
+- [ ] **Step 9: Commit**
 
 ```bash
 git add flowpool/transporte/pw
-git commit -m "feat: os quatro modos verificados contra o flow real"
+git commit -m "feat: os quatro modos do chip verificados contra o flow real"
 ```
 
 ---
@@ -4721,8 +5490,9 @@ def test_estado_devolve_o_dicionario_do_job(cliente):
 
 
 def test_padroes_sao_t2v_omni_flash_e_vertical(cliente):
-    # omni-flash porque e o que o dropdown de video do Flow ja mostra;
-    # 9:16 porque o canal e TikTok
+    # omni-flash porque e o padrao de video do Flow; 9:16 porque o canal e TikTok.
+    # 9:16 tambem e uma das DUAS unicas proporcoes que o chip aceita em video — as
+    # outras tres do painel so existem em modo imagem.
     jid = cliente.gerar(prompt="p", produto="Moda", nome="n")
     j = cliente.estado(jid)
     assert j["modo"] == "t2v"
@@ -4773,8 +5543,8 @@ class FlowPool:
         # (`{produto}/clipes`), e mandar null explicito seria a mesma coisa com ruido.
         #
         # `modelo="omni-flash"` e o padrao de video do Flow, nao Veo. `proporcao="9:16"`
-        # porque o canal e TikTok. `quantidade=1` porque video sai sempre um — pedir
-        # mais de um em modo de video e 422 na API, de proposito.
+        # porque o canal e TikTok — e porque video so aceita 9:16 e 16:9 no chip.
+        # `quantidade=1` porque video sai sempre um; mais de um em video e 422.
         r = self.http.post("/jobs", json={
             "modo": modo, "modelo": modelo, "prompt": prompt, "produto": produto,
             "nome": nome, "referencias": referencias or [],
@@ -4801,7 +5571,12 @@ class FlowPool:
 
     def esperar(self, job_id: int, intervalo: float = 10.0,
                 teto_s: float = 3600.0) -> str:
-        """Bloqueia ate o job terminar. Devolve o caminho do arquivo."""
+        """Bloqueia ate o job terminar. Devolve o caminho do arquivo.
+
+        O caminho pode NAO ter a extensao que voce esperava: o Flow entrega imagem em
+        JPEG, e o transporte respeita `download.suggested_filename` em vez de assumir.
+        Use o valor devolvido, nao monte o caminho por conta propria.
+        """
         limite = time.monotonic() + teto_s
         while time.monotonic() < limite:
             j = self.estado(job_id)
@@ -4842,18 +5617,41 @@ from flowpool.transporte.pw.transporte import TransportePlaywright
 RAIZ = Path(__file__).resolve().parent.parent   # a pasta "Tiktok Shop"
 BANCO = RAIZ / "flowpool" / "flowpool.db"
 
+# UM por enquanto, e o motivo nao e RAM.
+#
+# Cada worker precisa de uma janela de Chrome VISIVEL: o IntersectionObserver que
+# renderiza a lista de projetos e libera o aviso de privacidade nao dispara com
+# `visibilityState == 'hidden'`, e o Chrome no Windows marca como oculta a janela que
+# esta totalmente coberta por outra. Duas janelas empilhadas numa tela so sao uma
+# janela funcionando e outra travada sem erro nenhum.
+#
+# Alem disso, duas sessoes no mesmo perfil sao impossiveis: dois Chromes com o mesmo
+# --user-data-dir fazem o segundo entregar para o primeiro. O teto so pode subir com
+# contas distintas E espaco de tela — medir na Task 14, Step 6.
+MAX_SIMULTANEOS = 1
+
 
 def main() -> None:
     repo = Repo(BANCO)
     repo.criar_esquema()
     app = criar_app(repo=repo, transporte=TransportePlaywright(), raiz=RAIZ,
-                    rodar_motor=True)
+                    rodar_motor=True, max_simultaneos=MAX_SIMULTANEOS)
     uvicorn.run(app, host="127.0.0.1", port=8777)
 
 
 if __name__ == "__main__":
     main()
 ```
+
+`criar_app` ainda não aceita `max_simultaneos` — o `Orquestrador` aceita desde a Task 7, mas a fábrica não repassa. Abra `flowpool/api/app.py` e mude duas linhas:
+
+```python
+def criar_app(repo: Repo, transporte: FlowTransport, raiz: Path | str,
+              rodar_motor: bool = False, max_simultaneos: int = 3) -> FastAPI:
+    orq = Orquestrador(repo, transporte, raiz, max_simultaneos=max_simultaneos)
+```
+
+O default fica em 3 de propósito: mudá-lo aqui alteraria o comportamento dos testes da API, que rodam com transporte falso e nenhuma janela. Quem sabe do custo de tela é o `__main__`, e é ele que passa 1.
 
 - [ ] **Step 5: Rodar e ver passar**
 
@@ -4863,7 +5661,7 @@ Expected: `4 passed`
 - [ ] **Step 6: Rodar a suíte inteira**
 
 Run: `.venv/Scripts/pytest -q`
-Expected: `180 passed` (176 + 4 do cliente)
+Expected: `188 passed` (184 + 4 do cliente)
 
 - [ ] **Step 7: Commit**
 
@@ -4878,6 +5676,7 @@ git commit -m "feat: ponto de entrada e cliente do pipeline"
 
 **Files:**
 - Create: `flowpool/LEIA-ME.md`
+- Modify: `flowpool/transporte/pw/seletores.py` (`AVISO_SEM_CREDITO`, medido no Step 5)
 
 - [ ] **Step 1: Subir o serviço**
 
@@ -4892,18 +5691,25 @@ Expected: `Uvicorn running on http://127.0.0.1:8777`
 Em outro terminal:
 
 ```bash
-curl -X POST http://127.0.0.1:8777/contas -H "Content-Type: application/json" -d "{\"email\":\"<a conta gratis de teste>\",\"tier\":\"free\"}"
+curl -X POST http://127.0.0.1:8777/contas -H "Content-Type: application/json" \
+  -d "{\"email\":\"<a conta gratis de teste>\",\"tier\":\"free\"}"
 ```
 
-Expected: abre uma janela do Chrome; após o login manual, o comando devolve a conta com `"saude":"viva"`.
+Expected: no terminal do serviço aparecem as `INSTRUCOES` e uma janela do Chrome abre — **um Chrome comum, não o do Playwright**. Siga os cinco passos impressos: logar, consentimento com as **duas caixas desmarcadas** → "Avançar", aviso de privacidade **rolado até o fim** → "Continuar", conferir a lista de projetos, **fechar a janela**. Aí o `curl` devolve a conta com `"saude":"viva"`.
 
-- [ ] **Step 3: Disparar um lote de três clipes**
+Se o `curl` voltar 409 com "ja esta aberto em outro Chrome", há uma janela sobrando naquele perfil — feche-a e repita. Se voltar 409 com "login nao concluiu", a janela foi fechada antes de a sessão existir.
+
+**Confirme que a fila não congelou durante o login:** com o serviço no ar e o Chrome aberto, `GET /saude` tem que responder na hora. Se demorar, o `asyncio.to_thread` do `cadastrar` não está no lugar e o motor inteiro fica parado pelos minutos do login.
+
+- [ ] **Step 3: Disparar um lote que a conta paga inteiro**
+
+Omni Flash custa **12** em conta grátis (medido). Quatro cabem em 50 e sobram 2:
 
 ```bash
-curl -X POST http://127.0.0.1:8777/jobs/lote -H "Content-Type: application/json" -d "{\"jobs\":[{\"modo\":\"t2v\",\"modelo\":\"veo-lite\",\"prompt\":\"a cat on a table\",\"produto\":\"Fumaca\",\"destino\":\"scratch\",\"nome\":\"e1\"},{\"modo\":\"t2v\",\"modelo\":\"veo-lite\",\"prompt\":\"a dog in a park\",\"produto\":\"Fumaca\",\"destino\":\"scratch\",\"nome\":\"e2\"},{\"modo\":\"t2v\",\"modelo\":\"veo-lite\",\"prompt\":\"rain on a window\",\"produto\":\"Fumaca\",\"destino\":\"scratch\",\"nome\":\"e3\"}]}"
+curl -X POST http://127.0.0.1:8777/jobs/lote -H "Content-Type: application/json" -d "{\"jobs\":[{\"modo\":\"t2v\",\"modelo\":\"omni-flash\",\"prompt\":\"a cat on a table\",\"produto\":\"Fumaca\",\"destino\":\"scratch\",\"nome\":\"e1\"},{\"modo\":\"t2v\",\"modelo\":\"omni-flash\",\"prompt\":\"a dog in a park\",\"produto\":\"Fumaca\",\"destino\":\"scratch\",\"nome\":\"e2\"},{\"modo\":\"t2v\",\"modelo\":\"omni-flash\",\"prompt\":\"rain on a window\",\"produto\":\"Fumaca\",\"destino\":\"scratch\",\"nome\":\"e3\"},{\"modo\":\"t2v\",\"modelo\":\"omni-flash\",\"prompt\":\"steam over a mug\",\"produto\":\"Fumaca\",\"destino\":\"scratch\",\"nome\":\"e4\"}]}"
 ```
 
-Expected: `{"ids":[1,2,3]}`. Uma conta grátis com 50 créditos paga três Lite (30) e sobra 20.
+Expected: `{"ids":[1,2,3,4]}`.
 
 - [ ] **Step 4: Acompanhar até o fim**
 
@@ -4911,13 +5717,34 @@ Expected: `{"ids":[1,2,3]}`. Uma conta grátis com 50 créditos paga três Lite 
 curl http://127.0.0.1:8777/saude
 ```
 
-Expected, ao final: `fila_pendente: 0`, e os três arquivos em `scratch/e1.mp4`, `e2.mp4`, `e3.mp4`.
+Expected, ao final: `fila_pendente: 0`, `credito_total` perto de 2, e `scratch/e1.mp4` … `scratch/e4.mp4` no disco. Todos os quatro no **mesmo** projeto "Fumaca" da conta — um `projeto_criado` e três `projeto_adotado` na tabela de eventos.
 
-- [ ] **Step 5: Verificar a troca de conta**
+- [ ] **Step 5: Esvaziar a conta e medir `AVISO_SEM_CREDITO`**
 
-Dispare um quarto e um quinto Lite. O quarto passa (sobram 20), o quinto encontra a conta sem crédito. Confirme em `GET /jobs?estado=pendente` que ele ficou pendente com `reavaliar_em` preenchido — **não** falhou. Esse é o comportamento que sustenta o pool inteiro.
+Um quinto job com 2 créditos na conta é o único jeito honesto de medir o aviso de saldo insuficiente — é o último item aberto do mapa de seletores.
 
-- [ ] **Step 6: Escrever o LEIA-ME**
+```bash
+curl -X POST http://127.0.0.1:8777/jobs -H "Content-Type: application/json" \
+  -d "{\"modo\":\"t2v\",\"modelo\":\"omni-flash\",\"prompt\":\"a bird on a wire\",\"produto\":\"Fumaca\",\"destino\":\"scratch\",\"nome\":\"e5\"}"
+```
+
+Expected: o job **fica pendente** com `reavaliar_em` preenchido — **não** falha. Como o guarda local (`reservar`) já barra 12 contra 2, o job nem chega ao Flow, e é esse comportamento que sustenta o pool: sem conta apta, o job espera o reset em vez de queimar tentativas.
+
+Para ver o aviso da própria UI, abra o projeto no Chrome do perfil e mande gerar à mão. Anote o texto exato e preencha:
+
+```python
+AVISO_SEM_CREDITO = 'text=/<o texto medido>/i'
+```
+
+Rode `conferir.py` de novo — o resumo tem que fechar em `0 faltando, 0 pendentes`.
+
+- [ ] **Step 6: Medir o teto de simultâneos**
+
+Com **duas** contas cadastradas e `MAX_SIMULTANEOS = 2`, dispare dois jobs de produtos diferentes e observe as duas janelas do Chrome lado a lado, **sem sobreposição**. Se ambas concluírem, o teto 2 é real nesta máquina; se a janela de trás travar sem erro, o Chrome a marcou como ocluída e o teto continua 1.
+
+Anote o número medido em `MAX_SIMULTANEOS` e no LEIA-ME. Este é o número que o spec deixou explicitamente em aberto — deixar 3 chutado ali era o que transformaria "não cabe na tela" num job travado sem mensagem.
+
+- [ ] **Step 7: Escrever o LEIA-ME**
 
 `flowpool/LEIA-ME.md`:
 
@@ -4937,8 +5764,19 @@ Sobe em http://127.0.0.1:8777.
     curl -X POST http://127.0.0.1:8777/contas -H "Content-Type: application/json" \
       -d '{"email":"conta@gmail.com","tier":"free"}'
 
-Abre uma janela do Chrome. Loga na mão. A sessão fica guardada em `perfis/`.
-Precisa ser o **Chrome instalado** — o Chromium do Playwright é recusado pelo Google.
+Abre uma janela do **Chrome comum** (não o do Playwright: o Google recusa o login em
+navegador dirigido por automação). O terminal do serviço imprime os cinco passos:
+
+1. Logar na conta Google.
+2. Consentimento: **deixar as duas caixas desmarcadas** → "Avançar".
+3. Aviso de privacidade: **rolar até o fim do texto** → "Continuar". O botão só habilita
+   quando o fim do texto entra na tela de verdade.
+4. Conferir que a lista de projetos carregou.
+5. **Fechar a janela.** O cadastro continua sozinho.
+
+A sessão fica guardada em `perfis/` e vive **cerca de 48 horas**. Quando cair, a conta
+aparece em `GET /saude` como expirada e o conserto é `POST /contas/{id}/revalidar` —
+que é o mesmo fluxo, com a mesma janela.
 
 ## Gerar
 
@@ -4948,36 +5786,50 @@ Precisa ser o **Chrome instalado** — o Chromium do Playwright é recusado pelo
     caminho = fp.esperar(jid)
 
 Sem dizer o modelo, vídeo sai em **Omni Flash** (é o padrão do próprio Flow) e imagem
-em Nano Banana. Sem dizer a proporção, sai em **9:16** — vertical, formato do TikTok.
+em Nano Banana. Sem dizer a proporção, sai em **9:16**.
 
-    # quatro variações de imagem para escolher (custa 4x)
+    # quatro variações de imagem para escolher (e imagem não custa crédito)
     jid = fp.gerar(prompt="...", produto="Panelas Monaco", nome="capa",
                    modo="imagem", quantidade=4)
 
+Use o caminho que `esperar` devolve — imagem sai em **.jpeg**, não em .png.
+
 ## O que saber
 
-- Conta grátis: 50 créditos/dia. Lite 10, Fast 20, Omni Flash ~20 (estimado, a medir).
-  **Quality (100) nunca cabe** — vai para conta paga.
+- Conta grátis: 50 créditos/dia. **Medido**: Omni Flash 12 (720p, 8s, 9:16, x1),
+  **imagem 0**. Veo Lite 10 / Fast 20 / Quality 100 continuam estimativa.
+  **Quality nunca cabe em conta grátis** — vai para conta paga.
+- O custo do vídeo depende da configuração, não só do modelo. A tabela serve para
+  reservar antes de despachar; o número verdadeiro vem da reconciliação de saldo.
+- **Vídeo só aceita 9:16 e 16:9.** As cinco proporções existem, mas as outras três só
+  em modo imagem. Pedir 1:1 num vídeo é recusado antes de gastar crédito.
+- Duração de vídeo está **fixa em 8s**. O chip aceita 4s/6s/8s/10s; o campo ainda não
+  atravessa a API.
 - Vídeo sai sempre **uma** geração por job; `quantidade` acima de 1 só em `modo=imagem`
-  (até 4) e é 422 no resto. Take de vídeo é escolha sua, não sorteio — e cada take
-  extra custa cheio. `quantidade` multiplica o crédito reservado.
-- Proporção padrão **9:16**. Os valores aceitos são `16:9`, `4:3`, `1:1`, `3:4`, `9:16`;
-  qualquer outro é 422.
+  (até 4) e é 422 no resto.
 - Job sem conta apta não falha: espera o reset e volta sozinho.
-- Sessão caída exige pessoa: `POST /contas/{id}/revalidar`.
+- Geração que falha é **repetida sozinha** pelo botão `redo` do próprio card, que não
+  cobra de novo. Não há notificação, de propósito.
+- Instabilidade do Google ("Flow is currently experiencing high demand") **não** marca
+  a conta como seca nem expirada — é falha do Flow, não da conta.
+- Uma janela de Chrome **visível** por worker. Janela coberta por outra conta como
+  oculta e a geração trava sem erro. Por isso `MAX_SIMULTANEOS` começa em 1.
 - `produto` é obrigatório: é a pasta de destino (`{produto}/clipes`, se você não mandar
   `destino`) e o nome do projeto no Flow.
 - Um projeto por produto **em cada conta** — projeto do Flow pertence a uma conta só.
   Veja em `GET /projetos`. `DELETE /projetos/{id}` esquece o vínculo local; o projeto
   continua no Flow e é readotado pelo nome na próxima geração.
-- Quando o Google mexer no layout, o conserto é em `transporte/pw/seletores.py`.
+- Quando o Google mexer no layout: rode
+  `python -m flowpool.transporte.pw.conferir <perfil> <uuid>` **antes** de investigar
+  qualquer outra coisa. Ele diz qual seletor morreu. O conserto é sempre em
+  `transporte/pw/seletores.py`, nunca no transporte.
 ```
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add flowpool/LEIA-ME.md
-git commit -m "docs: leia-me do flowpool"
+git add flowpool/LEIA-ME.md flowpool/transporte/pw/seletores.py
+git commit -m "docs: leia-me do flowpool e aviso de saldo medido"
 ```
 
 ---

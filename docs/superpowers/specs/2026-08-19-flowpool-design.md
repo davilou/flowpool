@@ -31,7 +31,9 @@ A aritmética que justifica o esforço: conta sem assinatura recebe 50 créditos
 
 **Conta grátis nunca roda Veo Quality.** São 100 créditos por geração contra teto de 50/dia. Quality é exclusivo das contas pagas. Grátis roda Omni Flash, Lite, Fast e imagem.
 
-O custo do **Omni Flash** ainda não foi medido. Entra como estimativa declarada na faixa do Veo Fast (20 grátis/Pro, 10 Ultra) — errar por alto só reserva crédito a mais, e a reconciliação de saldo corrige na primeira execução real, do mesmo jeito que vai desempatar a nota sobre custo de imagem.
+O custo do **Omni Flash** foi medido (20/08): **12 créditos** em conta grátis, a 720p/8s/9:16/x1 — saldo 50 → 38. Não é a faixa do Veo Fast que a estimativa supunha. Ver *Notas de custo*.
+
+**A sessão expira em ~48 horas** (medido: o `expires` de `/fx/api/auth/session` volta dois dias à frente). Revalidar é o mesmo fluxo do cadastro — mesma janela, mesmo perfil, mesmas duas telas —, então não é um caminho excepcional do app: é rotina de dois em dois dias, por conta. Com vinte contas, isso é o custo humano recorrente do pool, e é ele que decide se vinte contas é um número praticável.
 
 **Pool misto:** 1–2 contas pagas (Pro = 1.000 créditos/mês; Ultra = 10.000 ou 25.000/mês) mais o resto grátis.
 
@@ -58,9 +60,9 @@ Python 3.13 (mesmo do pipeline), FastAPI + uvicorn, SQLite, Playwright async, ht
 
 Três decisões tomadas pelo Davi depois do mapeamento do painel de configuração (20/08), com o porquê de cada uma. Elas mudam o domínio, não só a interface.
 
-**O modelo padrão de vídeo é Omni Flash, não Veo.** O dropdown de vídeo do Flow **já abre em Omni Flash** — é o que a interface faz quando ninguém escolhe nada. Um transporte que não troque o modelo explicitamente gera nele, e o job sairia "Veo" no banco e Omni Flash na realidade, sem erro nenhum para denunciar. Duas consequências: `Modelo` ganha `OMNI_FLASH`, e é ele o padrão da API quando o pedido não diz o modelo (imagem herda `nano-banana`). O custo entra como **estimativa declarada** — 20/20/10, a faixa do Veo Fast — porque ninguém mediu ainda; errar por alto só reserva crédito a mais, e a reconciliação de saldo corrige na primeira execução real. Ficar sem custo cadastrado seria pior: levantaria `ModeloSemCusto` no caminho mais usado do app.
+**O modelo padrão de vídeo é Omni Flash, não Veo.** O dropdown de vídeo do Flow **já abre em Omni Flash** — é o que a interface faz quando ninguém escolhe nada. Um transporte que não troque o modelo explicitamente gera nele, e o job sairia "Veo" no banco e Omni Flash na realidade, sem erro nenhum para denunciar. Duas consequências: `Modelo` ganha `OMNI_FLASH`, e é ele o padrão da API quando o pedido não diz o modelo (imagem herda `nano-banana`). O custo entrou como estimativa declarada (20/20/10, a faixa do Veo Fast) e a medição de 20/08 o corrigiu para **12** em conta grátis — a estimativa estava alta, que era o lado certo de errar. Ficar sem custo cadastrado seria pior: levantaria `ModeloSemCusto` no caminho mais usado do app. Ver *Notas de custo*.
 
-**A proporção padrão é 9:16, sobrescrevível por pedido.** O canal do Davi é TikTok. Hoje ele gera em horizontal e recorta à mão depois; gerar já em vertical elimina esse passo e o recorte que ele custa. Os valores aceitos são exatamente os cinco botões do painel — `16:9`, `4:3`, `1:1`, `3:4`, `9:16` — porque um sexto valor não teria onde clicar. Continua por pedido: o padrão serve ao caso comum, não impede o resto.
+**A proporção padrão é 9:16, sobrescrevível por pedido.** O canal do Davi é TikTok. Hoje ele gera em horizontal e recorta à mão depois; gerar já em vertical elimina esse passo e o recorte que ele custa. Os valores aceitos são exatamente os cinco botões do painel — `16:9`, `4:3`, `1:1`, `3:4`, `9:16` — porque um sexto valor não teria onde clicar. Continua por pedido: o padrão serve ao caso comum, não impede o resto. Medido depois: em **vídeo** o chip só oferece `9:16` e `16:9`, então o padrão do canal é também uma das duas únicas opções — o caso comum e o caso possível coincidem.
 
 **Vídeo sai sempre em uma geração; imagem em lote só quando pedido explicitamente.** Razão do usuário: **take de vídeo é escolha dele, não sorteio.** Quatro variações de um vídeo não é escolher entre quatro takes — é gastar quatro vezes o crédito para receber três descartes. Variação de imagem é o oposto: barata, e serve justamente para escolher. Por isso `quantidade` aceita 1 a 4 em `modo=imagem` e **só 1** nos três modos de vídeo; um pedido de vídeo com mais é recusado com 422, e recusar é melhor do que gerar três vídeos que ninguém pediu.
 
@@ -167,6 +169,8 @@ Pelo mesmo motivo, `DELETE /projetos/{id}` **esquece o vínculo local e não toc
 
 Três operações: `listar_projetos`, `criar_projeto` (devolve o id remoto) e `abrir_projeto`. Todas partem de uma sessão já aberta, porque não existe lista global de projetos — cada conta enxerga só os seus. `criar_projeto` devolve o id lido **da URL** depois que o projeto abre: um id inventado gravaria no banco um vínculo que nunca abre, e a geração seguinte criaria outro projeto do mesmo produto.
 
+Medido em 20/08: **criar projeto são duas etapas, não uma.** "Novo projeto" cria e **entra direto, sem pedir nome**; o nome sai padrão, e renomear é depois, por "Mais opções" → "Renomear". Quem tratar isso como uma etapa só acaba com uma conta cheia de projetos sem título — e aí a **adoção por nome** para de funcionar, porque não há nome que case com o produto, e cada geração cria um projeto novo. É a política inteira de *Resolução, com adoção* dependendo de um segundo clique.
+
 O transporte não decide projeto: ele lista, cria e abre. Quem decide é o motor, e por isso a política inteira continua testável sem navegador nenhum.
 
 `abrir_projeto` não pode ser um `page.goto` direto para a URL do projeto. Medido em campo (20/08): `page.goto("https://labs.google/fx/pt/tools/flow/project/<uuid>")` derruba a aplicação com "Application error: a client-side exception has occurred" — o Next.js espera chegar ali por navegação interna, não por carga direta da URL. `abrir_projeto` por isso navega para a lista (a mesma tela que `listar_projetos` usa) e **clica no card** cujo `href` contém o id remoto; nunca faz `goto` direto ao id.
@@ -189,6 +193,12 @@ Um worker por conta viva, com teto global de simultâneos (configurável; começ
 **Falha ao escolher conta devolve o job.** A reivindicação é atômica, então quando a escolha de conta acontece o job **já está `rodando`** no banco. Uma exceção subindo dali o deixava travado nesse estado até o próximo boot: o laço do motor sobrevive, mas o job não volta para a fila, e `recuperar()` só roda na próxima subida. `ModeloSemCusto` é exatamente o caso que chega ali — o custo é consultado para cada conta do pool durante a escolha. A falha vira evento `escolha_falhou` e o job volta para `pendente` **gastando uma tentativa**: é erro de configuração, e reprocessar para sempre um modelo sem custo cadastrado não conserta o cadastro.
 
 **O laço do motor não morre em silêncio.** Toda exceção que escapa de um passo vira evento (`passo_falhou`) e o laço continua. Sem isso a task do motor termina e ninguém observa: a API segue respondendo HTTP normalmente enquanto a fila nunca mais anda.
+
+**Geração falha é repetida pelo card, e o motor nem fica sabendo.** Medido em 20/08: um card que falha mostra "Ops! Algo deu errado" e um botão `redo` **no próprio card, que repete sem cobrar de novo**. O transporte clica nele durante `consultar` e devolve `rodando` — então o polling do motor simplesmente continua, sem gastar tentativa do job, sem devolver à fila e sem reabrir navegador. Decisão do Davi: **não quer notificação**; a repetição tem que ser invisível e barata, e é o `redo` que a torna barata. Só depois de esgotadas as repetições o job vira falha de verdade.
+
+**Instabilidade do Google não é problema da conta.** O Flow mostra um banner — *"Flow is currently experiencing high demand, affecting video generation"* — em pico de demanda. Falha sob esse aviso **nunca** pode marcar a conta como seca nem como expirada: seria um pico do Google derrubando o pool inteiro de uma vez, e cada conta assim marcada exige reset estimado ou login humano para voltar. O transporte trata isso levantando o erro genérico de geração, que o motor já sabe repetir sem tocar na saúde da conta.
+
+**O teto de simultâneos é sobre janelas visíveis, e começa em 1.** Ver *Transporte* para as duas medições que derrubaram o 3.
 
 ## API HTTP
 
@@ -232,6 +242,8 @@ Corpo de `POST /jobs`:
 
 `proporcao` é opcional e vale `9:16` quando ausente. Valor fora de `16:9 | 4:3 | 1:1 | 3:4 | 9:16` é **422**: o painel tem cinco botões, e um sexto valor não teria onde clicar.
 
+Medido em 20/08, e ainda **não** refletido aqui: em modo vídeo o chip oferece **só** `9:16` e `16:9`. As outras três só existem em imagem. Enquanto a API aceitar as cinco para qualquer modo, quem recusa é o transporte — cedo, antes de tocar no chip e com a reserva ainda estornável. O lugar certo é este 422, junto com o de `quantidade`, e isso entra no mesmo task que acrescentar `duracao`.
+
 `quantidade` é opcional, vale `1`, e o teto depende do modo: **imagem aceita 1 a 4; os três modos de vídeo aceitam somente 1.** Vídeo com `quantidade > 1` é **422**. Recusar na entrada é melhor do que gerar três vídeos que ninguém pediu — e a mesma quantidade multiplica o crédito reservado, ver *Contabilidade de crédito*.
 
 ## Modos suportados
@@ -240,18 +252,34 @@ Os quatro do Flow: **text-to-video**, **frames-to-video** (1º e opcionalmente �
 
 Os quatro rodam **dentro de um projeto**, e do mesmo projeto: o projeto é escolhido pelo `produto` do job, não pelo modo. Um produto que gera imagem de referência e depois o vídeo a partir dela guarda as duas coisas no mesmo lugar — que é como uma pessoa usaria o Flow na mão. Ver *Projetos*.
 
-Observação de campo (20/08): a UI tem **um único** `input[type=file]` (`multiple=True`, `accept="image/*"`), não três campos separados para referência/frame inicial/frame final. A distinção entre "isto é uma referência" e "isto é o frame inicial" acontece por outro caminho da interface, ainda não mapeado — o transporte manda os arquivos certos para o mesmo input; quem decide o que cada um significa é a UI, não o seletor.
+### O chip: os quatro modos são quatro botões
 
-Observação de campo (19/08, confirmada em 20/08): o Flow passou a expor um modelo **Gemini Omni** — vídeo a partir de qualquer referência, com edição conversacional. O mapeamento do painel mostrou que ele não é só mais uma opção: **`Omni Flash` é o padrão do dropdown de vídeo**. Entrou no escopo como `Modelo.OMNI_FLASH` e como padrão de vídeo da API. A previsão de deixar o campo `modelo` aberto se pagou — acomodou o modelo novo sem migração nenhuma.
+Medido em 20/08. Os quatro modos **não** são quatro telas nem quatro conjuntos de campos: são quatro botões de um mesmo painel, aberto por um **chip** na barra do prompt. O chip mostra o estado atual em texto (`Vídeo · 720p · 8s crop_9_16 x1`) e, clicado, abre tudo o que se configura:
 
-O painel de configuração da geração (`tune Configurações`) tem quatro grupos: confirmação do agente, **proporção**, **quantidade** e **dois** dropdowns de modelo — um de imagem, um de vídeo. Não é um seletor único: o transporte mexe no dropdown que corresponde ao modo do job.
+| grupo | valores medidos |
+|---|---|
+| modo | `image Imagem`, `videocam Vídeo`, `crop_free Frames`, `chrome_extension Elementos` |
+| proporção | vídeo aceita **só** `9:16` e `16:9`; imagem aceita as cinco |
+| duração | só vídeo: `4s`, `6s`, `8s`, `10s` |
+| quantidade | `x1` a `x4` |
+| modelo | **um** dropdown, cuja lista muda com o modo |
 
-Dois deles atravessam o domínio inteiro, e por isso viram campo do job (`proporcao`, `quantidade`) e do `Pedido` que cruza a fronteira do transporte. Sem atravessar, o Flow geraria sempre no default da UI e o pedido do usuário seria ignorado **em silêncio** — o pior modo de falha deste app, porque a saída existe e parece certa. As decisões e o porquê estão em *Decisões de geração*.
+Isso desfaz três suposições que este spec carregou até 20/08:
 
-Duas armadilhas medidas, que o transporte precisa respeitar:
+1. **Não existem dois dropdowns de modelo.** Existe um, e ele lista Omni Flash / Veo 3.1 Lite / Fast / Quality em vídeo, e Nano Banana Pro / 2 / 2 Lite em imagem.
+2. **`tune Configurações` não é o painel de geração.** É a política de confirmação do agente conversacional. A armadilha de ordem que ele impunha ("só aparece depois do primeiro prompt") sai do caminho da geração: o chip existe desde o primeiro instante do projeto.
+3. **A confirmação do agente deixa de ser obstáculo.** Configurando pelo chip, o Flow não pergunta nada: debita e gera. O radio "Sempre"/"Nunca" governa só o agente, que o transporte não usa. Ver o trade-off em *Transporte*.
 
-- **`tune Configurações` não existe numa sessão nova.** Só aparece depois que o primeiro prompt foi enviado ao agente; abrir antes dá timeout. A sequência é: escrever o prompt → enviar → esperar a resposta → abrir `tune` → configurar → salvar.
-- **A confirmação do agente vem em "Sempre"**, o que faz ele pedir autorização antes de gastar crédito. Nessa configuração o robô não falha com erro: fica pendurado até o timeout, queima as três tentativas e marca o job como falho sem dizer o porquê. Ou o cadastro da conta deixa em "Nunca", ou o transporte aprende a clicar na confirmação.
+Continua valendo que a UI tem **um único** `input[type=file]` (`multiple=True`, `accept="image/*"`), não três campos separados. O que faltava era saber quem dá significado ao arquivo, e agora se sabe: é o **modo já escolhido no chip**. Em `crop_free` os arquivos viram frame inicial e final; em `chrome_extension`, referências. Por isso a ordem no transporte é configurar **antes** de anexar, e não o contrário.
+
+Observação de campo (19/08, confirmada em 20/08): o Flow passou a expor um modelo **Gemini Omni** — vídeo a partir de qualquer referência, com edição conversacional. **`Omni Flash` é o padrão do dropdown de vídeo**. Entrou no escopo como `Modelo.OMNI_FLASH` e como padrão de vídeo da API. A previsão de deixar o campo `modelo` aberto se pagou — acomodou o modelo novo sem migração nenhuma.
+
+Dois grupos do chip atravessam o domínio inteiro, e por isso viram campo do job (`proporcao`, `quantidade`) e do `Pedido` que cruza a fronteira do transporte. Sem atravessar, o Flow geraria sempre no default da UI e o pedido do usuário seria ignorado **em silêncio** — o pior modo de falha deste app, porque a saída existe e parece certa. As decisões e o porquê estão em *Decisões de geração*.
+
+Dois grupos **não** atravessam, e ficam registrados como pendência:
+
+- **Duração.** O chip aceita 4s/6s/8s/10s; `Job` e `Pedido` não modelam isso. O transporte fixa 8s e **verifica**. Enquanto o campo não existir, pedir 4s é impossível — e é melhor impossível do que silenciosamente ignorado, que foi o que aconteceu quando o transporte tinha um passo tolerante (ver *Transporte*).
+- **Proporção por modo.** A API aceita as cinco proporções para qualquer modo, mas **vídeo só tem duas**. Hoje o transporte recusa cedo, antes de tocar no chip e com a reserva ainda estornável; o lugar certo de recusar é o 422 do `POST /jobs`.
 
 ## Transporte — DECIDIDO: Playwright com Chrome real
 
@@ -291,19 +319,62 @@ Consequências diretas para a implementação:
 - **Headless está fora, mas não basta não ser headless.** Medido em campo (20/08): `document.visibilityState` só fica `'visible'` com a janela realmente visível — minimizada, fora de tela ou em aba de segundo plano conta como oculta para o navegador, e isso impede o `IntersectionObserver` de disparar. Duas partes da UI dependem dele: o botão "Continuar" do aviso de privacidade do onboarding nunca habilita, e os cards da lista de projetos nunca terminam de renderizar. Cada worker precisa portanto de uma janela de verdade ocupando espaço de tela — não dá para escondê-la atrás de outra janela nem jogá-la para fora da área visível.
 - **O teto de simultâneos deixa de ser sobre RAM/CPU e passa a ser sobre espaço de tela.** Cada worker precisa de uma janela visível de verdade, então o teto real é quantas janelas cabem visíveis ao mesmo tempo na máquina do Davi — não quantos processos de Chrome ela aguenta. O número 3 é um chute de partida herdado do raciocínio antigo (RAM) e **precisa ser reavaliado por medição** assim que a Task 9+ estiver rodando. Fica em aberto, e a medir, se a geração em si — não só o onboarding e a lista — também depende de visibilidade.
 - **Seletores são por texto/role, nunca por classe CSS.** As classes são styled-components com hash (`button.sc-e8425ea6-0.hOBPaw`) e mudam a cada deploy do Google; os textos vêm de um dicionário i18n versionado, e é por eles que a navegação se mantém estável entre deploys. Ver `flowpool/transporte/pw/seletores.py`.
+- **O teto de simultâneos começa em 1, não em 3.** O 3 era chute herdado do raciocínio de RAM. Duas razões medidas o derrubam: o Chrome no Windows marca como oculta a janela **totalmente coberta por outra**, e uma janela oculta trava a interface sem erro; e duas sessões no mesmo perfil são impossíveis, porque dois Chromes com o mesmo `--user-data-dir` fazem o segundo entregar para o primeiro. O teto real é "quantas janelas de contas distintas cabem visíveis lado a lado", e isso se mede na máquina, não se estima.
 - **C (híbrido) fica como otimização futura**, restrita ao que não é vídeo: leitura de saldo e possivelmente geração de imagem. Vale medir depois que o A estiver de pé, nunca antes.
 
-### Notas de custo a confirmar por medição
+### Modo direto (chip) ou agente conversacional — DECIDIDO: direto
 
-O `gflow-cli` afirma que **crédito só é gasto em vídeo — imagem e operações de composição saem de graça**. Isso conflita com a outra fonte, que diz 1–2 créditos por imagem. Não se desempata por leitura: a reconciliação de saldo já prevista resolve isso na primeira execução real. Se a imagem for mesmo gratuita, o custo de imagem do pipeline no Flow é zero e a política de escolha de conta pode ignorar jobs de imagem no cálculo de saldo.
+O Flow tem dois caminhos para disparar uma geração, e eles trocam propriedades opostas:
 
-O custo do **Omni Flash** está no mesmo estado, e por um motivo mais simples: ninguém mediu. Como ele é o padrão de vídeo do Flow, é o modelo que mais vai rodar — a estimativa de 20/20/10 vale até a primeira reconciliação real, e o número medido substitui a tabela. A medição é a mesma: gerar, ler o saldo antes e depois, e olhar o evento `divergencia`.
+| | pergunta antes? | diz o preço? | determinístico? |
+|---|---|---|---|
+| **chip** (modo direto) | não — debita e gera | **não** | sim |
+| **agente conversacional** | sim: *"Você quer que eu inicie essa geração de vídeo 1, que custa N créditos?"* com Aprovar / Aprovar e não perguntar de novo / Rejeitar | **sim, o custo exato vem no texto** | não |
+
+O padrão é o **direto**, e o critério é o modo de falha. O agente pode responder qualquer coisa — inclusive pedir esclarecimento — e um robô esperando "Aprovar" fica pendurado até o timeout, queima as três tentativas e marca o job como falho sem dizer o porquê. O chip é uma máquina de estados pequena e legível.
+
+O preço é ser **cego ao preço**. Quem cobre esse buraco é a reconciliação de saldo que já existe: leitura real depois de cada job, evento `divergencia`, tabela de custos servindo só para reservar antes. Vale registrar o que se abre mão: pelo agente, o custo de **cada configuração** viria de graça no texto (a mesma família de pedido anunciou 7 e 15 créditos em ajustes diferentes), e é exatamente a informação que a tabela por modelo não modela. Se um dia o custo por configuração passar a importar mais do que o determinismo, o agente é o caminho — e a leitura do custo é a única coisa que ele faz melhor.
+
+### Configurou, confere — regra dura
+
+**Depois de configurar, o transporte lê o texto do chip e confere que bate com o pedido. Se não bater, é erro, não aviso.**
+
+Isso vem de errar. A primeira versão do configurador tinha um passo tolerante — `except: segue`, pensado para o caso benigno de "essa opção já estava assim". O que ele fez foi engolir um clique que não pegou: uma geração pedida em **4s saiu em 8s**, com crédito debitado, arquivo na pasta e ninguém percebendo. Passo tolerante em configuração de geração é o pior padrão possível neste app, porque a saída existe e parece certa.
+
+Duas consequências de forma: o modelo **não** aparece no texto do chip, então ele é conferido com o painel ainda aberto, lendo o rótulo do dropdown; e a comparação de textos passa por normalização sem acento, porque "Vídeo" impresso num console cp1252 vira "V?deo" e um seletor montado a partir daí nunca casa.
+
+### Regras de download
+
+- **Clique direito no card, pelas coordenadas do container.** O `<video>` em si não é clicável — é miniatura.
+- **Nunca escolher item de menu por posição.** Um `.last` mandou um vídeo do usuário para a lixeira, porque o último item do menu é "Mover para a lixeira". Sempre por texto; quando o texto casar com mais de um candidato, isso é **erro**, não "pega o primeiro". E os candidatos vão para o log antes do clique.
+- **Casar só a primeira linha do rótulo.** Os itens do submenu de resolução têm quebra de linha (`"270p\nGIF animado"`), e o rótulo inteiro num seletor CSS estoura o parser.
+- **Respeitar `download.suggested_filename`.** O Flow nomeia pelo conteúdo e escolhe a extensão: **jpeg** para imagem, **mp4** para vídeo. O orquestrador monta o destino com `.png`/`.mp4` a partir do modo; o transporte troca a extensão pela real e devolve o caminho verdadeiro, e é ele que vai para o banco.
+- **4K fica fora do mapa**, nos dois menus: exige plano pago. Item que existe mas falha ao clicar é pior do que item ausente.
+
+### Notas de custo — o que foi medido em 20/08
+
+Duas divergências que este spec carregava estão resolvidas, e por medição, não por leitura:
+
+| | valor | como |
+|---|---|---|
+| **imagem** | **0 créditos** | saldo 50 → 50, e o Flow nem pede confirmação |
+| **Omni Flash** (720p, 8s, 9:16, x1) | **12 créditos** | saldo 50 → 38 |
+
+O `gflow-cli` estava certo: **crédito só é gasto em vídeo**. A consequência de domínio é a que este spec já previa — com imagem a zero, a política de escolha de conta deixa de discriminar por saldo em job de imagem, e qualquer conta viva serve.
+
+A estimativa de Omni Flash (20/20/10, faixa do Veo Fast) estava alta. Os tiers pagos continuam **não medidos**: 12/12 é o número da conta grátis repetido em Pro, e 6 em Ultra é extrapolação da razão que Lite e Fast mostram. Os três Veo continuam estimativa inteira.
+
+**A limitação que a medição expôs, e que a tabela não modela:** o custo de vídeo depende da **configuração**, não só do modelo. Pelo agente conversacional, a mesma família de pedido anunciou **7 e 15** créditos em ajustes diferentes — enquanto o número da tabela é um só por modelo. Isso não quebra nada, porque a tabela nunca foi preço: é **reserva** anterior ao despacho, e a reconciliação corrige depois. Mas encerra a ideia de que um dia a tabela vá ficar "certa": ela só ficaria se `duracao` e `proporcao` entrassem na chave, e nem assim cobriria as combinações que ninguém rodou.
 
 ## Erro e observabilidade
 
 Todo job carrega a razão da última falha em texto legível. O painel mostra três coisas em destaque: contas com sessão caída (exigem ação humana), crédito total vivo no pool, e jobs parados esperando reset. Eventos ficam no banco; nada de log só em arquivo.
 
-**Regra dura, sem exceção: nenhuma varredura de DOM inclui `SCRIPT`, `STYLE` ou `NOSCRIPT`.** O `__NEXT_DATA__` da página carrega o access_token OAuth **em texto puro**, junto com nome e e-mail do usuário — varrer o DOM sem excluir essas tags captura o token junto. Isso já aconteceu de verdade: um vazamento para disco durante o mapeamento manual (Task 9) foi causado exatamente por essa varredura ingênua. Nada que vier do DOM — texto, atributo, HTML capturado para depuração — pode ir para log ou para o banco de eventos sem passar por esse filtro antes.
+**Regra dura, sem exceção: nenhuma varredura de DOM inclui `SCRIPT`, `STYLE` ou `NOSCRIPT`.** O `__NEXT_DATA__` da página carrega o access_token OAuth **em texto puro**, junto com nome e e-mail do usuário — varrer o DOM sem excluir essas tags captura o token junto. Nada que vier do DOM — texto, atributo, HTML capturado para depuração — pode ir para log ou para o banco de eventos sem passar por esse filtro antes.
+
+**E o filtro é código, não comentário.** Isso vazou **duas vezes** durante o mapeamento, e a segunda foi *depois* de a regra já estar escrita num comentário no arquivo de seletores. A conclusão prática: existe um módulo único (`transporte/pw/dom.py`) com a varredura e com um mascarador de `ya29.*` e `"access_token"`, e todo caminho de leitura importa dele. Uma regra que depende de alguém lembrar não é uma regra — é uma esperança, e essa já falhou uma vez com registro.
+
+Pelo mesmo motivo, a validação de sessão **devolve só a data de expiração**, nunca o corpo da resposta de `/fx/api/auth/session`: o valor de retorno dessa função vai para log e para evento, e devolver o dicionário abriria no lado da API a mesma porta que o filtro fecha no lado do DOM.
 
 ## Testes
 
@@ -313,7 +384,13 @@ A gestão de projetos é testada pelo **contador de criações** do transporte f
 
 O caso de lote ganha teste próprio na escolha de conta, e ele afirma a coisa certa: **conta com saldo para uma imagem não pode ser escolhida para um job de quatro.** Afirmar só sobre a reserva deixaria passar exatamente o defeito que interessa — o app escolhendo uma conta que não paga o pedido e culpando a conta (marcando-a seca) por um erro de cálculo.
 
-O transporte real é verificado à mão contra o Flow, não em CI. Duas coisas do painel só se provam ali, e por medição de saldo: que o vídeo sai **vertical** (e não no 16:9 da UI) e que um lote de quatro derruba o saldo em **quatro vezes** o custo de uma. Diferença de uma só significa que o clique na quantidade não pegou — e é isso que faria o app reservar um número e gastar outro sem ninguém notar.
+O transporte real é verificado à mão contra o Flow, não em CI. Três coisas do chip só se provam ali:
+
+- **O vídeo sai vertical**, e não no 16:9 da UI. Abre-se o arquivo e olha-se.
+- **Um lote de quatro rende quatro cards.** A prova aqui **não** é o saldo, porque imagem custa zero: é a contagem de cards na grade. Um card só significa que o clique na quantidade não pegou — e é isso que faria o app reservar um número e gastar outro, num modelo pago, sem ninguém notar.
+- **A verificação do chip morde.** Pede-se uma proporção que o modo não aceita (1:1 em vídeo) e confirma-se que o transporte recusa **antes** de clicar em qualquer coisa e sem gastar crédito. É o caso que separa o comportamento atual do anterior, que clicava, não achava o botão, seguia em frente e gerava no default.
+
+E existe um teste que não é de código: rodar o **conferidor de seletores** (`transporte/pw/conferir.py`), que abre a interface e checa que cada seletor do mapa ainda casa. É a primeira coisa a rodar quando algo parar de funcionar. Sem ele, o sintoma de um deploy do Google é um job que falha três vezes, troca de conta, falha de novo e morre com `TimeoutError` — que não diz qual seletor morreu.
 
 ## Fora de escopo
 
