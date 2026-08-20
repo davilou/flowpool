@@ -3,7 +3,7 @@ from fastapi.testclient import TestClient
 
 from flowpool.api.app import criar_app
 from flowpool.dados.repo import Repo
-from flowpool.nucleo.tipos import Tier
+from flowpool.nucleo.tipos import Modelo, Tier
 from flowpool.transporte.falso import TransporteFalso
 
 
@@ -142,3 +142,93 @@ def test_esquecer_projeto_avisa_que_o_flow_nao_e_tocado(cliente):
 def test_esquecer_projeto_inexistente_da_404(cliente):
     c, _ = cliente
     assert c.delete("/projetos/999").status_code == 404
+
+
+# --- proporcao ---
+
+def test_proporcao_padrao_e_vertical(cliente):
+    # o canal do Davi e TikTok: gerar ja em 9:16 evita o recorte manual depois
+    c, repo = cliente
+    jid = c.post("/jobs", json={"modo": "t2v", "modelo": "omni-flash", "prompt": "p",
+                                "produto": "Moda", "nome": "n"}).json()["id"]
+    assert repo.job(jid).proporcao == "9:16"
+
+
+def test_proporcao_explicita_e_respeitada(cliente):
+    c, repo = cliente
+    jid = c.post("/jobs", json={"modo": "t2v", "modelo": "omni-flash", "prompt": "p",
+                                "produto": "Moda", "nome": "n",
+                                "proporcao": "16:9"}).json()["id"]
+    assert repo.job(jid).proporcao == "16:9"
+
+
+def test_proporcao_fora_da_lista_da_422(cliente):
+    # o painel do Flow so tem cinco botoes; qualquer outro valor nao teria onde clicar
+    c, _ = cliente
+    r = c.post("/jobs", json={"modo": "t2v", "modelo": "omni-flash", "prompt": "p",
+                              "produto": "Moda", "nome": "n", "proporcao": "21:9"})
+    assert r.status_code == 422
+
+
+# --- quantidade ---
+
+def test_quantidade_padrao_e_uma(cliente):
+    c, repo = cliente
+    jid = c.post("/jobs", json={"modo": "t2v", "modelo": "omni-flash", "prompt": "p",
+                                "produto": "Moda", "nome": "n"}).json()["id"]
+    assert repo.job(jid).quantidade == 1
+
+
+def test_video_com_quantidade_maior_que_um_da_422(cliente):
+    # take de video e escolha do usuario, nao sorteio — e cada take extra custa cheio
+    c, _ = cliente
+    r = c.post("/jobs", json={"modo": "t2v", "modelo": "omni-flash", "prompt": "p",
+                              "produto": "Moda", "nome": "n", "quantidade": 2})
+    assert r.status_code == 422
+
+
+def test_imagem_aceita_lote_de_quatro(cliente):
+    # variacao de imagem e barata e serve justamente para escolher
+    c, repo = cliente
+    jid = c.post("/jobs", json={"modo": "imagem", "modelo": "nano-banana", "prompt": "p",
+                                "produto": "Moda", "nome": "n",
+                                "quantidade": 4}).json()["id"]
+    assert repo.job(jid).quantidade == 4
+
+
+def test_imagem_acima_de_quatro_da_422(cliente):
+    c, _ = cliente
+    r = c.post("/jobs", json={"modo": "imagem", "modelo": "nano-banana", "prompt": "p",
+                              "produto": "Moda", "nome": "n", "quantidade": 5})
+    assert r.status_code == 422
+
+
+def test_quantidade_zero_da_422(cliente):
+    c, _ = cliente
+    r = c.post("/jobs", json={"modo": "imagem", "modelo": "nano-banana", "prompt": "p",
+                              "produto": "Moda", "nome": "n", "quantidade": 0})
+    assert r.status_code == 422
+
+
+# --- modelo padrao ---
+
+def test_job_de_video_sem_modelo_sai_com_omni_flash(cliente):
+    # e o que o dropdown de video do Flow ja mostra; pedir Veo sem dizer seria mentira
+    c, repo = cliente
+    r = c.post("/jobs", json={"modo": "t2v", "prompt": "p", "produto": "Moda", "nome": "n"})
+    assert r.status_code == 201
+    assert repo.job(r.json()["id"]).modelo is Modelo.OMNI_FLASH
+
+
+def test_job_de_imagem_sem_modelo_sai_com_nano_banana(cliente):
+    c, repo = cliente
+    r = c.post("/jobs", json={"modo": "imagem", "prompt": "p", "produto": "Moda", "nome": "n"})
+    assert r.status_code == 201
+    assert repo.job(r.json()["id"]).modelo is Modelo.NANO_BANANA
+
+
+def test_modelo_explicito_continua_valendo(cliente):
+    c, repo = cliente
+    r = c.post("/jobs", json={"modo": "t2v", "modelo": "veo-quality", "prompt": "p",
+                              "produto": "Moda", "nome": "n"})
+    assert repo.job(r.json()["id"]).modelo is Modelo.VEO_QUALITY

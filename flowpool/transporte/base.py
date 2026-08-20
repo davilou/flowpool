@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from flowpool.nucleo.erros import SaldoInsuficiente
-from flowpool.nucleo.tipos import Conta, Modelo, Modo
+from flowpool.nucleo.tipos import PROPORCAO_PADRAO, Conta, Modelo, Modo
 
 # `SaldoInsuficiente` mora no nucleo e e so reexportada aqui, para quem importa de
 # `transporte.base` continuar funcionando. Duas classes com o mesmo nome fariam o
@@ -33,6 +33,12 @@ class Pedido:
     referencias: list[str] = field(default_factory=list)
     frame_inicial: str | None = None
     frame_final: str | None = None
+    # Duas configuracoes do painel de geracao do Flow. Precisam atravessar a fronteira
+    # ou o transporte real geraria sempre no default da UI e o pedido do usuario seria
+    # ignorado em silencio — que e o pior tipo de bug aqui, porque a saida existe e
+    # parece certa.
+    proporcao: str = PROPORCAO_PADRAO
+    quantidade: int = 1
 
 
 @dataclass

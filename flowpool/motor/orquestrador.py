@@ -122,9 +122,10 @@ class Orquestrador:
         contas = self.repo.contas()
         if job.id_remoto is not None and job.conta_id is not None:
             anterior = next((c for c in contas if c.id == job.conta_id), None)
-            if anterior is not None and apta(anterior, job.modelo, agora):
+            if anterior is not None and apta(anterior, job.modelo, agora,
+                                             job.quantidade):
                 return anterior
-        return escolher(contas, job.modelo, agora)
+        return escolher(contas, job.modelo, agora, job.quantidade)
 
     async def _executar(self, job: Job, conta: Conta) -> None:
         # retomada: a geracao ja existe e e da mesma conta. Gerar de novo pagaria duas
@@ -146,7 +147,9 @@ class Orquestrador:
                 job.id_remoto = None
                 # guardar o reservado no job e o que permite estornar depois —
                 # inclusive depois de um restart, por isso vai para o banco na hora
-                job.custo_estimado = reservar(conta, job.modelo)
+                # o total do lote, nao o de uma geracao: e este numero que o estorno
+                # devolve depois
+                job.custo_estimado = reservar(conta, job.modelo, job.quantidade)
                 self.repo.salvar_conta(conta)
                 self.repo.salvar_job(job)
 
@@ -342,7 +345,8 @@ class Orquestrador:
     def _pedido(job: Job) -> Pedido:
         return Pedido(modo=job.modo, modelo=job.modelo, prompt=job.prompt,
                       referencias=job.referencias, frame_inicial=job.frame_inicial,
-                      frame_final=job.frame_final)
+                      frame_final=job.frame_final, proporcao=job.proporcao,
+                      quantidade=job.quantidade)
 
     async def rodar(self, intervalo: float = 2.0) -> None:
         """Laco eterno, usado pela API. Para com `parar()`.

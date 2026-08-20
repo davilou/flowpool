@@ -1,7 +1,8 @@
 from datetime import datetime, timezone
 
 from flowpool.nucleo.tipos import (
-    Conta, EstadoJob, Job, Modelo, Modo, Projeto, SaudeSessao, Tier,
+    PROPORCOES, Conta, EstadoJob, Job, Modelo, Modo, Projeto, SaudeSessao, Tier,
+    quantidade_maxima,
 )
 
 
@@ -69,3 +70,37 @@ def test_job_nasce_sem_produto():
     outro = Job(id=2, modo=Modo.T2V, modelo=Modelo.VEO_FAST, prompt="p", destino="x",
                 nome="c1", produto="Panelas Monaco")
     assert outro.produto == "Panelas Monaco"
+
+
+def test_omni_flash_e_o_modelo_de_video_padrao_do_flow():
+    # medido em campo: o dropdown de video do Flow abre em "Omni Flash", nao em Veo
+    assert Modelo.OMNI_FLASH.value == "omni-flash"
+
+
+def test_job_nasce_vertical():
+    # o canal e TikTok: gerar ja em 9:16 evita o recorte manual depois
+    j = Job(id=1, modo=Modo.T2V, modelo=Modelo.OMNI_FLASH, prompt="p", destino="x", nome="c1")
+    assert j.proporcao == "9:16"
+
+
+def test_proporcao_explicita_sobrescreve_o_padrao():
+    j = Job(id=1, modo=Modo.T2V, modelo=Modelo.OMNI_FLASH, prompt="p", destino="x",
+            nome="c1", proporcao="16:9")
+    assert j.proporcao == "16:9"
+
+
+def test_proporcoes_aceitas_sao_as_cinco_do_painel():
+    assert PROPORCOES == ("16:9", "4:3", "1:1", "3:4", "9:16")
+
+
+def test_job_nasce_com_uma_geracao_so():
+    # quantidade multiplica o custo; o default nunca pode gastar mais do que o pedido
+    j = Job(id=1, modo=Modo.T2V, modelo=Modelo.OMNI_FLASH, prompt="p", destino="x", nome="c1")
+    assert j.quantidade == 1
+
+
+def test_imagem_aceita_lote_e_video_nao():
+    # take de video e escolha do usuario, nao sorteio; variacao de imagem e barata
+    assert quantidade_maxima(Modo.IMAGEM) == 4
+    for modo in (Modo.T2V, Modo.FRAMES2V, Modo.INGREDIENTS2V):
+        assert quantidade_maxima(modo) == 1

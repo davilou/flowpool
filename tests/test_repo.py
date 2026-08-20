@@ -214,3 +214,22 @@ def test_produto_do_job_sobrevive_ao_banco(repo):
                              destino="Panelas Monaco/clipes", nome="c1",
                              produto="Panelas Monaco"))
     assert repo.job(id_).produto == "Panelas Monaco"
+
+
+def test_job_gravado_sem_proporcao_sai_vertical(repo):
+    # o default e do canal do Davi (TikTok), e precisa valer tambem para quem cria job
+    # direto pelo repo, sem passar pela API
+    id_ = repo.criar_job(Job(id=0, modo=Modo.T2V, modelo=Modelo.OMNI_FLASH,
+                             prompt="p", destino="d", nome="n"))
+    j = repo.job(id_)
+    assert j.proporcao == "9:16"
+    assert j.quantidade == 1
+
+
+def test_proporcao_e_quantidade_sobrevivem_ao_banco(repo):
+    id_ = repo.criar_job(Job(id=0, modo=Modo.IMAGEM, modelo=Modelo.NANO_BANANA,
+                             prompt="p", destino="d", nome="n",
+                             proporcao="16:9", quantidade=4))
+    j = repo.job(id_)
+    assert j.proporcao == "16:9"
+    assert j.quantidade == 4

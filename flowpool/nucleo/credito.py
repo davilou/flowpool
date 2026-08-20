@@ -19,13 +19,18 @@ from flowpool.nucleo.tipos import Conta, Modelo, Tier
 LIMIAR_DIVERGENCIA = 5
 
 
-def reservar(conta: Conta, modelo: Modelo) -> int:
+def reservar(conta: Conta, modelo: Modelo, quantidade: int = 1) -> int:
     """Desconta o custo previsto antes de despachar. Devolve o custo reservado.
 
     Recusa em vez de zerar: chegar aqui sem saldo significa que quem chamou ignorou
     `escolher`, e silenciar isso apagaria credito real que ainda daria outra geracao.
+
+    O custo e o de UMA geracao vezes a quantidade pedida. Reservar so uma quando o
+    pedido tem quatro deixaria o saldo local acreditando em credito que o Flow ja
+    cobrou — e a escolha seguinte mandaria job para uma conta mais magra do que o app
+    pensa.
     """
-    custo = custo_de(modelo, conta.tier)
+    custo = custo_de(modelo, conta.tier) * quantidade
     if custo > conta.saldo:
         raise SaldoInsuficiente(
             f"conta {conta.email}: saldo {conta.saldo} < custo {custo}"

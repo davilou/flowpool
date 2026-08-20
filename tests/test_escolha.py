@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
-from flowpool.nucleo.escolha import escolher
+from flowpool.nucleo.escolha import apta, escolher
 from flowpool.nucleo.tipos import Conta, Modelo, SaudeSessao, Tier
 
 # relogio fixo: `escolher` e pura e recebe o agora por parametro
@@ -93,3 +93,31 @@ def test_pula_conta_seca_ate_o_prazo():
 def test_conta_seca_volta_ao_pool_depois_do_prazo():
     seca = conta(1, Tier.FREE, 50, seca_ate=AGORA - timedelta(minutes=1))
     assert escolher([seca], Modelo.VEO_FAST, AGORA).id == 1
+
+
+def test_conta_que_paga_uma_imagem_nao_e_escolhida_para_um_lote_de_quatro():
+    # Se so a reserva multiplicasse, o app escolheria esta conta, tentaria gerar quatro,
+    # o Flow recusaria, o job voltaria pra fila e a conta seria marcada seca — por um
+    # problema que era de calculo, nao de credito.
+    magra = conta(1, Tier.FREE, 2)   # paga exatamente uma imagem
+    assert escolher([magra], Modelo.NANO_BANANA, AGORA) is not None
+    assert escolher([magra], Modelo.NANO_BANANA, AGORA, quantidade=4) is None
+
+
+def test_lote_grande_pula_a_free_e_cai_na_paga():
+    # com quantidade 1 a free vence pela regra do credito que expira antes;
+    # com quantidade 4 ela nao comporta o total e sai da escolha
+    free = conta(1, Tier.FREE, 6)    # paga tres imagens, nao quatro
+    pro = conta(2, Tier.PRO, 1000)
+    assert escolher([free, pro], Modelo.NANO_BANANA, AGORA).id == 1
+    assert escolher([free, pro], Modelo.NANO_BANANA, AGORA, quantidade=4).id == 2
+
+
+def test_apta_avalia_o_custo_total_do_lote():
+    c = conta(1, Tier.FREE, 6)
+    assert apta(c, Modelo.NANO_BANANA, AGORA, quantidade=3) is True
+    assert apta(c, Modelo.NANO_BANANA, AGORA, quantidade=4) is False
+
+
+def test_omni_flash_cabe_em_conta_gratis():
+    assert escolher([conta(1, Tier.FREE, 20)], Modelo.OMNI_FLASH, AGORA).id == 1

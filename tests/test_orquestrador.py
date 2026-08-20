@@ -7,6 +7,7 @@ import pytest
 
 from flowpool.dados.repo import Repo
 from flowpool.motor.orquestrador import MAX_TENTATIVAS, Orquestrador
+from flowpool.nucleo.custos import custo_de
 from flowpool.nucleo.escolha import escolher
 from flowpool.nucleo.erros import SaldoInsuficiente
 from flowpool.nucleo.tipos import EstadoJob, Job, Modelo, Modo, SaudeSessao, Tier
@@ -437,3 +438,63 @@ async def test_modelo_sem_custo_na_escolha_devolve_o_job_e_gasta_tentativa(
     assert j.tentativas == 1          # erro de configuracao nao reprocessa para sempre
     assert "escolha_falhou" in [e["tipo"] for e in repo.eventos(jid)]
     assert repo.reivindicar(datetime.now(timezone.utc)) is not None   # ja destravado
+
+
+async def test_lote_de_imagens_reserva_o_custo_multiplicado(repo, tmp_path):
+    # 4 x 2 = 8. Reservar so 2 deixaria o saldo local acreditando em credito que o
+    # Flow ja cobrou, e a proxima escolha mandaria job pra uma conta mais magra do
+    # que o app pensa.
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 50; repo.salvar_conta(c)
+    jid = repo.criar_job(Job(id=0, modo=Modo.IMAGEM, modelo=Modelo.NANO_BANANA,
+                             prompt="p", destino="imgs", nome="i1", quantidade=4))
+
+    orq = Orquestrador(repo, TransporteFalso(saldos={cid: 50}), raiz=tmp_path)
+    await orq.passo()
+
+    j = repo.job(jid)
+    assert j.estado is EstadoJob.PRONTO
+    assert j.custo_estimado == 4 * custo_de(Modelo.NANO_BANANA, Tier.FREE)
+
+
+async def test_lote_pula_a_conta_que_so_comporta_uma_geracao(repo, tmp_path):
+    # a free vence pela regra do credito que expira antes, mas nao paga o lote inteiro.
+    # Se `passo` nao passasse a quantidade para `escolher`, ela seria escolhida, o Flow
+    # recusaria e a conta seria marcada seca por erro de calculo.
+    magra = repo.criar_conta("magra@b.com", Tier.FREE, "p/1")
+    c = repo.conta(magra); c.saldo = 6; repo.salvar_conta(c)
+    gorda = repo.criar_conta("gorda@b.com", Tier.PRO, "p/2")
+    c = repo.conta(gorda); c.saldo = 1000; repo.salvar_conta(c)
+    jid = repo.criar_job(Job(id=0, modo=Modo.IMAGEM, modelo=Modelo.NANO_BANANA,
+                             prompt="p", destino="imgs", nome="i1", quantidade=4))
+
+    orq = Orquestrador(repo, TransporteFalso(saldos={magra: 6, gorda: 1000}),
+                       raiz=tmp_path)
+    await orq.passo()
+
+    j = repo.job(jid)
+    assert j.estado is EstadoJob.PRONTO
+    assert j.conta_id == gorda
+
+
+async def test_pedido_leva_proporcao_e_quantidade_ao_transporte(repo, tmp_path):
+    # sao configuracoes do painel do Flow: se nao atravessarem a fronteira, o
+    # transporte real gera no default da UI e o pedido do usuario e ignorado
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 50; repo.salvar_conta(c)
+    repo.criar_job(Job(id=0, modo=Modo.IMAGEM, modelo=Modelo.NANO_BANANA, prompt="p",
+                       destino="imgs", nome="i1", proporcao="1:1", quantidade=3))
+
+    vistos = []
+    t = TransporteFalso(saldos={cid: 50})
+    gerar_original = t.gerar
+
+    async def espiar(s, p):
+        vistos.append(p)
+        return await gerar_original(s, p)
+
+    t.gerar = espiar
+    await Orquestrador(repo, t, raiz=tmp_path).passo()
+
+    assert vistos[0].proporcao == "1:1"
+    assert vistos[0].quantidade == 3

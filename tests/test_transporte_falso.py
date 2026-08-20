@@ -131,3 +131,29 @@ async def test_abrir_projeto_de_outra_conta_levanta():
     alheio = await t.criar_projeto(g1, "Moda")
     with pytest.raises(ErroTransporte):
         await t.abrir_projeto(g2, alheio)
+
+
+async def test_lote_de_quatro_debita_quatro_vezes():
+    # o Flow cobra por geracao; o falso precisa cobrar igual, senao o motor passa no
+    # teste com uma contabilidade que o real desmente
+    t = TransporteFalso(saldos={1: 50})
+    s = await t.abrir_sessao(conta())
+    await t.gerar(s, Pedido(modo=Modo.IMAGEM, modelo=Modelo.NANO_BANANA, prompt="p",
+                            quantidade=4))
+    assert t.saldos[1] == 42
+
+
+async def test_lote_que_nao_cabe_no_saldo_e_recusado():
+    t = TransporteFalso(saldos={1: 30})
+    s = await t.abrir_sessao(conta(30))
+    with pytest.raises(SaldoInsuficiente):
+        await t.gerar(s, Pedido(modo=Modo.T2V, modelo=Modelo.VEO_FAST, prompt="p",
+                                quantidade=2))
+
+
+async def test_pedido_carrega_proporcao_e_quantidade():
+    # sao configuracoes do painel do Flow: sem atravessar a fronteira, o transporte
+    # real geraria sempre no default da UI e o pedido do usuario seria ignorado
+    p = Pedido(modo=Modo.T2V, modelo=Modelo.OMNI_FLASH, prompt="p")
+    assert p.proporcao == "9:16"
+    assert p.quantidade == 1

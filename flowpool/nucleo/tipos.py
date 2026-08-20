@@ -27,10 +27,31 @@ class Modo(str, Enum):
 
 
 class Modelo(str, Enum):
+    # Omni Flash e o que o dropdown de video do Flow ja mostra por padrao. Nao e Veo:
+    # transporte que nao trocar explicitamente gera nele.
+    OMNI_FLASH = "omni-flash"
     VEO_LITE = "veo-lite"
     VEO_FAST = "veo-fast"
     VEO_QUALITY = "veo-quality"
     NANO_BANANA = "nano-banana"
+
+
+# As cinco do painel de configuracao do Flow, nesta ordem. Valor fora da lista nao
+# teria botao onde clicar.
+PROPORCOES = ("16:9", "4:3", "1:1", "3:4", "9:16")
+
+# Padrao vertical: o canal do Davi e TikTok, e gerar ja em 9:16 evita o recorte manual.
+PROPORCAO_PADRAO = "9:16"
+
+# Quantidade de saidas por geracao. O Flow oferece x1..x4, mas video e diferente de
+# imagem: take de video e escolha do usuario, nao sorteio, e cada take extra custa
+# cheio. Variacao de imagem e barata e serve justamente para escolher.
+MAX_QUANTIDADE_IMAGEM = 4
+
+
+def quantidade_maxima(modo: Modo) -> int:
+    """Quantas saidas um job daquele modo pode pedir de uma vez."""
+    return MAX_QUANTIDADE_IMAGEM if modo is Modo.IMAGEM else 1
 
 
 class EstadoJob(str, Enum):
@@ -74,6 +95,11 @@ class Job:
     referencias: list[str] = field(default_factory=list)
     frame_inicial: str | None = None
     frame_final: str | None = None
+    # Formato da saida, um dos `PROPORCOES`. Vertical por padrao — ver a constante.
+    proporcao: str = PROPORCAO_PADRAO
+    # Saidas por geracao. MULTIPLICA O CUSTO: quatro imagens custam quatro vezes uma,
+    # e por isso a quantidade atravessa `escolher` e `reservar`, nao so a reserva.
+    quantidade: int = 1
     prioridade: int = 0
     estado: EstadoJob = EstadoJob.PENDENTE
     conta_id: int | None = None

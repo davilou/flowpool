@@ -126,3 +126,27 @@ def test_conta_paga_que_sobe_ate_50_nao_e_reset():
     reconciliar(c, lido=50, agora=AGORA)
     assert c.reset_em is None
     assert c.saldo_confiavel is True
+
+
+# --- quantidade ---
+
+def test_reservar_multiplica_pela_quantidade():
+    # quatro imagens custam quatro vezes uma; reservar so uma deixaria o Flow cobrar
+    # o que o saldo local nao previu
+    c = conta(50)
+    assert reservar(c, Modelo.NANO_BANANA, quantidade=4) == 8
+    assert c.saldo == 42
+
+
+def test_reservar_recusa_lote_que_o_saldo_nao_paga_inteiro():
+    # a conta paga UMA geracao, nao o lote. Reservar so uma faria o app despachar um
+    # pedido que o Flow recusa, e a conta seria marcada seca por erro de calculo.
+    c = conta(30)
+    with pytest.raises(SaldoInsuficiente):
+        reservar(c, Modelo.VEO_FAST, quantidade=2)
+    assert c.saldo == 30
+
+
+def test_reservar_sem_quantidade_continua_reservando_uma():
+    c = conta(50)
+    assert reservar(c, Modelo.VEO_FAST) == 20

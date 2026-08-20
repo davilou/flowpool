@@ -17,17 +17,19 @@ from flowpool.transporte.base import FlowTransport
 
 
 def _job_de(p: PedidoJob) -> Job:
-    # `destino` nunca chega None aqui: o validador de `PedidoJob` ja o derivou do
-    # produto quando o pedido veio sem ele.
+    # `destino` e `modelo` nunca chegam None aqui: os validadores de `PedidoJob` ja
+    # derivaram um do produto e o outro do modo quando o pedido veio sem eles.
     return Job(id=0, modo=p.modo, modelo=p.modelo, prompt=p.prompt, destino=p.destino,
                nome=p.nome, produto=p.produto, referencias=p.referencias,
                frame_inicial=p.frame_inicial, frame_final=p.frame_final,
+               proporcao=p.proporcao, quantidade=p.quantidade,
                prioridade=p.prioridade)
 
 
 def _resposta(j: Job) -> RespostaJob:
     return RespostaJob(id=j.id, estado=j.estado, modo=j.modo, modelo=j.modelo,
-                       nome=j.nome, produto=j.produto, conta_id=j.conta_id,
+                       nome=j.nome, produto=j.produto, proporcao=j.proporcao,
+                       quantidade=j.quantidade, conta_id=j.conta_id,
                        arquivo=j.arquivo, tentativas=j.tentativas, erro=j.erro)
 
 

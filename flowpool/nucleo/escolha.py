@@ -16,7 +16,7 @@ from flowpool.nucleo.tipos import Conta, Modelo, SaudeSessao, Tier
 _ORDEM_TIER = {Tier.FREE: 1, Tier.PRO: 0, Tier.ULTRA: 0}
 
 
-def apta(c: Conta, modelo: Modelo, agora: datetime) -> bool:
+def apta(c: Conta, modelo: Modelo, agora: datetime, quantidade: int = 1) -> bool:
     # Comparacao por valor, nao por identidade: `Tier` e `SaudeSessao` herdam de
     # `str, Enum`, e um valor cru vindo do SQLite quebraria `is` em silencio.
     if not c.ativa or c.saude != SaudeSessao.VIVA:
@@ -25,14 +25,22 @@ def apta(c: Conta, modelo: Modelo, agora: datetime) -> bool:
     # prazo devolve o job a fila na hora e o motor vira laco quente.
     if c.seca_ate is not None and c.seca_ate > agora:
         return False
-    if c.tier == Tier.FREE and not cabe_no_free(modelo):
+    if c.tier == Tier.FREE and not cabe_no_free(modelo, quantidade):
         return False
-    return custo_de(modelo, c.tier) <= c.saldo
+    # Custo TOTAL do pedido, nao de uma geracao. Se so a reserva multiplicasse, o app
+    # escolheria uma conta que comporta uma geracao e tentaria gerar quatro: o Flow
+    # recusa, o job volta pra fila e a conta e marcada seca por um problema que era de
+    # calculo.
+    return custo_de(modelo, c.tier) * quantidade <= c.saldo
 
 
-def escolher(contas: Sequence[Conta], modelo: Modelo, agora: datetime) -> Conta | None:
-    """Melhor conta para rodar `modelo` em `agora`, ou None se nenhuma serve."""
-    aptas = [c for c in contas if apta(c, modelo, agora)]
+def escolher(contas: Sequence[Conta], modelo: Modelo, agora: datetime,
+             quantidade: int = 1) -> Conta | None:
+    """Melhor conta para rodar `quantidade` geracoes de `modelo` em `agora`.
+
+    None se nenhuma serve.
+    """
+    aptas = [c for c in contas if apta(c, modelo, agora, quantidade)]
     if not aptas:
         return None
     return max(aptas, key=lambda c: (_ORDEM_TIER[c.tier], c.saldo, -c.id))
