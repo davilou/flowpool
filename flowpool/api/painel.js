@@ -143,6 +143,9 @@ function linhaConta(c) {
     </td>
     <td>
       <div class="acoes">
+        <button class="mini acao-saldo" data-id="${c.id}" data-email="${esc(c.email)}"
+                title="lê o saldo agora no Flow — abre uma janela e não gasta crédito">
+          Ler saldo</button>
         <button class="mini ${precisa ? "alerta" : ""} acao-revalidar"
                 data-id="${c.id}" data-email="${esc(c.email)}"
                 ${sessaoEmCurso ? "disabled" : ""}>Revalidar</button>
@@ -219,12 +222,38 @@ async function cadastrar(ev) {
   try {
     const c = await api("/contas", { metodo: "POST", corpo }, TETO_SESSAO_MS);
     destravarSessao();
-    mostrar($("ok-cadastro"),
-      `Sessão de pé para ${c.email}. A conta entrou no pool com ${c.saldo} créditos.`);
+    // o saldo vem LIDO do Flow no próprio cadastro. Quando a leitura falha a conta
+    // entra assim mesmo (a sessão é a parte cara), e aí o número seria 0 — dizer
+    // "entrou com 0 créditos" faria o usuário achar que a conta está seca.
+    mostrar($("ok-cadastro"), c.saldo_confiavel
+      ? `Sessão de pé para ${c.email}. A conta entrou no pool com ${c.saldo} créditos.`
+      : `Sessão de pé para ${c.email}, mas não deu para ler o saldo agora. `
+        + `A conta entrou no pool; use “Ler saldo” na linha dela.`);
     $("form-conta").reset();
   } catch (e) {
     destravarSessao();
     mostrar($("erro-cadastro"), `Não deu para cadastrar ${email}: ${e.message}`);
+  }
+  await atualizar();
+}
+
+/* O motor relê o saldo sozinho quando precisa despachar e não acha conta apta. Este
+   botão é para quem quer conferir sem esperar a fila andar. Abre uma janela do lado do
+   servidor, então demora segundos — mas não gasta crédito: ler saldo é abrir o menu do
+   avatar, não gerar nada. */
+async function lerSaldo(id, email, botao) {
+  botao.disabled = true;
+  const antes = botao.textContent;
+  botao.textContent = "Lendo…";
+  esconder($("erro-cadastro"));
+  try {
+    const c = await api(`/contas/${id}/saldo`, { metodo: "POST" }, TETO_SESSAO_MS);
+    mostrar($("ok-cadastro"), `${email} está com ${c.saldo} créditos no Flow.`);
+  } catch (e) {
+    mostrar($("erro-cadastro"), `Não deu para ler o saldo de ${email}: ${e.message}`);
+  } finally {
+    botao.disabled = false;
+    botao.textContent = antes;
   }
   await atualizar();
 }
@@ -396,6 +425,7 @@ document.addEventListener("click", (ev) => {
   if (!alvo) return;
   const id = Number(alvo.dataset.id);
   if (alvo.classList.contains("acao-revalidar")) revalidar(id, alvo.dataset.email);
+  else if (alvo.classList.contains("acao-saldo")) lerSaldo(id, alvo.dataset.email, alvo);
   else if (alvo.classList.contains("acao-cancelar")) cancelar(id);
   else if (alvo.classList.contains("acao-proxy")) {
     // O proxy da conta chega MASCARADO da API (`http://usuario:***@host:porta`). Por
