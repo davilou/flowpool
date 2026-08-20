@@ -266,7 +266,7 @@ class TransportePlaywright:
         await self._clicar_unico(painel, sel.PROPORCAO[p.proporcao], "proporcao")
         # `None` em imagem: o painel nao tem grupo de duracao naquele modo, e procurar
         # o botao ali derrubaria toda geracao de imagem. Nos tres modos de video vale a
-        # duracao DO PEDIDO — ate a Task 13 era uma constante de 8s aqui, e todo video
+        # duracao DO PEDIDO — ate a Task 15 era uma constante de 8s aqui, e todo video
         # saia 70% mais caro do que o de 4s sem ninguem ver.
         duracao = None if p.modo is Modo.IMAGEM else p.duracao
         if duracao:

@@ -431,7 +431,7 @@ async def test_modelo_sem_custo_na_escolha_devolve_o_job_e_gasta_tentativa(
     c = repo.conta(cid); c.saldo = 50; repo.salvar_conta(c)
     jid = repo.criar_job(job_fast())
 
-    # nenhum modelo tem custo cadastrado — as duas tabelas, porque desde a Task 13
+    # nenhum modelo tem custo cadastrado — as duas tabelas, porque desde a Task 15
     # video e imagem moram em dicionarios separados (video tem duracao, imagem nao)
     monkeypatch.setattr(custos, "_CUSTO_VIDEO", {})
     monkeypatch.setattr(custos, "_CUSTO_IMAGEM", {})
