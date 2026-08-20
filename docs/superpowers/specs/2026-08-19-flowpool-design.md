@@ -48,11 +48,17 @@ Python 3.13 (mesmo do pipeline), FastAPI + uvicorn, SQLite, Playwright async, ht
 
 `seca_ate` é até quando a conta está fora do pool. O Flow às vezes mostra saldo e mesmo assim recusa gerar — cota diária, throttle, rate limit. Sem um prazo gravado, o job recusado volta para a fila no mesmo instante, é despachado para a mesma conta e o motor gira em laço quente: CPU a 100%, um Chrome aberto e fechado por iteração, tabela de eventos crescendo sem parar, nenhuma tentativa consumida e nada nunca desistindo. É a materialização do que a seção *Fila e execução* já pedia com "marca a conta seca até o reset estimado".
 
-**job** — id, modo, prompt, referências (caminhos), modelo, prioridade, estado (`pending` | `running` | `done` | `failed` | `cancelled`), conta usada, id remoto da geração, caminho do arquivo final, tentativas, `custo_estimado`, erro, timestamps.
+**job** — id, modo, prompt, referências (caminhos), modelo, prioridade, estado (`pending` | `running` | `done` | `failed` | `cancelled`), conta usada, id remoto da geração, caminho do arquivo final, tentativas, `custo_estimado`, erro, `produto`, timestamps.
+
+`produto` é o nome da pasta do produto na pasta do usuário (`Video Roupa`, `Panelas Monaco`, `Furadeira Pnoeoce`) e, ao mesmo tempo, o nome do projeto no Flow. É dele que `destino` deriva quando o pedido não traz caminho: `{produto}/clipes`. Ter os dois campos, e não só o caminho, é o que permite ao motor saber **em qual projeto do Flow** a geração acontece — ver *Projetos*.
 
 `custo_estimado` é quanto o job reservou da conta ao ser despachado, e fica gravado no banco. É o que permite estornar a reserva de um job que morreu antes de gerar — inclusive depois de um restart do serviço, quando não há mais nada em memória dizendo quanto aquele job tinha travado. Quem consome esse campo depois do restart é a **recuperação no boot**, descrita em *Fila e execução*; sem ela o campo seria persistido e nunca lido por ninguém.
 
 Timestamps de datetime são gravados **sempre normalizados em UTC**. A fila compara `reavaliar_em` em SQL, e essa comparação é lexicográfica sobre texto: dois offsets diferentes na mesma coluna quebrariam a ordem em silêncio — um horário com `-03:00` ordenaria antes de um `+00:00` que é anterior de verdade.
+
+**projeto** — id, conta, produto, id remoto (o `[id]` da URL do Flow), nome remoto, timestamp de criação. `UNIQUE (conta_id, produto)`.
+
+A chave é o **par**, nunca o produto sozinho: projeto do Flow pertence a uma conta só, e a `g2` não abre projeto da `g1`. A seção *Projetos* explica a consequência inteira.
 
 **evento** — id, job, conta, tipo, payload, timestamp. Trilha de auditoria; é o que permite descobrir por que um lote saiu torto três dias depois.
 
@@ -93,6 +99,43 @@ Política, com o porquê:
 
 Uma exceção antes de tudo isso: job que volta para a fila **com `id_remoto`** tem geração paga em curso no Flow, e ela só pode ser retomada de dentro da conta que a criou. Nesse caso a conta anterior tem preferência, e a política acima só entra se ela não servir mais.
 
+## Projetos
+
+Observação de campo (20/08), no Flow real: a app vive em `labs.google/fx/tools/flow/[id]`. Toda geração acontece **dentro de um projeto**, e o projeto tem id na URL. Não existe gerar "solto". Sem gerenciar isso, cada geração criaria um projeto novo e, em poucos dias, a conta seria um lixão de projetos órfãos com um clipe dentro de cada.
+
+### A restrição que define o desenho
+
+**Projeto pertence a UMA conta.** A `g2` não enxerga nem abre projeto da `g1`. Como o app roda entre vinte contas e escolhe a conta pelo crédito disponível, não existe "o projeto do Vestido Vermelho": existe um projeto do Vestido Vermelho *em cada conta que gerou algo dele*.
+
+Isso mata de saída a modelagem óbvia — uma tabela `produto -> id do projeto`. Um id assim seria válido para uma conta e inútil (ou pior, abriria erro) para as outras dezenove. A chave é o **par** `(conta, produto)`, e o `UNIQUE` do banco é sobre o par.
+
+### A política: um projeto por produto, em cada conta
+
+O agrupamento acompanha a pasta do usuário, onde cada produto já é uma pasta. Um projeto por *job* transformaria a conta num lixão do mesmo jeito; um projeto único para tudo perderia a única organização que a UI do Flow oferece, justamente na hora de achar um clipe três dias depois.
+
+O `produto` do job é o que decide, e o modo não entra na conta: imagem de referência e o vídeo feito a partir dela ficam no mesmo projeto, como ficariam se uma pessoa estivesse usando o Flow na mão.
+
+### Resolução, com adoção
+
+Antes de gerar, o motor resolve o projeto da dupla (conta, produto) em três passos:
+
+1. **Banco local.** Achou o vínculo: abre o projeto e segue.
+2. **Lista remota.** Não achou no banco: lista os projetos daquela conta e procura por **nome igual ao produto**. Achou: **adota** — grava o vínculo e abre. Não cria.
+3. **Criação.** Não achou nem remotamente: cria um projeto com o nome do produto, grava e abre.
+
+O passo 2 é o que não pode ser cortado. Sem ele, apagar o `flowpool.db` — ou simplesmente criar o projeto na mão pelo site — faria o app duplicar tudo na próxima rodada. E projeto duplicado no Flow é bagunça que ninguém limpa depois: o app **não apaga projeto nenhum**, de propósito, porque apagar projeto apaga também tudo que foi gerado dentro dele.
+
+Cada caminho vira evento: `projeto_adotado` ou `projeto_criado`. É a diferença entre os dois que responde, depois, se a adoção está funcionando — uma sequência de `projeto_criado` para o mesmo produto na mesma conta é o sintoma de que a lista remota parou de casar por nome.
+
+Pelo mesmo motivo, `DELETE /projetos/{id}` **esquece o vínculo local e não toca no Flow**. A rota diz isso na resposta, porque a leitura natural de um DELETE é a oposta. Na geração seguinte daquele produto naquela conta, o projeto volta a ser adotado pelo nome — esquecer é reversível, apagar não seria.
+
+### O que isso exige do transporte
+
+Três operações: `listar_projetos`, `criar_projeto` (devolve o id remoto) e `abrir_projeto`. Todas partem de uma sessão já aberta, porque não existe lista global de projetos — cada conta enxerga só os seus. `criar_projeto` devolve o id lido **da URL** depois que o projeto abre: um id inventado gravaria no banco um vínculo que nunca abre, e a geração seguinte criaria outro projeto do mesmo produto.
+
+O transporte não decide projeto: ele lista, cria e abre. Quem decide é o motor, e por isso a política inteira continua testável sem navegador nenhum.
+
+
 ## Fila e execução
 
 Um worker por conta viva, com teto global de simultâneos (configurável; começa em 3 — cada worker segura um navegador enquanto o transporte for A).
@@ -106,6 +149,8 @@ Um worker por conta viva, com teto global de simultâneos (configurável; começ
 **Falha por sessão morta** marca a conta `expirada` e emite alerta no painel — essa exige a pessoa. A sessão não morre só ao abrir: no transporte real ela cai no meio de gerar, consultar ou baixar, então esse caminho também estorna a reserva. E a marcação de sessão é escrita **campo a campo**, não regravando a linha inteira da conta: com dois workers na mesma conta, a gravação de linha cheia a partir de uma cópia carregada antes ressuscita para `viva` a sessão que o outro acabou de expirar, e o pool volta a despachar para uma conta que exige login manual.
 
 **Falha de rede** tem retry com backoff, teto de 3 tentativas, e a terceira troca de conta antes de desistir. Quando a falha é **timeout de uma geração que o Flow já aceitou**, o job volta para a fila preservando `id_remoto` e conta, e a tentativa seguinte **retoma** aquela geração em vez de criar outra. Descartar o `id_remoto` faria pagar de novo enquanto a primeira geração termina no Flow, órfã, sem ninguém para baixar: um Quality de 11 minutos custa 200 créditos e não entrega nada; na terceira tentativa, 300.
+
+**Falha ao escolher conta devolve o job.** A reivindicação é atômica, então quando a escolha de conta acontece o job **já está `rodando`** no banco. Uma exceção subindo dali o deixava travado nesse estado até o próximo boot: o laço do motor sobrevive, mas o job não volta para a fila, e `recuperar()` só roda na próxima subida. `ModeloSemCusto` é exatamente o caso que chega ali — o custo é consultado para cada conta do pool durante a escolha. A falha vira evento `escolha_falhou` e o job volta para `pendente` **gastando uma tentativa**: é erro de configuração, e reprocessar para sempre um modelo sem custo cadastrado não conserta o cadastro.
 
 **O laço do motor não morre em silêncio.** Toda exceção que escapa de um passo vira evento (`passo_falhou`) e o laço continua. Sem isso a task do motor termina e ninguém observa: a API segue respondendo HTTP normalmente enquanto a fila nunca mais anda.
 
@@ -122,6 +167,8 @@ Um worker por conta viva, com teto global de simultâneos (configurável; começ
 | `POST` | `/contas` | abre o navegador para o login manual de uma conta nova |
 | `POST` | `/contas/{id}/revalidar` | reabre o navegador para renovar sessão caída |
 | `PATCH` | `/contas/{id}` | ativa/desativa, corrige tier |
+| `GET` | `/projetos` | vínculos (conta, produto) → projeto do Flow; filtra por `conta_id` e `produto` |
+| `DELETE` | `/projetos/{id}` | esquece o vínculo **local**; não apaga nada no Flow |
 | `GET` | `/saude` | resumo: contas vivas, crédito total, fila |
 
 Corpo de `POST /jobs`:
@@ -134,15 +181,20 @@ Corpo de `POST /jobs`:
   "referencias": ["caminho/1.png", "caminho/2.png"],
   "frame_inicial": "caminho.png",
   "frame_final": null,
+  "produto": "Video Roupa",
   "destino": "Video Roupa/clipes",
   "nome": "c3-take1",
   "prioridade": 0
 }
 ```
 
+`produto` é **obrigatório**; `destino` é opcional e, quando ausente, vira `{produto}/clipes`. Na pasta do usuário cada produto já é uma pasta, então mandar `produto: "Panelas Monaco"` basta e repetir o caminho é ruído. `destino` explícito continua aceito para quando o arquivo deve cair em outro lugar.
+
 ## Modos suportados
 
-Os quatro do Flow: **text-to-video**, **frames-to-video** (1º e opcionalmente último frame), **ingredients-to-video** (até 3 referências — é o R2V que segura a identidade da Clara e do Rafa) e **imagem** (Nano Banana / Imagen). Na prática vivem no mesmo projeto do Flow e mudam quase só o corpo do payload.
+Os quatro do Flow: **text-to-video**, **frames-to-video** (1º e opcionalmente último frame), **ingredients-to-video** (até 3 referências — é o R2V que segura a identidade da Clara e do Rafa) e **imagem** (Nano Banana / Imagen). Mudam quase só o corpo do payload.
+
+Os quatro rodam **dentro de um projeto**, e do mesmo projeto: o projeto é escolhido pelo `produto` do job, não pelo modo. Um produto que gera imagem de referência e depois o vídeo a partir dela guarda as duas coisas no mesmo lugar — que é como uma pessoa usaria o Flow na mão. Ver *Projetos*.
 
 Observação de campo (19/08): o Flow passou a expor um modelo **Gemini Omni** — vídeo a partir de qualquer referência, com edição conversacional. Não entra no escopo inicial, mas o desenho do modo `ingredients2v` deve deixar o campo `modelo` aberto para acomodá-lo sem migração.
 
@@ -155,6 +207,9 @@ Interface abaixo; implementação **A (Playwright)**, decidida por evidência p�
 class FlowTransport(Protocol):
     async def abrir_sessao(self, conta: Conta) -> Sessao: ...
     async def saldo(self, s: Sessao) -> int: ...
+    async def listar_projetos(self, s: Sessao) -> list[ProjetoRemoto]: ...
+    async def criar_projeto(self, s: Sessao, nome: str) -> str: ...    # id remoto
+    async def abrir_projeto(self, s: Sessao, id_remoto: str) -> None: ...
     async def gerar(self, s: Sessao, pedido: Pedido) -> str: ...       # id remoto
     async def consultar(self, s: Sessao, id_remoto: str) -> Estado: ...
     async def baixar(self, s: Sessao, id_remoto: str, destino: Path) -> Path: ...
@@ -193,6 +248,8 @@ Todo job carrega a razão da última falha em texto legível. O painel mostra tr
 ## Testes
 
 O motor inteiro — escolha de conta, contabilidade, transições da fila — é testado sem rede, com um `FlowTransport` falso que simula saldo, latência e os modos de falha reais (saldo insuficiente, sessão expirada, timeout, job que volta com erro). A política de escolha ganha testes de tabela: pool com só grátis e job Quality, pool todo seco, empate de saldo, conta expirada no meio do lote.
+
+A gestão de projetos é testada pelo **contador de criações** do transporte falso, não pelo estado final do banco: o estado final não distingue "reusou o projeto" de "criou outro e regravou o vínculo por cima", que é exatamente o defeito que interessa. Três cenários: mesmo produto duas vezes na mesma conta (uma criação só), mesmo produto em duas contas (duas criações, ids distintos) e projeto que existe no remoto mas não no banco (zero criações — é adoção).
 
 O transporte real é verificado à mão contra o Flow, não em CI.
 
