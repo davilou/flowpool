@@ -116,8 +116,26 @@ git commit -m "chore: esqueleto do flowpool"
 ### Task 1: Tipos do domínio
 
 **Files:**
-- Create: `flowpool/nucleo/tipos.py`
+- Create: `flowpool/nucleo/tipos.py`, `flowpool/nucleo/erros.py`
 - Test: `tests/test_tipos.py`
+
+- [ ] **Step 0: Criar os erros de domínio**
+
+`flowpool/nucleo/erros.py` — vem antes de tudo porque a Task 2 já importa dele:
+
+```python
+"""Erros de dominio. Camadas de cima importam daqui; nucleo nao importa de ninguem."""
+
+
+class SaldoInsuficiente(Exception):
+    """A conta nao tem credito para o custo pedido. Nao e falha: e hora de trocar de conta."""
+
+
+class ModeloSemCusto(Exception):
+    """Modelo/tier sem custo cadastrado. Erro de configuracao, nao de execucao."""
+```
+
+Mora em `nucleo/` porque as camadas de cima dependem de `nucleo`, nunca o contrário. `transporte/base.py` (Task 6) reexporta `SaldoInsuficiente` daqui em vez de definir a sua própria — duas classes com o mesmo nome fariam o `except` do orquestrador pegar uma e deixar a outra passar como falha de rede.
 
 - [ ] **Step 1: Escrever o teste que falha**
 
@@ -283,7 +301,7 @@ git commit -m "feat: tipos do dominio do flowpool"
 
 O custo depende do par (modelo, tier): conta Ultra paga menos por Lite e Fast. O teto diário do free é o que impede Quality de rodar em conta grátis.
 
-`custo_de` recusa par desconhecido com `ModeloSemCusto` em vez de deixar vazar um `KeyError`. Motivo: `custo_de` roda dentro de `apta()`, que roda para CADA conta dentro de `escolher()` — um `KeyError` cru não derruba um job, derruba a avaliação do pool inteiro e trava a fila. E o spec já promete acomodar um modelo novo (Gemini Omni) sem migração, então o dia em que alguém acrescenta um modelo e esquece o custo vai chegar. Depende da Task 4, que cria `flowpool/nucleo/erros.py`; se implementar as tasks fora de ordem, crie o `erros.py` antes.
+`custo_de` recusa par desconhecido com `ModeloSemCusto` em vez de deixar vazar um `KeyError`. Motivo: `custo_de` roda dentro de `apta()`, que roda para CADA conta dentro de `escolher()` — um `KeyError` cru não derruba um job, derruba a avaliação do pool inteiro e trava a fila. E o spec já promete acomodar um modelo novo (Gemini Omni) sem migração, então o dia em que alguém acrescenta um modelo e esquece o custo vai chegar. `ModeloSemCusto` vem de `flowpool/nucleo/erros.py`, criado no Step 0 da Task 1.
 
 - [ ] **Step 1: Escrever o teste que falha**
 
@@ -559,7 +577,8 @@ git commit -m "feat: politica de escolha de conta"
 ### Task 4: Contabilidade de crédito
 
 **Files:**
-- Create: `flowpool/nucleo/erros.py`, `flowpool/nucleo/credito.py`
+- Create: `flowpool/nucleo/credito.py`
+- Usa: `flowpool/nucleo/erros.py` (criado na Task 1)
 - Test: `tests/test_credito.py`, `tests/test_pool.py`
 
 O ponto que o spec insiste: descontar o previsto ao despachar (para dois jobs simultâneos não estourarem o mesmo saldo) e reconciliar com a leitura real ao terminar.
@@ -570,25 +589,7 @@ Três coisas que o desenho ingênuo erra e esta task corrige de saída:
 2. **Existe estorno (`liberar`).** Sem ele, três timeouts de rede numa conta de 50 créditos zeram o saldo local com os 50 créditos intactos no Flow — e a conta some do pool para sempre, porque ninguém despacha job para conta que parece seca.
 3. **A divergência é medida com sinal.** Sobrar crédito é notícia boa (é o que responde se a imagem custa ou sai de graça); só faltar crédito derruba a confiança. E o reset diário da conta grátis não é divergência nenhuma: é a conta voltando ao teto.
 
-- [ ] **Step 1: Criar os erros de domínio**
-
-`flowpool/nucleo/erros.py`:
-
-```python
-"""Erros de dominio. Camadas de cima importam daqui; nucleo nao importa de ninguem."""
-
-
-class SaldoInsuficiente(Exception):
-    """A conta nao tem credito para o custo pedido. Nao e falha: e hora de trocar de conta."""
-
-
-class ModeloSemCusto(Exception):
-    """Modelo/tier sem custo cadastrado. Erro de configuracao, nao de execucao."""
-```
-
-Fica em `nucleo/` porque as camadas de cima dependem de `nucleo`, nunca o contrário. `transporte/base.py` (Task 6) reexporta `SaldoInsuficiente` daqui em vez de definir a sua própria — duas classes com o mesmo nome fariam o `except` do orquestrador pegar uma e deixar a outra passar.
-
-- [ ] **Step 2: Escrever o teste que falha**
+- [ ] **Step 1: Escrever o teste que falha**
 
 `tests/test_credito.py`:
 
@@ -723,12 +724,12 @@ def test_conta_paga_que_sobe_ate_50_nao_e_reset():
     assert c.saldo_confiavel is True
 ```
 
-- [ ] **Step 3: Rodar e ver falhar**
+- [ ] **Step 2: Rodar e ver falhar**
 
 Run: `.venv/Scripts/pytest tests/test_credito.py -q`
 Expected: FAIL — `ModuleNotFoundError: No module named 'flowpool.nucleo.credito'`
 
-- [ ] **Step 4: Implementar**
+- [ ] **Step 3: Implementar**
 
 `flowpool/nucleo/credito.py`:
 
@@ -806,12 +807,12 @@ def _parece_reset(conta: Conta, lido: int, delta: int) -> bool:
     return conta.tier == Tier.FREE and delta > 0 and lido >= TETO_DIARIO_FREE
 ```
 
-- [ ] **Step 5: Rodar e ver passar**
+- [ ] **Step 4: Rodar e ver passar**
 
 Run: `.venv/Scripts/pytest tests/test_credito.py -q`
 Expected: `15 passed`
 
-- [ ] **Step 6: Teste de integração do núcleo**
+- [ ] **Step 5: Teste de integração do núcleo**
 
 Os testes acima olham uma função de cada vez. Falta o cenário real do pool do Davi — três contas grátis e uma Ultra, dez jobs em sequência — que é o único que exporia uma regressão na contabilidade (reserva que zera saldo, estorno que não volta, grátis que sobra sem ser usada). Continua sem navegador e sem banco: é só núcleo.
 
@@ -898,17 +899,17 @@ def test_falha_de_geracao_devolve_a_reserva_intacta():
     assert escolhida.saldo == antes
 ```
 
-- [ ] **Step 7: Rodar e ver passar**
+- [ ] **Step 6: Rodar e ver passar**
 
 Run: `.venv/Scripts/pytest tests/test_pool.py -q`
 Expected: `3 passed`
 
-- [ ] **Step 8: Rodar o núcleo inteiro**
+- [ ] **Step 7: Rodar o núcleo inteiro**
 
 Run: `.venv/Scripts/pytest -q`
 Expected: `54 passed` (5 tipos + 17 custos + 14 escolha + 15 credito + 3 pool)
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add flowpool/nucleo/erros.py flowpool/nucleo/credito.py tests/test_credito.py tests/test_pool.py
@@ -1786,9 +1787,9 @@ class Orquestrador:
             self.repo.registrar_evento(job.id, conta.id, "conta_seca")
 
         except Exception as e:  # falha de rede, timeout, geracao errada
-            # A geracao nao se confirmou, entao o credito reservado nao foi gasto.
-            # Se por acaso tiver sido (falha depois do Flow aceitar), a leitura de
-            # saldo no `finally`, logo abaixo, corrige na mesma passada.
+            # `_estornar` decide sozinho se devolve: so devolve enquanto o Flow ainda
+            # nao aceitou o pedido. Falha de download ou geracao recusada acontece
+            # depois da cobranca, e ali estornar inflaria o saldo.
             self._estornar(job, conta)
             conta.falhas += 1
             self.repo.salvar_conta(conta)
@@ -1808,14 +1809,22 @@ class Orquestrador:
                 await self.transporte.fechar(sessao)
 
     def _estornar(self, job: Job, conta: Conta) -> None:
-        """Devolve ao saldo a reserva de um job que nao virou geracao.
+        """Devolve ao saldo a reserva de um job que nao chegou a virar geracao.
+
+        So estorna enquanto `id_remoto is None` — ou seja, enquanto o Flow ainda nao
+        aceitou o pedido. Depois disso o credito provavelmente JA foi cobrado, e
+        devolver inflaria o saldo local. Nao da para contar com a reconciliacao do
+        `finally` para consertar: a falha que trouxe o codigo ate aqui costuma ser de
+        rede, e a leitura de saldo falha junto. O saldo inflado sobreviveria, a conta
+        seria escolhida de novo, o Flow recusaria, e o ciclo se repetiria.
 
         Idempotente: zera `custo_estimado` para nao estornar duas vezes. Quem chama
         salva o job logo em seguida (`_devolver`), entao o zero chega ao banco.
         """
         if job.custo_estimado is None:
             return
-        liberar(conta, job.custo_estimado)
+        if job.id_remoto is None:
+            liberar(conta, job.custo_estimado)
         job.custo_estimado = None
 
     def _devolver(self, job: Job, erro: str, gasta_tentativa: bool) -> None:
