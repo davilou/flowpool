@@ -54,16 +54,36 @@ BOTAO_CONTINUAR = 'button:has-text("Continuar")'
 CAIXA_CONSENTIMENTO = '[role=checkbox]'   # deixar sempre DESMARCADA
 
 # --- dentro do projeto --------------------------------------------------
-CAMPO_PROMPT = 'input[aria-label="Texto editável"]'
-BOTAO_CRIAR = 'button:has-text("Criar")'          # ha dois; conferir qual submete
-BOTAO_CONFIGURACOES = 'button:has-text("Configurações")'
+# ATENCAO: `input[aria-label="Texto editável"]` NAO e o campo de prompt — e o editor
+# do NOME DO PROJETO. Escrever nele renomeia o projeto em vez de gerar, e o sintoma e
+# "nada acontece", que e o pior tipo de bug. Ja aconteceu no mapeamento.
+CAMPO_NOME_PROJETO = 'input[aria-label="Texto editável"]'
+BOTAO_CONCLUIR_NOME = 'button:has-text("Concluir")'
+
+# O Flow virou agent-first: nao existe "escolher modelo e clicar em gerar". Existe um
+# painel de agente a direita, e o prompt e o unico contenteditable visivel da pagina.
+CAMPO_PROMPT = '[contenteditable=true]'
+GUIA_PROMPT = "O que você quer criar?"   # texto-guia, confirma que e o campo certo
+
+# Barra abaixo do prompt. Dois botoes contem a palavra "Criar" — o de anexar midia e o
+# de enviar. So a ligadura do icone os separa, e ela vem no innerText.
+BOTAO_ANEXAR = 'button:has-text("add_2")'
+BOTAO_ENVIAR = 'button:has-text("arrow_forward")'
+BOTAO_INSTRUCOES_AGENTE = 'button:has-text("article_spark")'
+
+BOTAO_CONFIGURACOES = 'button:has-text("tune Configurações")'
 BOTAO_VER_CENAS = 'button:has-text("Ver cenas")'
 BOTAO_PERSONAGENS = 'button:has-text("Personagens")'
 BOTAO_ADICIONAR_MIDIA = 'button:has-text("Adicionar mídia")'
 BOTAO_MAIS_OPCOES = 'button:has-text("Mais opções")'
+BOTAO_NOVA_SESSAO = 'button:has-text("edit_square")'   # limpa a conversa do agente
 
 # Um unico input de arquivo serve referencias E frames: multiple=True, accept=image/*.
 UPLOAD = 'input[type=file]'
+
+# --- criar projeto: sao DUAS etapas -------------------------------------
+# "Novo projeto" cria e ENTRA direto, sem pedir nome. O nome sai padrao e a renomeacao
+# e depois, por Mais opcoes -> Renomear. O transporte precisa das duas etapas.
 
 # --- menu da conta ------------------------------------------------------
 # O saldo NAO fica na tela do projeto. Esta no menu do avatar, que rende
@@ -89,16 +109,53 @@ CONFIG_AGENTE = 'button:has-text("tune Configurações")'
 AGENTE_SEMPRE = '[role=radio]:has-text("Sempre")'
 AGENTE_NUNCA = '[role=radio]:has-text("Nunca")'
 
-# --- A PREENCHER --------------------------------------------------------
-# Nao mapeados ainda; precisam de uma passada gerando de verdade.
-SELETOR_MODELO = "..."
-OPCAO_MODELO = {
-    "veo-lite": "...",
-    "veo-fast": "...",
-    "veo-quality": "...",
-    "nano-banana": "...",
+# --- painel de configuracao da geracao ----------------------------------
+# ARMADILHA DE ORDEM: o botao `tune Configurações` NAO existe numa sessao nova. Ele so
+# aparece DEPOIS que o primeiro prompt foi enviado ao agente. Tentar abrir antes da
+# TimeoutError. O transporte precisa: enviar prompt -> esperar resposta -> abrir tune.
+#
+# O painel tem quatro grupos: confirmacao, proporcao, quantidade e os DOIS dropdowns
+# de modelo (um de imagem, um de video). Fecha em "Salvar".
+BOTAO_SALVAR_CONFIG = 'button:has-text("Salvar")'
+
+# Proporcao — 9:16 e o formato do TikTok. Gerar ja em vertical evita recorte depois.
+PROPORCAO = {
+    "16:9": 'button:has-text("crop_16_9")',
+    "4:3": 'button:has-text("crop_landscape")',
+    "1:1": 'button:has-text("crop_square")',
+    "3:4": 'button:has-text("crop_portrait")',
+    "9:16": 'button:has-text("crop_9_16")',
 }
+
+# Quantidade de variacoes por geracao. Custa N x credito — nunca deixar implicito.
+QUANTIDADE = {1: 'button:has-text("x1")', 2: 'button:has-text("x2")',
+              3: 'button:has-text("x3")', 4: 'button:has-text("x4")'}
+
+# Dois dropdowns separados. O de video vem em "Omni Flash" por PADRAO, nao em Veo —
+# se o transporte nao trocar explicitamente, todo job sai no modelo errado.
+DROPDOWN_MODELO_IMAGEM = 'button:has-text("Nano Banana")'
+DROPDOWN_MODELO_VIDEO = 'button:has-text("Omni")'
+
+# Rotulos exatos, medidos em 2026-08-20 numa conta gratuita.
+OPCAO_MODELO = {
+    # video
+    "omni-flash": '[role=menuitem]:has-text("Omni Flash")',
+    "veo-lite": '[role=menuitem]:has-text("Veo 3.1 - Lite")',
+    "veo-fast": '[role=menuitem]:has-text("Veo 3.1 - Fast")',
+    "veo-quality": '[role=menuitem]:has-text("Veo 3.1 - Quality")',
+    # imagem
+    "nano-banana-pro": '[role=menuitem]:has-text("Nano Banana Pro")',
+    "nano-banana-2": '[role=menuitem]:has-text("Nano Banana 2")',
+    "nano-banana": '[role=menuitem]:has-text("Nano Banana 2 Lite")',
+}
+# ATENCAO ao casar por texto: "Nano Banana 2" e prefixo de "Nano Banana 2 Lite".
+# Usar correspondencia exata, senao o Lite e escolhido quando se pediu o 2.
+
+# --- A PREENCHER --------------------------------------------------------
+# Só aparecem quando uma geracao acontece de verdade.
+BOTAO_CONFIRMAR_GERACAO = "..."   # o agente pergunta antes de gastar (modo "Sempre")
 CARD_GERANDO = "..."
 CARD_PRONTO = "..."
 BOTAO_DOWNLOAD = "..."
 AVISO_SEM_CREDITO = "..."
+BOTAO_PARAR = 'button:has-text("stop Parar")'   # aparece enquanto o agente trabalha
