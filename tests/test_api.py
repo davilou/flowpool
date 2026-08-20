@@ -210,6 +210,59 @@ def test_quantidade_zero_da_422(cliente):
     assert r.status_code == 422
 
 
+# --- duracao ---
+
+def test_duracao_padrao_e_de_quatro_segundos(cliente):
+    # 4s custa 7 creditos e 8s custa 12: fixar 8s desperdicava 70% do credito por
+    # video, e numa conta gratuita de 50/dia isso e a diferenca entre 4 e 7 videos
+    c, repo = cliente
+    jid = c.post("/jobs", json={"modo": "t2v", "modelo": "omni-flash", "prompt": "p",
+                                "produto": "Moda", "nome": "n"}).json()["id"]
+    assert repo.job(jid).duracao == "4s"
+
+
+def test_duracao_explicita_e_respeitada(cliente):
+    c, repo = cliente
+    jid = c.post("/jobs", json={"modo": "t2v", "modelo": "omni-flash", "prompt": "p",
+                                "produto": "Moda", "nome": "n",
+                                "duracao": "10s"}).json()["id"]
+    assert repo.job(jid).duracao == "10s"
+
+
+def test_duracao_fora_da_lista_da_422(cliente):
+    # o painel do Flow so tem quatro botoes de duracao; "5s" nao teria onde clicar
+    c, _ = cliente
+    r = c.post("/jobs", json={"modo": "t2v", "modelo": "omni-flash", "prompt": "p",
+                              "produto": "Moda", "nome": "n", "duracao": "5s"})
+    assert r.status_code == 422
+
+
+def test_imagem_com_duracao_da_422(cliente):
+    # nao existe grupo de duracao no painel em modo imagem: aceitar o campo seria
+    # prometer uma configuracao que o transporte nao tem onde aplicar
+    c, _ = cliente
+    r = c.post("/jobs", json={"modo": "imagem", "modelo": "nano-banana", "prompt": "p",
+                              "produto": "Moda", "nome": "n", "duracao": "4s"})
+    assert r.status_code == 422
+    assert "duracao" in r.text or "duração" in r.text
+
+
+def test_imagem_sem_duracao_passa(cliente):
+    # o campo tem default no dominio ("4s"); se a recusa olhasse o VALOR em vez de o
+    # campo ter vindo no corpo, todo pedido de imagem seria recusado
+    c, _ = cliente
+    r = c.post("/jobs", json={"modo": "imagem", "modelo": "nano-banana", "prompt": "p",
+                              "produto": "Moda", "nome": "n"})
+    assert r.status_code == 201
+
+
+def test_resposta_do_job_mostra_a_duracao(cliente):
+    c, _ = cliente
+    r = c.post("/jobs", json={"modo": "t2v", "modelo": "omni-flash", "prompt": "p",
+                              "produto": "Moda", "nome": "n", "duracao": "6s"})
+    assert r.json()["duracao"] == "6s"
+
+
 # --- modelo padrao ---
 
 def test_job_de_video_sem_modelo_sai_com_omni_flash(cliente):

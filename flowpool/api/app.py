@@ -26,15 +26,16 @@ def _job_de(p: PedidoJob) -> Job:
     return Job(id=0, modo=p.modo, modelo=p.modelo, prompt=p.prompt, destino=p.destino,
                nome=p.nome, produto=p.produto, referencias=p.referencias,
                frame_inicial=p.frame_inicial, frame_final=p.frame_final,
-               proporcao=p.proporcao, quantidade=p.quantidade,
+               proporcao=p.proporcao, quantidade=p.quantidade, duracao=p.duracao,
                prioridade=p.prioridade)
 
 
 def _resposta(j: Job) -> RespostaJob:
     return RespostaJob(id=j.id, estado=j.estado, modo=j.modo, modelo=j.modelo,
                        nome=j.nome, produto=j.produto, proporcao=j.proporcao,
-                       quantidade=j.quantidade, conta_id=j.conta_id,
-                       arquivo=j.arquivo, tentativas=j.tentativas, erro=j.erro)
+                       quantidade=j.quantidade, duracao=j.duracao,
+                       conta_id=j.conta_id, arquivo=j.arquivo,
+                       tentativas=j.tentativas, erro=j.erro)
 
 
 def _resposta_conta(c: Conta) -> RespostaConta:

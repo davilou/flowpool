@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS job (
     frame_final    TEXT,
     proporcao      TEXT    NOT NULL DEFAULT '9:16',
     quantidade     INTEGER NOT NULL DEFAULT 1,
+    duracao        TEXT    NOT NULL DEFAULT '4s',
     prioridade     INTEGER NOT NULL DEFAULT 0,
     estado         TEXT    NOT NULL DEFAULT 'pendente',
     conta_id       INTEGER REFERENCES conta(id),

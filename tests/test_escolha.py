@@ -39,8 +39,9 @@ def test_quality_sem_conta_paga_devolve_none():
 
 
 def test_pula_conta_com_saldo_insuficiente():
-    # Fast custa 20 na free
-    escolhida = escolher([conta(1, Tier.FREE, 10), conta(2, Tier.FREE, 40)], Modelo.VEO_FAST, AGORA)
+    # Fast de 8s custa 20 na free
+    escolhida = escolher([conta(1, Tier.FREE, 10), conta(2, Tier.FREE, 40)],
+                         Modelo.VEO_FAST, AGORA, duracao="8s")
     assert escolhida.id == 2
 
 
@@ -64,9 +65,9 @@ def test_pool_todo_seco_devolve_none():
 
 
 def test_ultra_paga_menos_e_por_isso_consegue_onde_pro_nao_conseguiria():
-    # Fast custa 10 na ultra e 20 na pro. Com saldo 15, so a ultra da conta.
+    # Fast de 8s custa 10 na ultra e 20 na pro. Com saldo 15, so a ultra da conta.
     contas = [conta(1, Tier.PRO, 15), conta(2, Tier.ULTRA, 15)]
-    assert escolher(contas, Modelo.VEO_FAST, AGORA).id == 2
+    assert escolher(contas, Modelo.VEO_FAST, AGORA, duracao="8s").id == 2
 
 
 def test_desempate_entre_pagas_e_por_saldo():
@@ -81,7 +82,8 @@ def test_desempate_nao_depende_da_ordem_da_lista():
 
 
 def test_saldo_exatamente_igual_ao_custo_serve():
-    assert escolher([conta(1, Tier.FREE, 20)], Modelo.VEO_FAST, AGORA).id == 1
+    assert escolher([conta(1, Tier.FREE, 20)], Modelo.VEO_FAST, AGORA,
+                    duracao="8s").id == 1
 
 
 def test_pula_conta_seca_ate_o_prazo():
@@ -118,17 +120,55 @@ def test_lote_de_imagem_cabe_em_qualquer_conta_viva():
 def test_lote_grande_pula_a_free_e_cai_na_paga():
     # com quantidade 1 a free vence pela regra do credito que expira antes;
     # com quantidade 4 ela nao comporta o total e sai da escolha
-    free = conta(1, Tier.FREE, 30)   # paga tres geracoes, nao quatro
+    free = conta(1, Tier.FREE, 30)   # paga tres geracoes de 8s, nao quatro
     pro = conta(2, Tier.PRO, 1000)
-    assert escolher([free, pro], Modelo.VEO_LITE, AGORA).id == 1
-    assert escolher([free, pro], Modelo.VEO_LITE, AGORA, quantidade=4).id == 2
+    assert escolher([free, pro], Modelo.VEO_LITE, AGORA, duracao="8s").id == 1
+    assert escolher([free, pro], Modelo.VEO_LITE, AGORA, quantidade=4,
+                    duracao="8s").id == 2
 
 
 def test_apta_avalia_o_custo_total_do_lote():
     c = conta(1, Tier.FREE, 30)
-    assert apta(c, Modelo.VEO_LITE, AGORA, quantidade=3) is True
-    assert apta(c, Modelo.VEO_LITE, AGORA, quantidade=4) is False
+    assert apta(c, Modelo.VEO_LITE, AGORA, quantidade=3, duracao="8s") is True
+    assert apta(c, Modelo.VEO_LITE, AGORA, quantidade=4, duracao="8s") is False
 
 
 def test_omni_flash_cabe_em_conta_gratis():
     assert escolher([conta(1, Tier.FREE, 20)], Modelo.OMNI_FLASH, AGORA).id == 1
+
+
+# --- duracao ---
+
+def test_conta_que_paga_um_clipe_de_4s_nao_e_escolhida_para_o_de_8s():
+    # E o teste que prova que a duracao atravessou `escolher`, e nao so `reservar`.
+    # Omni Flash na free: 4s custa 7 e 8s custa 12. Com saldo 10 a conta paga o curto
+    # e nao paga o longo. Se so a reserva soubesse da duracao, a escolha aprovaria
+    # esta conta para o job de 8s, o Flow recusaria, o job voltaria pra fila e a conta
+    # seria marcada seca — por um problema que era de calculo.
+    magra = conta(1, Tier.FREE, 10)
+    assert escolher([magra], Modelo.OMNI_FLASH, AGORA, duracao="4s").id == 1
+    assert escolher([magra], Modelo.OMNI_FLASH, AGORA, duracao="8s") is None
+
+
+def test_apta_olha_a_duracao():
+    magra = conta(1, Tier.FREE, 10)
+    assert apta(magra, Modelo.OMNI_FLASH, AGORA, duracao="4s") is True
+    assert apta(magra, Modelo.OMNI_FLASH, AGORA, duracao="8s") is False
+
+
+def test_duracao_omitida_na_escolha_vale_o_padrao_do_dominio():
+    # nao ha default proprio aqui: o de `custo_de` e o mesmo 4s que todo job nasce
+    # pedindo, e um segundo default divergente seria a origem de reserva errada
+    magra = conta(1, Tier.FREE, 10)
+    assert escolher([magra], Modelo.OMNI_FLASH, AGORA).id == 1
+
+
+def test_lote_grande_pula_a_free_quando_o_clipe_e_longo_e_cabe_quando_e_curto():
+    # a duracao muda a conta escolhida tanto quanto a quantidade, e pelo mesmo motivo:
+    # as duas multiplicam o custo total do pedido
+    free = conta(1, Tier.FREE, 30)
+    pro = conta(2, Tier.PRO, 1000)
+    assert escolher([free, pro], Modelo.VEO_LITE, AGORA, quantidade=4,
+                    duracao="8s").id == 2
+    assert escolher([free, pro], Modelo.VEO_LITE, AGORA, quantidade=4,
+                    duracao="4s").id == 1

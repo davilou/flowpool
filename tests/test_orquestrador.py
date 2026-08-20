@@ -22,9 +22,11 @@ def repo(tmp_path):
     return r
 
 
-def job_fast(nome="c1", modelo=Modelo.VEO_FAST, produto=""):
+def job_fast(nome="c1", modelo=Modelo.VEO_FAST, produto="", duracao="8s"):
+    # 8s explicito: o padrao do dominio e 4s, e os testes daqui conferem numero de
+    # credito — precisam dizer de qual clipe estao falando
     return Job(id=0, modo=Modo.T2V, modelo=modelo, prompt="uma gata",
-               destino="clipes", nome=nome, produto=produto)
+               destino="clipes", nome=nome, produto=produto, duracao=duracao)
 
 
 async def test_job_roda_e_fica_pronto(repo, tmp_path):
@@ -429,7 +431,10 @@ async def test_modelo_sem_custo_na_escolha_devolve_o_job_e_gasta_tentativa(
     c = repo.conta(cid); c.saldo = 50; repo.salvar_conta(c)
     jid = repo.criar_job(job_fast())
 
-    monkeypatch.setattr(custos, "_CUSTO", {})   # nenhum modelo tem custo cadastrado
+    # nenhum modelo tem custo cadastrado — as duas tabelas, porque desde a Task 13
+    # video e imagem moram em dicionarios separados (video tem duracao, imagem nao)
+    monkeypatch.setattr(custos, "_CUSTO_VIDEO", {})
+    monkeypatch.setattr(custos, "_CUSTO_IMAGEM", {})
 
     orq = Orquestrador(repo, TransporteFalso(saldos={cid: 50}), raiz=tmp_path)
     assert await orq.passo() is True
@@ -533,3 +538,72 @@ async def test_proxy_morto_nao_marca_a_conta_expirada_nem_seca(repo, tmp_path):
     assert j.estado is EstadoJob.PENDENTE
     assert j.tentativas == 1          # gasta tentativa, como toda falha de rede
     assert "PROXY" in j.erro
+
+
+async def test_a_duracao_do_job_manda_no_credito_reservado(repo, tmp_path):
+    # o mesmo job em 4s e em 8s tem que reservar valores diferentes. Enquanto o
+    # transporte fixava 8s, todo video pagava 12 onde 7 bastava — 70% a mais.
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 50; repo.salvar_conta(c)
+    jid = repo.criar_job(job_fast(modelo=Modelo.OMNI_FLASH, duracao="4s"))
+
+    orq = Orquestrador(repo, TransporteFalso(saldos={cid: 50}), raiz=tmp_path)
+    await orq.passo()
+
+    j = repo.job(jid)
+    assert j.estado is EstadoJob.PRONTO
+    assert j.custo_estimado == 7
+    assert repo.conta(cid).saldo == 43     # reconciliado com o falso, que cobrou 7
+
+
+async def test_o_clipe_longo_reserva_mais_que_o_curto(repo, tmp_path):
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 50; repo.salvar_conta(c)
+    jid = repo.criar_job(job_fast(modelo=Modelo.OMNI_FLASH, duracao="8s"))
+
+    orq = Orquestrador(repo, TransporteFalso(saldos={cid: 50}), raiz=tmp_path)
+    await orq.passo()
+
+    assert repo.job(jid).custo_estimado == 12
+    assert repo.conta(cid).saldo == 38
+
+
+async def test_job_longo_pula_a_conta_que_so_paga_o_curto(repo, tmp_path):
+    # a prova, ponta a ponta, de que a duracao chegou ao `escolher`: com saldo 10 a
+    # free paga um Omni Flash de 4s (7) e nao paga o de 8s (12). Sem a duracao na
+    # escolha, ela seria escolhida, o Flow recusaria e a conta viraria seca por erro
+    # de calculo.
+    magra = repo.criar_conta("magra@b.com", Tier.FREE, "p/1")
+    c = repo.conta(magra); c.saldo = 10; repo.salvar_conta(c)
+    gorda = repo.criar_conta("gorda@b.com", Tier.PRO, "p/2")
+    c = repo.conta(gorda); c.saldo = 1000; repo.salvar_conta(c)
+    jid = repo.criar_job(job_fast(modelo=Modelo.OMNI_FLASH, duracao="8s"))
+
+    orq = Orquestrador(repo, TransporteFalso(saldos={magra: 10, gorda: 1000}),
+                       raiz=tmp_path)
+    await orq.passo()
+
+    j = repo.job(jid)
+    assert j.estado is EstadoJob.PRONTO
+    assert j.conta_id == gorda
+
+
+async def test_pedido_leva_a_duracao_ao_transporte(repo, tmp_path):
+    # se a duracao nao atravessar a fronteira, o transporte real cai no default da UI
+    # (8s) e o pedido do usuario e ignorado em silencio — a saida existe e parece certa
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 50; repo.salvar_conta(c)
+    repo.criar_job(job_fast(modelo=Modelo.OMNI_FLASH, duracao="10s"))
+
+    vistos = []
+    t = TransporteFalso(saldos={cid: 50})
+    gerar_original = t.gerar
+
+    async def espiar(s, p):
+        vistos.append(p)
+        return await gerar_original(s, p)
+
+    t.gerar = espiar
+    await Orquestrador(repo, t, raiz=tmp_path).passo()
+
+    assert [p.duracao for p in vistos] == ["10s"]

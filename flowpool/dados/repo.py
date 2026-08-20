@@ -122,12 +122,12 @@ class Repo:
         cur = self.con.execute(
             """INSERT INTO job (modo, modelo, prompt, destino, nome, produto,
                    referencias, frame_inicial, frame_final, proporcao, quantidade,
-                   prioridade, estado, custo_estimado, reavaliar_em, criado_em,
-                   atualizado_em)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   duracao, prioridade, estado, custo_estimado, reavaliar_em,
+                   criado_em, atualizado_em)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (j.modo.value, j.modelo.value, j.prompt, j.destino, j.nome, j.produto,
              json.dumps(j.referencias), j.frame_inicial, j.frame_final, j.proporcao,
-             j.quantidade, j.prioridade, j.estado.value, j.custo_estimado,
+             j.quantidade, j.duracao, j.prioridade, j.estado.value, j.custo_estimado,
              _txt(j.reavaliar_em), agora, agora),
         )
         self.con.commit()
@@ -188,6 +188,7 @@ class Repo:
             produto=r["produto"], referencias=json.loads(r["referencias"]),
             frame_inicial=r["frame_inicial"], frame_final=r["frame_final"],
             proporcao=r["proporcao"], quantidade=r["quantidade"],
+            duracao=r["duracao"],
             prioridade=r["prioridade"], estado=EstadoJob(r["estado"]),
             conta_id=r["conta_id"], id_remoto=r["id_remoto"], arquivo=r["arquivo"],
             tentativas=r["tentativas"], custo_estimado=r["custo_estimado"],

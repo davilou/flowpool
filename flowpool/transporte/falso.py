@@ -86,8 +86,10 @@ class TransporteFalso:
         # antes de debitar: sessao que cai aqui nao chegou a fazer o Flow cobrar
         if s.conta.id in self.morre_ao_gerar:
             raise SessaoMorta(f"sessao da conta {s.conta.email} caiu ao gerar")
-        # o Flow cobra por geracao: um lote de quatro custa quatro vezes
-        custo = custo_de(p.modelo, s.conta.tier) * p.quantidade
+        # o Flow cobra por geracao e por duracao: um lote de quatro custa quatro vezes,
+        # e um clipe de 8s custa mais que o de 4s. O falso precisa cobrar igual, senao
+        # o motor passa no teste com uma contabilidade que o real desmente.
+        custo = custo_de(p.modelo, s.conta.tier, p.duracao) * p.quantidade
         if self.saldos.get(s.conta.id, 0) < custo:
             raise SaldoInsuficiente(f"conta {s.conta.email} sem credito")
         self.saldos[s.conta.id] -= custo

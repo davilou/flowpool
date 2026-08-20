@@ -8,7 +8,7 @@ dois codigos concorrentes e so um e o que roda em producao.
 
 Uso:
     python -m flowpool.transporte.pw.fumaca <perfil> <modo> <modelo> "<prompt>" \
-        [arquivos...] [--proporcao 9:16] [--quantidade 1]
+        [arquivos...] [--proporcao 9:16] [--quantidade 1] [--duracao 4s]
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ import argparse
 import asyncio
 from pathlib import Path
 
-from flowpool.nucleo.tipos import Conta, Modelo, Modo, Tier
+from flowpool.nucleo.tipos import DURACAO_PADRAO, DURACOES, Conta, Modelo, Modo, Tier
 from flowpool.transporte.base import Estado, Pedido, Sessao
 from flowpool.transporte.pw.transporte import TransportePlaywright
 
@@ -46,7 +46,7 @@ async def main(a: argparse.Namespace) -> None:
         referencias=a.arquivos if modo is Modo.INGREDIENTS2V else [],
         frame_inicial=a.arquivos[0] if modo is Modo.FRAMES2V and a.arquivos else None,
         frame_final=a.arquivos[1] if modo is Modo.FRAMES2V and len(a.arquivos) > 1 else None,
-        proporcao=a.proporcao, quantidade=a.quantidade,
+        proporcao=a.proporcao, quantidade=a.quantidade, duracao=a.duracao,
     )
     s = await t.abrir_sessao(conta)
     try:
@@ -75,4 +75,7 @@ if __name__ == "__main__":
     p.add_argument("arquivos", nargs="*")
     p.add_argument("--proporcao", default="9:16")
     p.add_argument("--quantidade", type=int, default=1)
+    # a fumaca GASTA CREDITO em video, e a duracao e o que mais mexe na conta: 7
+    # creditos em 4s contra 12 em 8s no Omni Flash. Default no padrao do dominio.
+    p.add_argument("--duracao", choices=list(DURACOES), default=DURACAO_PADRAO)
     asyncio.run(main(p.parse_args()))

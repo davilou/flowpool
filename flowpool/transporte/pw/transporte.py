@@ -20,8 +20,6 @@ from flowpool.transporte.pw import analise, dom
 from flowpool.transporte.pw import seletores as sel
 from flowpool.transporte.pw.sessao import abrir_contexto, interpretar_sessao
 
-# Fixa ate `Pedido` ganhar o campo — ver "Pendencias declaradas" na Task 11 do plano.
-DURACAO_PADRAO = "8s"
 # Chave de `sel.BAIXAR` por modo. 4K fica de fora dos dois: exige plano pago.
 RESOLUCAO = {
     Modo.IMAGEM: "1k",          # "1K Tamanho original"
@@ -266,7 +264,11 @@ class TransportePlaywright:
                                 f"esperado {esperado!r}")
 
         await self._clicar_unico(painel, sel.PROPORCAO[p.proporcao], "proporcao")
-        duracao = None if p.modo is Modo.IMAGEM else DURACAO_PADRAO
+        # `None` em imagem: o painel nao tem grupo de duracao naquele modo, e procurar
+        # o botao ali derrubaria toda geracao de imagem. Nos tres modos de video vale a
+        # duracao DO PEDIDO — ate a Task 13 era uma constante de 8s aqui, e todo video
+        # saia 70% mais caro do que o de 4s sem ninguem ver.
+        duracao = None if p.modo is Modo.IMAGEM else p.duracao
         if duracao:
             await self._clicar_unico(painel, sel.DURACAO[duracao], "duracao")
         await self._clicar_unico(painel, sel.QUANTIDADE[p.quantidade], "quantidade")

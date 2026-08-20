@@ -19,7 +19,7 @@ AGORA = datetime(2026, 8, 19, 12, 0, tzinfo=timezone.utc)
 
 def test_reservar_desconta_o_custo_previsto():
     c = conta(50)
-    assert reservar(c, Modelo.VEO_FAST) == 20
+    assert reservar(c, Modelo.VEO_FAST, duracao="8s") == 20
     assert c.saldo == 30
 
 
@@ -39,7 +39,7 @@ def test_reservar_recusado_nao_altera_o_saldo():
 
 def test_reservar_aceita_saldo_exatamente_igual_ao_custo():
     c = conta(20)
-    assert reservar(c, Modelo.VEO_FAST) == 20
+    assert reservar(c, Modelo.VEO_FAST, duracao="8s") == 20
     assert c.saldo == 0
 
 
@@ -137,7 +137,7 @@ def test_reservar_multiplica_pela_quantidade():
     # presa: o dia em que o Google passar a cobrar imagem nao vem com aviso.
     # `reservar` nao conhece modo, entao qualquer modelo com custo serve de veiculo.
     c = conta(50)
-    assert reservar(c, Modelo.VEO_LITE, quantidade=4) == 40
+    assert reservar(c, Modelo.VEO_LITE, quantidade=4, duracao="8s") == 40
     assert c.saldo == 10
     # e o lote de imagem, medido em zero, nao reserva nada
     assert reservar(conta(50), Modelo.NANO_BANANA, quantidade=4) == 0
@@ -148,10 +148,37 @@ def test_reservar_recusa_lote_que_o_saldo_nao_paga_inteiro():
     # pedido que o Flow recusa, e a conta seria marcada seca por erro de calculo.
     c = conta(30)
     with pytest.raises(SaldoInsuficiente):
-        reservar(c, Modelo.VEO_FAST, quantidade=2)
+        reservar(c, Modelo.VEO_FAST, quantidade=2, duracao="8s")
     assert c.saldo == 30
 
 
 def test_reservar_sem_quantidade_continua_reservando_uma():
     c = conta(50)
-    assert reservar(c, Modelo.VEO_FAST) == 20
+    assert reservar(c, Modelo.VEO_FAST, duracao="8s") == 20
+
+
+# --- duracao ---
+
+def test_reservar_desconta_pelo_tamanho_do_clipe():
+    # 4s custa 7 e 8s custa 12 no Omni Flash. Reservar sempre o de 8s tirava do saldo
+    # local credito que o Flow nao ia cobrar, e a conta saia do pool antes da hora.
+    c = conta(50)
+    assert reservar(c, Modelo.OMNI_FLASH, duracao="4s") == 7
+    assert c.saldo == 43
+    assert reservar(c, Modelo.OMNI_FLASH, duracao="8s") == 12
+    assert c.saldo == 31
+
+
+def test_reservar_sem_duracao_reserva_o_clipe_padrao():
+    c = conta(50)
+    assert reservar(c, Modelo.OMNI_FLASH) == 7
+
+
+def test_reservar_recusa_o_clipe_longo_que_o_saldo_curto_nao_paga():
+    # a conta paga o de 4s e nao o de 8s: o guarda local existe para o caso de alguem
+    # ter chamado `reservar` sem passar por `escolher`
+    c = conta(10)
+    with pytest.raises(SaldoInsuficiente):
+        reservar(c, Modelo.OMNI_FLASH, duracao="8s")
+    assert c.saldo == 10
+    assert reservar(c, Modelo.OMNI_FLASH, duracao="4s") == 7

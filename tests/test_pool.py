@@ -34,15 +34,17 @@ def test_dez_jobs_fast_drenam_as_free_antes_de_tocar_a_ultra():
     despachos = []
 
     for _ in range(10):
-        escolhida = escolher(contas, Modelo.VEO_FAST, AGORA)
+        escolhida = escolher(contas, Modelo.VEO_FAST, AGORA, duracao="8s")
         assert escolhida is not None, "o pool tem Ultra com 9000; nunca deveria secar"
         # so se reserva na conta que `escolher` devolveu — mesmo objeto, nao uma copia
         assert any(escolhida is c for c in contas)
-        custo = reservar(escolhida, Modelo.VEO_FAST)
-        assert custo == custo_de(Modelo.VEO_FAST, escolhida.tier)
+        custo = reservar(escolhida, Modelo.VEO_FAST, duracao="8s")
+        assert custo == custo_de(Modelo.VEO_FAST, escolhida.tier, "8s")
         despachos.append(escolhida.id)
 
-    # Fast custa 20 na free: 50 -> 30 -> 10. Cada free rende 2 jobs, as tres rendem 6.
+    # Fast de 8s custa 20 na free: 50 -> 30 -> 10. Cada free rende 2 jobs, as tres
+    # rendem 6. A duracao vai explicita porque o padrao do dominio e 4s, e a 4s (12
+    # creditos) cada free renderia 4 jobs — outro teste, nao este.
     assert despachos[:6].count(1) == 2
     assert despachos[:6].count(2) == 2
     assert despachos[:6].count(3) == 2
@@ -51,10 +53,10 @@ def test_dez_jobs_fast_drenam_as_free_antes_de_tocar_a_ultra():
     assert despachos[6:] == [ultra.id] * 4
 
     for f in frees:
-        assert f.saldo < custo_de(Modelo.VEO_FAST, Tier.FREE)
+        assert f.saldo < custo_de(Modelo.VEO_FAST, Tier.FREE, "8s")
 
     assert all(c.saldo >= 0 for c in contas)
-    assert ultra.saldo == 9000 - 4 * custo_de(Modelo.VEO_FAST, Tier.ULTRA)
+    assert ultra.saldo == 9000 - 4 * custo_de(Modelo.VEO_FAST, Tier.ULTRA, "8s")
 
 
 def test_nenhuma_conta_e_reservada_sem_ter_sido_escolhida():
@@ -62,8 +64,8 @@ def test_nenhuma_conta_e_reservada_sem_ter_sido_escolhida():
     tocadas = set()
 
     for _ in range(10):
-        escolhida = escolher(contas, Modelo.VEO_FAST, AGORA)
-        reservar(escolhida, Modelo.VEO_FAST)
+        escolhida = escolher(contas, Modelo.VEO_FAST, AGORA, duracao="8s")
+        reservar(escolhida, Modelo.VEO_FAST, duracao="8s")
         tocadas.add(escolhida.id)
 
     intactas = [c for c in contas if c.id not in tocadas]
@@ -72,10 +74,10 @@ def test_nenhuma_conta_e_reservada_sem_ter_sido_escolhida():
 
 def test_falha_de_geracao_devolve_a_reserva_intacta():
     contas = pool()
-    escolhida = escolher(contas, Modelo.VEO_FAST, AGORA)
+    escolhida = escolher(contas, Modelo.VEO_FAST, AGORA, duracao="8s")
     antes = escolhida.saldo
 
-    custo = reservar(escolhida, Modelo.VEO_FAST)
+    custo = reservar(escolhida, Modelo.VEO_FAST, duracao="8s")
     # a geracao morre aqui: timeout de rede, sessao caida, o que for
     liberar(escolhida, custo)
 

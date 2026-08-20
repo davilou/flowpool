@@ -1,8 +1,8 @@
 from datetime import datetime, timezone
 
 from flowpool.nucleo.tipos import (
-    PROPORCOES, Conta, EstadoJob, Job, Modelo, Modo, Projeto, SaudeSessao, Tier,
-    quantidade_maxima,
+    DURACAO_PADRAO, DURACOES, PROPORCOES, Conta, EstadoJob, Job, Modelo, Modo, Projeto,
+    SaudeSessao, Tier, duracao_valida, quantidade_maxima,
 )
 
 
@@ -113,3 +113,37 @@ def test_conta_nasce_sem_proxy():
     assert c.proxy is None
     c.proxy = "http://1.2.3.4:8080"
     assert c.proxy == "http://1.2.3.4:8080"
+
+
+def test_job_nasce_com_clipe_de_quatro_segundos():
+    # 4s custa 7 creditos e 8s custa 12: fixar 8s desperdicava 70% do credito por
+    # video. Numa conta gratuita de 50/dia isso e a diferenca entre 4 e 7 videos.
+    j = Job(id=1, modo=Modo.T2V, modelo=Modelo.OMNI_FLASH, prompt="p", destino="x", nome="c1")
+    assert j.duracao == "4s"
+
+
+def test_duracao_explicita_sobrescreve_o_padrao():
+    j = Job(id=1, modo=Modo.T2V, modelo=Modelo.OMNI_FLASH, prompt="p", destino="x",
+            nome="c1", duracao="10s")
+    assert j.duracao == "10s"
+
+
+def test_duracoes_aceitas_sao_as_quatro_do_painel():
+    assert DURACOES == ("4s", "6s", "8s", "10s")
+    assert DURACAO_PADRAO == "4s"
+
+
+def test_imagem_nao_aceita_duracao():
+    # nao existe grupo de duracao no painel em modo imagem: pedir "4s" ali nao teria
+    # onde ser clicado. `None` e o unico valor coerente.
+    assert duracao_valida(Modo.IMAGEM, None) is True
+    for d in DURACOES:
+        assert duracao_valida(Modo.IMAGEM, d) is False
+
+
+def test_video_aceita_so_as_quatro_duracoes():
+    for modo in (Modo.T2V, Modo.FRAMES2V, Modo.INGREDIENTS2V):
+        for d in DURACOES:
+            assert duracao_valida(modo, d) is True
+        assert duracao_valida(modo, "5s") is False
+        assert duracao_valida(modo, None) is False

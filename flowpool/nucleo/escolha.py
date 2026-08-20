@@ -16,7 +16,8 @@ from flowpool.nucleo.tipos import Conta, Modelo, SaudeSessao, Tier
 _ORDEM_TIER = {Tier.FREE: 1, Tier.PRO: 0, Tier.ULTRA: 0}
 
 
-def apta(c: Conta, modelo: Modelo, agora: datetime, quantidade: int = 1) -> bool:
+def apta(c: Conta, modelo: Modelo, agora: datetime, quantidade: int = 1,
+         duracao: str | None = None) -> bool:
     # Comparacao por valor, nao por identidade: `Tier` e `SaudeSessao` herdam de
     # `str, Enum`, e um valor cru vindo do SQLite quebraria `is` em silencio.
     if not c.ativa or c.saude != SaudeSessao.VIVA:
@@ -25,22 +26,26 @@ def apta(c: Conta, modelo: Modelo, agora: datetime, quantidade: int = 1) -> bool
     # prazo devolve o job a fila na hora e o motor vira laco quente.
     if c.seca_ate is not None and c.seca_ate > agora:
         return False
-    if c.tier == Tier.FREE and not cabe_no_free(modelo, quantidade):
+    if c.tier == Tier.FREE and not cabe_no_free(modelo, quantidade, duracao):
         return False
-    # Custo TOTAL do pedido, nao de uma geracao. Se so a reserva multiplicasse, o app
-    # escolheria uma conta que comporta uma geracao e tentaria gerar quatro: o Flow
-    # recusa, o job volta pra fila e a conta e marcada seca por um problema que era de
-    # calculo.
-    return custo_de(modelo, c.tier) * quantidade <= c.saldo
+    # Custo TOTAL do pedido, nao de uma geracao. Se so a reserva soubesse a quantidade
+    # e a duracao, o app escolheria uma conta que comporta uma geracao curta e tentaria
+    # gerar quatro longas: o Flow recusa, o job volta pra fila e a conta e marcada seca
+    # por um problema que era de calculo.
+    return custo_de(modelo, c.tier, duracao) * quantidade <= c.saldo
 
 
 def escolher(contas: Sequence[Conta], modelo: Modelo, agora: datetime,
-             quantidade: int = 1) -> Conta | None:
+             quantidade: int = 1, duracao: str | None = None) -> Conta | None:
     """Melhor conta para rodar `quantidade` geracoes de `modelo` em `agora`.
+
+    `duracao` so pesa nos modelos de video, e pesa muito: no Omni Flash free, 4s custa
+    7 e 8s custa 12. Uma conta com saldo 10 paga o clipe curto e nao paga o longo — e
+    e por isso que a duracao precisa chegar ate aqui, e nao so ate `reservar`.
 
     None se nenhuma serve.
     """
-    aptas = [c for c in contas if apta(c, modelo, agora, quantidade)]
+    aptas = [c for c in contas if apta(c, modelo, agora, quantidade, duracao)]
     if not aptas:
         return None
     return max(aptas, key=lambda c: (_ORDEM_TIER[c.tier], c.saldo, -c.id))

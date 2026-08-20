@@ -8,7 +8,9 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from flowpool.nucleo.erros import SaldoInsuficiente
-from flowpool.nucleo.tipos import PROPORCAO_PADRAO, Conta, Modelo, Modo
+from flowpool.nucleo.tipos import (
+    DURACAO_PADRAO, PROPORCAO_PADRAO, Conta, Modelo, Modo,
+)
 
 # `SaldoInsuficiente` mora no nucleo e e so reexportada aqui, para quem importa de
 # `transporte.base` continuar funcionando. Duas classes com o mesmo nome fariam o
@@ -33,12 +35,16 @@ class Pedido:
     referencias: list[str] = field(default_factory=list)
     frame_inicial: str | None = None
     frame_final: str | None = None
-    # Duas configuracoes do painel de geracao do Flow. Precisam atravessar a fronteira
+    # Tres configuracoes do painel de geracao do Flow. Precisam atravessar a fronteira
     # ou o transporte real geraria sempre no default da UI e o pedido do usuario seria
     # ignorado em silencio — que e o pior tipo de bug aqui, porque a saida existe e
-    # parece certa.
+    # parece certa. Foi exatamente o que aconteceu com a duracao enquanto ela era
+    # constante no transporte: todo video saia em 8s, 70% mais caro do que o de 4s.
     proporcao: str = PROPORCAO_PADRAO
     quantidade: int = 1
+    # So vale em video: em imagem o painel nao tem grupo de duracao, e o transporte
+    # nao toca nele.
+    duracao: str = DURACAO_PADRAO
 
 
 @dataclass

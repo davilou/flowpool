@@ -244,3 +244,19 @@ def test_proxy_da_conta_sobrevive_ao_banco(repo):
     c.proxy = "http://davi:segredo@1.2.3.4:8080"
     repo.salvar_conta(c)
     assert repo.conta(id_).proxy == "http://davi:segredo@1.2.3.4:8080"
+
+
+def test_job_gravado_sem_duracao_sai_com_quatro_segundos(repo):
+    # o padrao do dominio vale tambem para quem cria job direto pelo repo, sem passar
+    # pela API: 4s custa 7 e 8s custa 12, e o default nunca pode ser o caro
+    id_ = repo.criar_job(Job(id=0, modo=Modo.T2V, modelo=Modelo.OMNI_FLASH,
+                             prompt="p", destino="d", nome="n"))
+    assert repo.job(id_).duracao == "4s"
+
+
+def test_duracao_sobrevive_ao_banco(repo):
+    # sem a ida e volta, um restart no meio da fila reescreveria todo job pendente
+    # para o padrao e o usuario receberia clipes de outro tamanho
+    id_ = repo.criar_job(Job(id=0, modo=Modo.T2V, modelo=Modelo.OMNI_FLASH,
+                             prompt="p", destino="d", nome="n", duracao="10s"))
+    assert repo.job(id_).duracao == "10s"

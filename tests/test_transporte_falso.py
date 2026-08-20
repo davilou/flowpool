@@ -11,9 +11,12 @@ def conta(saldo=50):
     return Conta(id=1, email="a@b.com", tier=Tier.FREE, perfil="p", saldo=saldo)
 
 
-def pedido():
+def pedido(duracao="8s"):
+    # 8s explicito: o padrao do dominio e 4s, e os testes que conferem numero de
+    # credito precisam dizer de qual clipe estao falando
     return Pedido(modo=Modo.T2V, modelo=Modelo.VEO_FAST, prompt="uma gata",
-                  referencias=[], frame_inicial=None, frame_final=None)
+                  referencias=[], frame_inicial=None, frame_final=None,
+                  duracao=duracao)
 
 
 async def test_gerar_devolve_id_remoto_e_fica_pronto():
@@ -141,7 +144,7 @@ async def test_lote_de_quatro_debita_quatro_vezes():
     t = TransporteFalso(saldos={1: 50})
     s = await t.abrir_sessao(conta())
     await t.gerar(s, Pedido(modo=Modo.T2V, modelo=Modelo.VEO_LITE, prompt="p",
-                            quantidade=4))
+                            quantidade=4, duracao="8s"))
     assert t.saldos[1] == 10
 
 
@@ -150,7 +153,7 @@ async def test_lote_que_nao_cabe_no_saldo_e_recusado():
     s = await t.abrir_sessao(conta(30))
     with pytest.raises(SaldoInsuficiente):
         await t.gerar(s, Pedido(modo=Modo.T2V, modelo=Modelo.VEO_FAST, prompt="p",
-                                quantidade=2))
+                                quantidade=2, duracao="8s"))
 
 
 async def test_pedido_carrega_proporcao_e_quantidade():
@@ -159,3 +162,26 @@ async def test_pedido_carrega_proporcao_e_quantidade():
     p = Pedido(modo=Modo.T2V, modelo=Modelo.OMNI_FLASH, prompt="p")
     assert p.proporcao == "9:16"
     assert p.quantidade == 1
+
+
+async def test_pedido_nasce_com_clipe_de_quatro_segundos():
+    # o padrao do dominio atravessa a fronteira: sem ele o transporte real cairia no
+    # default da UI, que e 8s — 70% mais caro por video
+    p = Pedido(modo=Modo.T2V, modelo=Modelo.OMNI_FLASH, prompt="p")
+    assert p.duracao == "4s"
+
+
+async def test_gerar_debita_pelo_tamanho_do_clipe():
+    # o Flow cobra por duracao; o falso precisa cobrar igual, senao o motor passa no
+    # teste com uma contabilidade que o real desmente
+    t = TransporteFalso(saldos={1: 50, 2: 50})
+    curto = await t.abrir_sessao(conta())
+    await t.gerar(curto, Pedido(modo=Modo.T2V, modelo=Modelo.OMNI_FLASH, prompt="p",
+                                duracao="4s"))
+    assert t.saldos[1] == 43
+
+    longo = await t.abrir_sessao(Conta(id=2, email="b@b.com", tier=Tier.FREE,
+                                       perfil="p", saldo=50))
+    await t.gerar(longo, Pedido(modo=Modo.T2V, modelo=Modelo.OMNI_FLASH, prompt="p",
+                                duracao="8s"))
+    assert t.saldos[2] == 38

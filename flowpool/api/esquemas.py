@@ -5,8 +5,8 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from flowpool.nucleo.erros import ProxyInvalido
 from flowpool.nucleo.proxy import analisar
 from flowpool.nucleo.tipos import (
-    PROPORCAO_PADRAO, PROPORCOES, EstadoJob, Modelo, Modo, SaudeSessao, Tier,
-    quantidade_maxima,
+    DURACAO_PADRAO, DURACOES, PROPORCAO_PADRAO, PROPORCOES, EstadoJob, Modelo, Modo,
+    SaudeSessao, Tier, duracao_valida, quantidade_maxima,
 )
 
 
@@ -60,6 +60,9 @@ class PedidoJob(BaseModel):
     # Saidas por geracao. MULTIPLICA O CUSTO — o teto depende do modo, ver
     # `quantidade_coerente_com_o_modo`.
     quantidade: int = Field(default=1, ge=1)
+    # Tamanho do clipe. MUDA O CUSTO: 7 creditos em 4s contra 12 em 8s no Omni Flash.
+    # So existe em video — ver `duracao_coerente_com_o_modo`.
+    duracao: str = DURACAO_PADRAO
     prioridade: int = 0
 
     @field_validator("proporcao")
@@ -93,6 +96,32 @@ class PedidoJob(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def duracao_coerente_com_o_modo(self) -> PedidoJob:
+        """Imagem nao tem duracao; video so aceita os quatro valores do painel.
+
+        O teste do lado da imagem e pelo campo TER VINDO no corpo (`model_fields_set`),
+        e nao pelo valor: o padrao do dominio e "4s", entao comparar valor recusaria
+        todo pedido de imagem que nao falasse de duracao — ou seja, todos eles. E o
+        mesmo criterio que `PatchConta` usa para o proxy, e pelo mesmo motivo: ausencia
+        e valor sao coisas diferentes.
+
+        Recusar aqui e melhor do que aceitar calado: nao ha grupo de duracao no painel
+        em modo imagem, entao a configuracao nunca seria aplicada e o usuario receberia
+        o arquivo achando que foi.
+        """
+        if self.modo is Modo.IMAGEM:
+            pedida = self.duracao if "duracao" in self.model_fields_set else None
+            if not duracao_valida(self.modo, pedida):
+                raise ValueError(
+                    f"modo imagem nao tem duracao: o painel do Flow nao oferece o "
+                    f"grupo em imagem, e {pedida!r} nao teria onde ser clicado")
+            return self
+        if not duracao_valida(self.modo, self.duracao):
+            raise ValueError(
+                f"duracao {self.duracao!r} nao existe; use uma de {list(DURACOES)}")
+        return self
+
+    @model_validator(mode="after")
     def destino_deriva_do_produto(self) -> PedidoJob:
         """`produto: "Panelas Monaco"` basta; repetir o caminho e ruido."""
         if not self.destino:
@@ -121,6 +150,7 @@ class RespostaJob(BaseModel):
     produto: str = ""
     proporcao: str = PROPORCAO_PADRAO
     quantidade: int = 1
+    duracao: str = DURACAO_PADRAO
     conta_id: int | None = None
     arquivo: str | None = None
     tentativas: int = 0

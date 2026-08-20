@@ -54,6 +54,33 @@ def quantidade_maxima(modo: Modo) -> int:
     return MAX_QUANTIDADE_IMAGEM if modo is Modo.IMAGEM else 1
 
 
+# As quatro do grupo de duracao do chip, medidas ao vivo. Imagem nao tem grupo de
+# duracao: nao existe botao onde clicar.
+DURACOES = ("4s", "6s", "8s", "10s")
+
+# Padrao 4s, e nao os 8s que o transporte fixava enquanto o campo nao existia. Sao os
+# dois motivos:
+#   1. PRECO. No Omni Flash, 4s custa 7 creditos e 8s custa 12 — fixar 8s desperdicava
+#      70% do credito em todo video. Numa conta gratuita de 50 creditos por dia, e a
+#      diferenca entre 4 e 7 videos.
+#   2. USO. O pipeline do Davi monta os clipes em ~5s; o clipe curto e o caso comum,
+#      nao a excecao.
+# Continua sendo escolha por pedido — o padrao so precisa servir ao caso comum.
+DURACAO_PADRAO = "4s"
+
+
+def duracao_valida(modo: Modo, duracao: str | None) -> bool:
+    """Se aquele modo aceita aquela duracao.
+
+    `None` significa "sem duracao", e e o UNICO valor coerente em imagem: o painel do
+    Flow nao oferece o grupo de duracao em modo imagem, entao "4s" ali nao teria onde
+    ser clicado. Nos tres modos de video valem so os quatro valores de `DURACOES`.
+    """
+    if modo is Modo.IMAGEM:
+        return duracao is None
+    return duracao in DURACOES
+
+
 class EstadoJob(str, Enum):
     PENDENTE = "pendente"
     RODANDO = "rodando"
@@ -107,6 +134,12 @@ class Job:
     # Saidas por geracao. MULTIPLICA O CUSTO: quatro imagens custam quatro vezes uma,
     # e por isso a quantidade atravessa `escolher` e `reservar`, nao so a reserva.
     quantidade: int = 1
+    # Tamanho do clipe, um dos `DURACOES`. MUDA O CUSTO — 4s custa 7 creditos e 8s
+    # custa 12 no Omni Flash —, e por isso atravessa `escolher` e `reservar` pelo mesmo
+    # caminho da quantidade. Em modo imagem o campo fica com o padrao e NAO significa
+    # nada: nao ha grupo de duracao no painel, o transporte nao o aplica e o custo o
+    # ignora. Quem impede o usuario de pedir duracao em imagem e a API.
+    duracao: str = DURACAO_PADRAO
     prioridade: int = 0
     estado: EstadoJob = EstadoJob.PENDENTE
     conta_id: int | None = None

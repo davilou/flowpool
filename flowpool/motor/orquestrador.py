@@ -123,9 +123,9 @@ class Orquestrador:
         if job.id_remoto is not None and job.conta_id is not None:
             anterior = next((c for c in contas if c.id == job.conta_id), None)
             if anterior is not None and apta(anterior, job.modelo, agora,
-                                             job.quantidade):
+                                             job.quantidade, job.duracao):
                 return anterior
-        return escolher(contas, job.modelo, agora, job.quantidade)
+        return escolher(contas, job.modelo, agora, job.quantidade, job.duracao)
 
     async def _executar(self, job: Job, conta: Conta) -> None:
         # retomada: a geracao ja existe e e da mesma conta. Gerar de novo pagaria duas
@@ -149,7 +149,8 @@ class Orquestrador:
                 # inclusive depois de um restart, por isso vai para o banco na hora
                 # o total do lote, nao o de uma geracao: e este numero que o estorno
                 # devolve depois
-                job.custo_estimado = reservar(conta, job.modelo, job.quantidade)
+                job.custo_estimado = reservar(conta, job.modelo, job.quantidade,
+                                              job.duracao)
                 self.repo.salvar_conta(conta)
                 self.repo.salvar_job(job)
 
@@ -346,7 +347,7 @@ class Orquestrador:
         return Pedido(modo=job.modo, modelo=job.modelo, prompt=job.prompt,
                       referencias=job.referencias, frame_inicial=job.frame_inicial,
                       frame_final=job.frame_final, proporcao=job.proporcao,
-                      quantidade=job.quantidade)
+                      quantidade=job.quantidade, duracao=job.duracao)
 
     async def rodar(self, intervalo: float = 2.0) -> None:
         """Laco eterno, usado pela API. Para com `parar()`.
