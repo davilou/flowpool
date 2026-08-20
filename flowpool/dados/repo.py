@@ -168,6 +168,20 @@ class Repo:
         self.con.commit()
         return self._job(rs[0]) if rs else None
 
+    def renomear_job(self, id_: int, nome: str) -> None:
+        """Troca so o `nome` do job.
+
+        Fica fora de `salvar_job` de proposito: aquele grava o que o MOTOR mexe (estado,
+        conta, arquivo, custo) e roda a cada passo do ciclo. Se `nome` entrasse la, o
+        motor reescreveria o nome a cada gravacao a partir do `Job` que ele carregou —
+        e uma renomeacao feita no painel enquanto o job roda seria desfeita calada.
+        """
+        self.con.execute(
+            "UPDATE job SET nome=?, atualizado_em=? WHERE id=?",
+            (nome, _txt(datetime.now(timezone.utc)), id_),
+        )
+        self.con.commit()
+
     def salvar_job(self, j: Job) -> None:
         self.con.execute(
             """UPDATE job SET estado=?, conta_id=?, id_remoto=?, arquivo=?,

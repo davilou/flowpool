@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from flowpool.api.app import criar_app
 from flowpool.dados.repo import Repo
 from flowpool.nucleo.escolha import escolher
-from flowpool.nucleo.tipos import Modelo, SaudeSessao, Tier
+from flowpool.nucleo.tipos import EstadoJob, Modelo, SaudeSessao, Tier
 from flowpool.transporte.base import ErroTransporte
 from flowpool.transporte.falso import TransporteFalso
 
@@ -577,3 +577,193 @@ def test_miniatura_de_imagem_inexistente_da_404(com_imagens):
     c, _ = com_imagens
     r = c.get("/miniatura", params={"caminho": "Panelas Monaco/imagens/sumiu.png"})
     assert r.status_code == 404
+
+
+# ---------------- galeria: midia, download e renomear ----------------
+
+
+@pytest.fixture
+def com_geracoes(cliente, tmp_path):
+    """Duas geracoes JA em disco, como o motor as deixa: caminho ABSOLUTO no job."""
+    clipes = tmp_path / "Panelas Monaco" / "clipes"
+    clipes.mkdir(parents=True)
+    (clipes / "c1.mp4").write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"v" * 40)
+    (clipes / "c2.png").write_bytes(b"\x89PNG" + b"i" * 30)
+    (tmp_path / "Panelas Monaco" / "notas.md").write_text("nao e midia")
+    c, repo = cliente
+
+    def job(nome, arquivo, modo="t2v"):
+        corpo = {"modo": modo, "modelo": "veo-fast" if modo == "t2v" else "nano-banana",
+                 "prompt": "uma panela girando", "produto": "Panelas Monaco",
+                 "nome": nome}
+        jid = c.post("/jobs", json=corpo).json()["id"]
+        if arquivo is not None:
+            j = repo.job(jid)
+            j.arquivo = str(arquivo)
+            j.estado = EstadoJob.PRONTO
+            j.custo_estimado = 20
+            repo.salvar_job(j)
+        return jid
+
+    return c, repo, job, clipes
+
+
+def test_job_traz_o_caminho_relativo_ao_lado_do_absoluto(com_geracoes):
+    # o motor grava `Job.arquivo` ABSOLUTO, e `resolver` recusa caminho absoluto de
+    # proposito: sem esta conversao no servidor, a galeria nao teria como pedir a midia
+    c, _, job, clipes = com_geracoes
+    jid = job("c1", clipes / "c1.mp4")
+    corpo = c.get(f"/jobs/{jid}").json()
+    assert corpo["caminho"] == "Panelas Monaco/clipes/c1.mp4"
+    assert corpo["arquivo"].endswith("c1.mp4")
+    assert corpo["prompt"] == "uma panela girando"
+    assert corpo["custo_estimado"] == 20
+
+
+def test_job_sem_arquivo_tem_caminho_nulo(com_geracoes):
+    c, _, job, _ = com_geracoes
+    jid = job("c9", None)
+    assert c.get(f"/jobs/{jid}").json()["caminho"] is None
+
+
+def test_job_com_arquivo_fora_da_raiz_nao_ganha_caminho(com_geracoes, tmp_path):
+    # job antigo, gerado com outra raiz: card sem link e melhor do que listagem quebrada
+    c, _, job, _ = com_geracoes
+    jid = job("c8", tmp_path.parent / "de_outra_raiz.mp4")
+    assert c.get(f"/jobs/{jid}").json()["caminho"] is None
+
+
+def test_midia_serve_video_com_o_tipo_certo(com_geracoes):
+    c, _, _, _ = com_geracoes
+    r = c.get("/midia", params={"caminho": "Panelas Monaco/clipes/c1.mp4"})
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "video/mp4"
+    assert "max-age" in r.headers["cache-control"]
+
+
+def test_midia_atende_range_para_o_primeiro_quadro(com_geracoes):
+    # `<video preload="metadata">` pede os primeiros bytes; sem 206 ele baixaria o
+    # clipe inteiro so para desenhar a miniatura da grade
+    c, _, _, _ = com_geracoes
+    r = c.get("/midia", params={"caminho": "Panelas Monaco/clipes/c1.mp4"},
+              headers={"Range": "bytes=0-7"})
+    assert r.status_code == 206
+    assert r.content == b"\x00\x00\x00\x18"[:4] + b"ftyp"
+
+
+def test_midia_serve_imagem(com_geracoes):
+    c, _, _, _ = com_geracoes
+    r = c.get("/midia", params={"caminho": "Panelas Monaco/clipes/c2.png"})
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "image/png"
+
+
+def test_midia_recusa_sair_da_raiz(com_geracoes):
+    c, _, _, _ = com_geracoes
+    assert c.get("/midia", params={"caminho": "../fora.mp4"}).status_code == 400
+    assert c.get("/midia", params={"caminho": "/etc/passwd"}).status_code == 400
+
+
+def test_baixar_entrega_como_anexo_com_o_nome_original(com_geracoes):
+    c, _, _, _ = com_geracoes
+    r = c.get("/baixar", params={"caminho": "Panelas Monaco/clipes/c1.mp4"})
+    assert r.status_code == 200
+    assert "attachment" in r.headers["content-disposition"]
+    assert "c1.mp4" in r.headers["content-disposition"]
+    assert r.content.startswith(b"\x00\x00\x00\x18ftyp")
+
+
+def test_baixar_recusa_travessia_de_caminho(com_geracoes, tmp_path):
+    # a mesma barreira do seletor (`arquivos.resolver`), e nao um `if` proprio: e a
+    # UNICA coisa entre uma querystring e o disco inteiro desta maquina
+    (tmp_path.parent / "segredo.png").write_bytes(b"\x89PNG")
+    c, _, _, _ = com_geracoes
+    for torto in ["../segredo.png", "a/../../segredo.png", "/etc/passwd",
+                  r"C:\Windows\win.ini", r"..\..\segredo.png"]:
+        assert c.get("/baixar", params={"caminho": torto}).status_code == 400, torto
+
+
+def test_baixar_recusa_arquivo_que_nao_e_midia(com_geracoes):
+    # sem o filtro de extensao esta rota entregaria o .db e o .env do projeto
+    c, _, _, _ = com_geracoes
+    assert c.get("/baixar",
+                 params={"caminho": "Panelas Monaco/notas.md"}).status_code == 400
+
+
+def test_baixar_de_arquivo_inexistente_da_404(com_geracoes):
+    c, _, _, _ = com_geracoes
+    r = c.get("/baixar", params={"caminho": "Panelas Monaco/clipes/sumiu.mp4"})
+    assert r.status_code == 404
+
+
+def test_baixar_lote_junta_tudo_num_zip(com_geracoes):
+    import io
+    import zipfile
+
+    c, _, _, _ = com_geracoes
+    r = c.get("/baixar-lote", params={"caminho": ["Panelas Monaco/clipes/c1.mp4",
+                                                  "Panelas Monaco/clipes/c2.png"]})
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "application/zip"
+    assert "attachment" in r.headers["content-disposition"]
+    with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+        assert sorted(z.namelist()) == ["c1.mp4", "c2.png"]
+        assert z.read("c2.png").startswith(b"\x89PNG")
+
+
+def test_baixar_lote_desempata_nomes_repetidos(com_geracoes, tmp_path):
+    # dois produtos com um `c1.mp4` cada: sem desempate, um dos dois sumiria na extracao
+    import io
+    import zipfile
+
+    outra = tmp_path / "Outro Produto" / "clipes"
+    outra.mkdir(parents=True)
+    (outra / "c1.mp4").write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"z" * 10)
+    c, _, _, _ = com_geracoes
+    r = c.get("/baixar-lote", params={"caminho": ["Panelas Monaco/clipes/c1.mp4",
+                                                  "Outro Produto/clipes/c1.mp4"]})
+    with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+        assert z.namelist() == ["c1.mp4", "c1 (2).mp4"]
+
+
+def test_baixar_lote_recusa_travessia_em_qualquer_item(com_geracoes):
+    # o caminho torto no meio da lista derruba o lote inteiro, e nao sai do zip calado
+    c, _, _, _ = com_geracoes
+    r = c.get("/baixar-lote", params={"caminho": ["Panelas Monaco/clipes/c1.mp4",
+                                                  "../../segredo.png"]})
+    assert r.status_code == 400
+
+
+def test_baixar_lote_sem_nada_selecionado_da_400(com_geracoes):
+    c, _, _, _ = com_geracoes
+    assert c.get("/baixar-lote").status_code == 400
+
+
+def test_renomear_job_pendente(com_geracoes):
+    c, repo, job, _ = com_geracoes
+    jid = job("provisorio", None)
+    r = c.patch(f"/jobs/{jid}", json={"nome": "heroi-abertura"})
+    assert r.status_code == 200
+    assert r.json()["nome"] == "heroi-abertura"
+    assert repo.job(jid).nome == "heroi-abertura"
+
+
+def test_renomear_job_pronto_da_409(com_geracoes):
+    # o arquivo ja existe com o nome antigo; trocar o campo faria o job mentir
+    c, _, job, clipes = com_geracoes
+    jid = job("c1", clipes / "c1.mp4")
+    r = c.patch(f"/jobs/{jid}", json={"nome": "outro"})
+    assert r.status_code == 409
+    assert "disco" in r.json()["detail"]
+
+
+def test_renomear_job_inexistente_da_404(com_geracoes):
+    c, _, _, _ = com_geracoes
+    assert c.patch("/jobs/999", json={"nome": "x"}).status_code == 404
+
+
+def test_renomear_com_nome_em_branco_da_422(com_geracoes):
+    # nome vira nome de arquivo: espaco em branco produziria " .mp4" em disco
+    c, _, job, _ = com_geracoes
+    jid = job("provisorio", None)
+    assert c.patch(f"/jobs/{jid}", json={"nome": "   "}).status_code == 422

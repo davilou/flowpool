@@ -20,6 +20,20 @@ from pathlib import Path, PurePosixPath
 # leitura da grade.
 EXTENSOES = frozenset({".png", ".jpg", ".jpeg", ".webp"})
 
+# O que a GALERIA mostra e o que o download entrega. Diferente de `EXTENSOES`, que e a
+# lista do seletor de referencias: la video nao serve de entrada para o Flow, aqui video
+# e justamente o que a pessoa gerou. `.webm` e `.mov` entram porque o arquivo em disco e
+# o que o Flow entregou, e nao ha promessa de que sera sempre `.mp4`.
+EXTENSOES_VIDEO = frozenset({".mp4", ".webm", ".mov"})
+
+# Tipo declarado a mao em vez de `mimetypes.guess_type`: aquele le o registro do Windows,
+# onde a extensao pode estar associada a outra coisa por qualquer programa instalado.
+TIPOS = {
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".webp": "image/webp", ".mp4": "video/mp4", ".webm": "video/webm",
+    ".mov": "video/quicktime",
+}
+
 # Pastas que nao tem nada que interesse e enterrariam o que interessa. `flowpool/perfis`
 # entra pelo caminho, e nao pelo nome: e um lugar so, e la moram os perfis do Chrome com
 # as sessoes das contas — nem listar convem.
@@ -99,6 +113,43 @@ def e_imagem(nome: str) -> bool:
     return Path(nome).suffix.lower() in EXTENSOES
 
 
+def e_video(nome: str) -> bool:
+    return Path(nome).suffix.lower() in EXTENSOES_VIDEO
+
+
+def e_midia(nome: str) -> bool:
+    """Imagem ou video — o que a galeria mostra e o que o download entrega."""
+    return e_imagem(nome) or e_video(nome)
+
+
+def tipo_de(alvo: Path) -> str:
+    return TIPOS.get(alvo.suffix.lower(), "application/octet-stream")
+
+
+def relativo_seguro(raiz: Path | str, absoluto: str | None) -> str | None:
+    """Caminho relativo a raiz de um `Job.arquivo`, ou `None` se ele nao serve.
+
+    O motor grava `Job.arquivo` ABSOLUTO (`str(self.raiz / destino / nome.mp4)`), e o
+    painel precisa do relativo: e ele que `resolver` aceita, e caminho absoluto na
+    querystring e exatamente o que a barreira recusa. A conversao mora aqui, ao lado da
+    barreira, e nao numa expressao no JS — o JS nao tem como saber qual e a raiz.
+
+    Devolve `None` em vez de levantar: um job antigo pode ter sido gerado com outra
+    raiz, e um card sem link e melhor do que uma listagem que quebra inteira.
+    """
+    if not absoluto:
+        return None
+    raiz_abs = Path(raiz).resolve()
+    try:
+        alvo = Path(absoluto).resolve()
+    except OSError:
+        return None
+    if alvo == raiz_abs or not alvo.is_relative_to(raiz_abs):
+        return None
+    rel = _relativo(raiz_abs, alvo)
+    return None if e_ruido(rel) else rel
+
+
 def listar(raiz: Path | str, pedido: str | None) -> dict:
     """Pastas e imagens de um diretorio, ja separadas e em ordem alfabetica.
 
@@ -150,21 +201,38 @@ def listar(raiz: Path | str, pedido: str | None) -> dict:
     return {"caminho": rel, "pai": pai, "pastas": pastas, "arquivos": arquivos}
 
 
-def arquivo_de_imagem(raiz: Path | str, pedido: str | None) -> Path:
-    """Resolve o caminho de UMA imagem para servir na miniatura.
+def _arquivo_servivel(raiz: Path | str, pedido: str | None,
+                      aceita, oferece: str) -> Path:
+    """Resolve UM arquivo para servir, pela mesma barreira da listagem.
 
-    Mesma barreira da listagem, mais duas exigencias: tem que ser arquivo e tem que ter
-    extensao de imagem. A checagem de extensao aqui nao e cosmetica — sem ela esta rota
-    serviria qualquer arquivo do projeto (o .db, o .env) para quem soubesse o nome.
+    `resolver` continua sendo a unica barreira entre a querystring e o disco desta
+    maquina; o que muda de uma rota para outra e so o filtro de extensao. Ele nao e
+    cosmetico: sem ele estas rotas serviriam qualquer arquivo do projeto (o .db, o .env)
+    para quem soubesse o nome.
     """
     raiz_abs = Path(raiz).resolve()
     alvo = resolver(raiz_abs, pedido)
     rel = _relativo(raiz_abs, alvo)
     if not rel or e_ruido(rel):
         raise CaminhoForaDaRaiz(f"caminho {rel!r} nao entra na navegacao")
-    if not e_imagem(alvo.name):
-        raise CaminhoForaDaRaiz(
-            f"{rel} nao e imagem; esta rota so serve {sorted(EXTENSOES)}")
+    if not aceita(alvo.name):
+        raise CaminhoForaDaRaiz(f"{rel} nao serve aqui; esta rota so serve {oferece}")
     if not alvo.is_file():
         raise FileNotFoundError(f"{rel} nao existe")
     return alvo
+
+
+def arquivo_de_midia(raiz: Path | str, pedido: str | None) -> Path:
+    """Resolve UM arquivo de midia — imagem ou video — para servir ou baixar."""
+    return _arquivo_servivel(raiz, pedido, e_midia,
+                             str(sorted(EXTENSOES | EXTENSOES_VIDEO)))
+
+
+def arquivo_de_imagem(raiz: Path | str, pedido: str | None) -> Path:
+    """Resolve o caminho de UMA imagem para servir na miniatura.
+
+    Mesma barreira da listagem, mais duas exigencias: tem que ser arquivo e tem que ter
+    extensao de imagem. Video NAO entra aqui: esta rota alimenta o seletor de
+    referencias, e referencia do Flow e imagem.
+    """
+    return _arquivo_servivel(raiz, pedido, e_imagem, str(sorted(EXTENSOES)))

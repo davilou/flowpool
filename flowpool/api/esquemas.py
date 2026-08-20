@@ -148,13 +148,41 @@ class RespostaJob(BaseModel):
     modelo: Modelo
     nome: str
     produto: str = ""
+    # O prompt inteiro. A galeria mostra o comeco no card e o texto completo no
+    # visualizador: e por ele que a pessoa reconhece o que gerou, muito antes do nome.
+    prompt: str = ""
     proporcao: str = PROPORCAO_PADRAO
     quantidade: int = 1
     duracao: str = DURACAO_PADRAO
     conta_id: int | None = None
+    # ABSOLUTO, como o motor gravou. Fica na resposta porque e o caminho que a pessoa
+    # copia para abrir o arquivo no editor de video.
     arquivo: str | None = None
+    # O MESMO arquivo, relativo a raiz do projeto. E este que as rotas de midia e de
+    # download aceitam: `resolver` recusa caminho absoluto, de proposito.
+    caminho: str | None = None
+    # Creditos reservados para esta geracao. `None` enquanto o job nao foi despachado.
+    custo_estimado: int | None = None
     tentativas: int = 0
     erro: str | None = None
+
+
+class PatchJob(BaseModel):
+    """O que da para mudar num job depois de criado. Hoje: so o nome.
+
+    O nome vira o nome do arquivo em disco, entao mudar so faz sentido ENQUANTO o
+    arquivo nao existe — quem impede depois disso e a rota, com 409.
+    """
+
+    nome: str = Field(min_length=1)
+
+    @field_validator("nome")
+    @classmethod
+    def nome_nao_e_so_espaco(cls, v: str) -> str:
+        """Nome vira NOME DE ARQUIVO: " " produziria um ` .mp4` em disco."""
+        if not v.strip():
+            raise ValueError("o nome nao pode ser so espaco")
+        return v.strip()
 
 
 class RespostaProjeto(BaseModel):
