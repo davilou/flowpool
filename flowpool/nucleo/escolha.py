@@ -12,9 +12,9 @@ _ORDEM_TIER = {Tier.FREE: 1, Tier.PRO: 0, Tier.ULTRA: 0}
 
 
 def apta(c: Conta, modelo: Modelo) -> bool:
-    if not c.ativa or c.saude is not SaudeSessao.VIVA:
+    if not c.ativa or c.saude != SaudeSessao.VIVA:
         return False
-    if c.tier is Tier.FREE and not cabe_no_free(modelo):
+    if c.tier == Tier.FREE and not cabe_no_free(modelo):
         return False
     return custo_de(modelo, c.tier) <= c.saldo
 

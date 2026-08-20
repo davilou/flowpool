@@ -8,6 +8,7 @@ real, reconciliada em `nucleo/credito.py`.
 
 from __future__ import annotations
 
+from flowpool.nucleo.erros import ModeloSemCusto
 from flowpool.nucleo.tipos import Modelo, Tier
 
 TETO_DIARIO_FREE = 50
@@ -30,7 +31,10 @@ _CUSTO: dict[tuple[Modelo, Tier], int] = {
 
 def custo_de(modelo: Modelo, tier: Tier) -> int:
     """Custo estimado em creditos de uma geracao."""
-    return _CUSTO[(modelo, tier)]
+    try:
+        return _CUSTO[(modelo, tier)]
+    except KeyError:
+        raise ModeloSemCusto(f"sem custo cadastrado para {modelo.value} em {tier.value}") from None
 
 
 def cabe_no_free(modelo: Modelo) -> bool:

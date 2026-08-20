@@ -19,6 +19,12 @@ def test_job_nasce_pendente_sem_tentativas():
     assert j.conta_id is None
 
 
+def test_job_nasce_sem_custo_estimado():
+    # sem registrar o reservado nao ha como estornar um job que morreu antes de gerar
+    j = Job(id=1, modo=Modo.T2V, modelo=Modelo.VEO_FAST, prompt="p", destino="x", nome="c1")
+    assert j.custo_estimado is None
+
+
 def test_enums_serializam_como_texto():
     assert Tier.ULTRA.value == "ultra"
     assert Modo.INGREDIENTS2V.value == "ingredients2v"

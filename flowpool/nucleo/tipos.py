@@ -73,6 +73,7 @@ class Job:
     id_remoto: str | None = None
     arquivo: str | None = None
     tentativas: int = 0
+    custo_estimado: int | None = None
     erro: str | None = None
     reavaliar_em: datetime | None = None
     criado_em: datetime | None = None

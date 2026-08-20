@@ -28,6 +28,13 @@ def test_custo_por_modelo_e_tier(modelo, tier, esperado):
     assert custo_de(modelo, tier) == esperado
 
 
+def test_tabela_cobre_todos_os_pares():
+    # um modelo novo sem custo cadastrado travaria a fila inteira, nao so um job
+    for m in Modelo:
+        for t in Tier:
+            assert isinstance(custo_de(m, t), int)
+
+
 def test_quality_nao_cabe_em_conta_gratis():
     # 100 creditos contra teto diario de 50 — nunca cabe
     assert cabe_no_free(Modelo.VEO_QUALITY) is False

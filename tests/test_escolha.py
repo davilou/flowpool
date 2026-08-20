@@ -67,3 +67,13 @@ def test_ultra_paga_menos_e_por_isso_consegue_onde_pro_nao_conseguiria():
 def test_desempate_entre_pagas_e_por_saldo():
     contas = [conta(1, Tier.PRO, 300), conta(2, Tier.ULTRA, 900)]
     assert escolher(contas, Modelo.VEO_QUALITY).id == 2
+
+
+def test_desempate_nao_depende_da_ordem_da_lista():
+    # a lista vem de um SELECT sem ORDER BY garantido; a escolha nao pode variar
+    a, b = conta(1, Tier.FREE, 50), conta(2, Tier.FREE, 50)
+    assert escolher([a, b], Modelo.VEO_FAST).id == escolher([b, a], Modelo.VEO_FAST).id
+
+
+def test_saldo_exatamente_igual_ao_custo_serve():
+    assert escolher([conta(1, Tier.FREE, 20)], Modelo.VEO_FAST).id == 1
