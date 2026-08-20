@@ -10,7 +10,8 @@ CREATE TABLE IF NOT EXISTS conta (
     seca_ate        TEXT,
     saude           TEXT    NOT NULL DEFAULT 'viva',
     falhas          INTEGER NOT NULL DEFAULT 0,
-    ativa           INTEGER NOT NULL DEFAULT 1
+    ativa           INTEGER NOT NULL DEFAULT 1,
+    proxy           TEXT
 );
 
 CREATE TABLE IF NOT EXISTS job (

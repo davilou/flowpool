@@ -12,7 +12,8 @@ from flowpool.api.esquemas import (
 )
 from flowpool.dados.repo import Repo
 from flowpool.motor.orquestrador import Orquestrador
-from flowpool.nucleo.tipos import EstadoJob, Job, SaudeSessao
+from flowpool.nucleo.proxy import mascarar
+from flowpool.nucleo.tipos import Conta, EstadoJob, Job, SaudeSessao
 from flowpool.transporte.base import FlowTransport
 
 
@@ -31,6 +32,18 @@ def _resposta(j: Job) -> RespostaJob:
                        nome=j.nome, produto=j.produto, proporcao=j.proporcao,
                        quantidade=j.quantidade, conta_id=j.conta_id,
                        arquivo=j.arquivo, tentativas=j.tentativas, erro=j.erro)
+
+
+def _resposta_conta(c: Conta) -> RespostaConta:
+    """Conta como a API a mostra — com a senha do proxy fora.
+
+    Existe como funcao unica de proposito: com a construcao repetida em cada rota,
+    bastava uma delas esquecer o `mascarar` para a credencial sair inteira no JSON, e
+    ninguem notaria ate ela aparecer num log.
+    """
+    return RespostaConta(id=c.id, email=c.email, tier=c.tier, saldo=c.saldo,
+                         saldo_confiavel=c.saldo_confiavel, saude=c.saude,
+                         ativa=c.ativa, falhas=c.falhas, proxy=mascarar(c.proxy))
 
 
 def criar_app(repo: Repo, transporte: FlowTransport, raiz: Path | str,
@@ -114,9 +127,7 @@ def criar_app(repo: Repo, transporte: FlowTransport, raiz: Path | str,
 
     @app.get("/contas", response_model=list[RespostaConta])
     def listar_contas() -> list[RespostaConta]:
-        return [RespostaConta(id=c.id, email=c.email, tier=c.tier, saldo=c.saldo,
-                              saldo_confiavel=c.saldo_confiavel, saude=c.saude,
-                              ativa=c.ativa, falhas=c.falhas) for c in repo.contas()]
+        return [_resposta_conta(c) for c in repo.contas()]
 
     @app.patch("/contas/{id_}", response_model=RespostaConta)
     def alterar_conta(id_: int, p: PatchConta) -> RespostaConta:
@@ -127,10 +138,14 @@ def criar_app(repo: Repo, transporte: FlowTransport, raiz: Path | str,
             c.ativa = p.ativa
         if p.tier is not None:
             c.tier = p.tier
+        if "proxy" in p.model_fields_set:
+            # aqui o teste e pelo campo TER VINDO no corpo, nao por ele ser `None`
+            # como nos outros dois. O validador transforma "" em None, e string vazia
+            # e justamente como se TIRA o proxy de uma conta — com o teste de `None`
+            # nao haveria como voltar uma conta para "sem proxy".
+            c.proxy = p.proxy
         repo.salvar_conta(c)
-        return RespostaConta(id=c.id, email=c.email, tier=c.tier, saldo=c.saldo,
-                             saldo_confiavel=c.saldo_confiavel, saude=c.saude,
-                             ativa=c.ativa, falhas=c.falhas)
+        return _resposta_conta(c)
 
     @app.get("/saude", response_model=Saude)
     def saude() -> Saude:

@@ -79,11 +79,12 @@ class Repo:
     def salvar_conta(self, c: Conta) -> None:
         self.con.execute(
             """UPDATE conta SET tier=?, perfil=?, saldo=?, saldo_lido_em=?,
-                   saldo_confiavel=?, reset_em=?, seca_ate=?, saude=?, falhas=?, ativa=?
+                   saldo_confiavel=?, reset_em=?, seca_ate=?, saude=?, falhas=?,
+                   ativa=?, proxy=?
                WHERE id=?""",
             (c.tier.value, c.perfil, c.saldo, _txt(c.saldo_lido_em),
              int(c.saldo_confiavel), _txt(c.reset_em), _txt(c.seca_ate),
-             c.saude.value, c.falhas, int(c.ativa), c.id),
+             c.saude.value, c.falhas, int(c.ativa), c.proxy, c.id),
         )
         self.con.commit()
 
@@ -111,7 +112,7 @@ class Repo:
             saldo=r["saldo"], saldo_lido_em=_dt(r["saldo_lido_em"]),
             saldo_confiavel=bool(r["saldo_confiavel"]), reset_em=_dt(r["reset_em"]),
             seca_ate=_dt(r["seca_ate"]), saude=SaudeSessao(r["saude"]),
-            falhas=r["falhas"], ativa=bool(r["ativa"]),
+            falhas=r["falhas"], ativa=bool(r["ativa"]), proxy=r["proxy"],
         )
 
     # ---------- jobs ----------

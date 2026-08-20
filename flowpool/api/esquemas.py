@@ -2,10 +2,32 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from flowpool.nucleo.erros import ProxyInvalido
+from flowpool.nucleo.proxy import analisar
 from flowpool.nucleo.tipos import (
     PROPORCAO_PADRAO, PROPORCOES, EstadoJob, Modelo, Modo, SaudeSessao, Tier,
     quantidade_maxima,
 )
+
+
+def _proxy_usavel(v: str | None) -> str | None:
+    """Recusa no cadastro a URL de proxy que nao da para usar.
+
+    `analisar` levanta `ProxyInvalido`, que nao e `ValueError` — o Pydantic so
+    converte `ValueError` em 422, entao sem esta traducao a URL torta subiria como 500
+    e o painel diria "erro interno" para um campo mal digitado. Vazio continua valendo
+    e significa "sem proxy": e assim que se VOLTA para o IP de casa (ou para a VPN de
+    sistema, que o app nem enxerga).
+    """
+    if v is None:
+        return None
+    if not v.strip():
+        return None
+    try:
+        analisar(v)
+    except ProxyInvalido as e:
+        raise ValueError(str(e)) from e
+    return v.strip()
 
 # O que cada modo usa quando o pedido nao diz o modelo. Video vai em Omni Flash porque
 # e nele que o dropdown do Flow ja abre — assumir Veo seria escolher por conta propria
@@ -122,16 +144,37 @@ class RespostaConta(BaseModel):
     saude: SaudeSessao
     ativa: bool
     falhas: int
+    # SEMPRE mascarado por `nucleo.proxy.mascarar` antes de chegar aqui. A resposta vai
+    # para o painel e para log, e credencial de proxy nao precisa passear por ali.
+    proxy: str | None = None
 
 
 class PatchConta(BaseModel):
     ativa: bool | None = None
     tier: Tier | None = None
+    # `None` significa "nao mexe"; string vazia significa "tira o proxy". Sem os dois
+    # sentidos separados nao haveria como voltar uma conta para "sem proxy".
+    proxy: str | None = None
+
+    @field_validator("proxy")
+    @classmethod
+    def proxy_da_para_usar(cls, v: str | None) -> str | None:
+        return _proxy_usavel(v)
 
 
 class NovaConta(BaseModel):
     email: str
     tier: Tier = Tier.FREE
+    # O cadastro ja nasce com o proxy porque o LOGIN tem que sair do mesmo IP do
+    # trabalho: conta que nasce no IP de casa e depois passa a operar por proxy mostra
+    # ao Google exatamente a mudanca que o proxy existe para evitar. Quem consome e o
+    # `POST /contas` da Task 10, que abre o chrome.exe do cadastro.
+    proxy: str | None = None
+
+    @field_validator("proxy")
+    @classmethod
+    def proxy_da_para_usar(cls, v: str | None) -> str | None:
+        return _proxy_usavel(v)
 
 
 class Saude(BaseModel):

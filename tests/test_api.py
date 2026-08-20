@@ -232,3 +232,67 @@ def test_modelo_explicito_continua_valendo(cliente):
     r = c.post("/jobs", json={"modo": "t2v", "modelo": "veo-quality", "prompt": "p",
                               "produto": "Moda", "nome": "n"})
     assert repo.job(r.json()["id"]).modelo is Modelo.VEO_QUALITY
+
+
+def test_patch_grava_o_proxy_da_conta(cliente):
+    # cada conta sai por um IP proprio: e o que impede o Google de correlacionar as
+    # contas entre si
+    c, repo = cliente
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    r = c.patch(f"/contas/{cid}", json={"proxy": "http://1.2.3.4:8080"})
+    assert r.status_code == 200
+    assert repo.conta(cid).proxy == "http://1.2.3.4:8080"
+    assert r.json()["proxy"] == "http://1.2.3.4:8080"
+
+
+def test_patch_recusa_proxy_que_nao_da_para_usar(cliente):
+    # falhar no cadastro e melhor do que abrir um navegador que sai pelo IP errado
+    c, repo = cliente
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    r = c.patch(f"/contas/{cid}", json={"proxy": "1.2.3.4:8080"})
+    assert r.status_code == 422
+    assert repo.conta(cid).proxy is None
+
+
+def test_patch_apaga_o_proxy_com_string_vazia(cliente):
+    # sem isso nao ha como VOLTAR para "sem proxy" — `None` no PATCH significa
+    # "nao mexe", entao tirar o proxy seria impossivel pela API
+    c, repo = cliente
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    con = repo.conta(cid); con.proxy = "http://1.2.3.4:8080"; repo.salvar_conta(con)
+    r = c.patch(f"/contas/{cid}", json={"proxy": ""})
+    assert r.status_code == 200
+    assert repo.conta(cid).proxy is None
+
+
+def test_resposta_de_conta_mascara_a_senha_do_proxy(cliente):
+    # a resposta vai para o painel e para log; credencial de proxy nao precisa
+    # passear por ali
+    c, repo = cliente
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    con = repo.conta(cid)
+    con.proxy = "http://davi:segredo@1.2.3.4:8080"
+    repo.salvar_conta(con)
+
+    corpo = c.get("/contas").json()[0]
+    assert corpo["proxy"] == "http://davi:***@1.2.3.4:8080"
+    assert "segredo" not in c.get("/contas").text
+
+
+def test_conta_sem_proxy_responde_null(cliente):
+    c, repo = cliente
+    repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    assert c.get("/contas").json()[0]["proxy"] is None
+
+
+def test_nova_conta_aceita_proxy_e_recusa_url_torta():
+    # a rota `POST /contas` entra no Task 10 (precisa abrir navegador); o esquema
+    # existe antes dela para que o cadastro ja nasca no IP certo — conta que nasce no
+    # IP de casa e depois muda para proxy denuncia exatamente o que o proxy evita
+    from flowpool.api.esquemas import NovaConta
+
+    assert NovaConta(email="a@b.com").proxy is None
+    assert NovaConta(email="a@b.com", proxy="http://1.2.3.4:8080").proxy == \
+        "http://1.2.3.4:8080"
+    with pytest.raises(ValueError):
+        NovaConta(email="a@b.com", proxy="ftp://1.2.3.4:8080")

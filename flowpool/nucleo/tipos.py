@@ -78,6 +78,13 @@ class Conta:
     saude: SaudeSessao = SaudeSessao.VIVA
     falhas: int = 0
     ativa: bool = True
+    # URL do proxy pelo qual ESTA conta sai. Vazio e o normal hoje: sem proxy
+    # contratado, o Davi destrava o Flow com uma VPN de sistema, que o app nem enxerga.
+    # Existe por conta, e nao global, porque o ponto e o Google nao conseguir
+    # correlacionar as contas entre si pelo IP. Formato: `http://host:porta`,
+    # `http://usuario:senha@host:porta` ou `socks5://host:porta` — quem traduz e
+    # `nucleo/proxy.py`.
+    proxy: str | None = None
 
 
 @dataclass

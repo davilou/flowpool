@@ -11,6 +11,7 @@ from flowpool.nucleo.custos import custo_de
 from flowpool.nucleo.escolha import escolher
 from flowpool.nucleo.erros import SaldoInsuficiente
 from flowpool.nucleo.tipos import EstadoJob, Job, Modelo, Modo, SaudeSessao, Tier
+from flowpool.transporte.base import ErroTransporte
 from flowpool.transporte.falso import TransporteFalso
 
 
@@ -498,3 +499,34 @@ async def test_pedido_leva_proporcao_e_quantidade_ao_transporte(repo, tmp_path):
 
     assert vistos[0].proporcao == "1:1"
     assert vistos[0].quantidade == 3
+
+
+async def test_proxy_morto_nao_marca_a_conta_expirada_nem_seca(repo, tmp_path):
+    # proxy fora do ar e falha de INFRAESTRUTURA, nao da conta. Marcar `expirada`
+    # pediria um login manual que ninguem precisa fazer; marcar seca tiraria do pool
+    # uma conta que esta boa e cheia de credito. Nos dois casos o pool encolheria por
+    # um problema que se conserta trocando de IP, nao mexendo na conta.
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid)
+    c.saldo = 50
+    c.proxy = "http://1.2.3.4:8080"
+    repo.salvar_conta(c)
+    jid = repo.criar_job(job_fast())
+
+    t = TransporteFalso(saldos={cid: 50})
+
+    async def proxy_fora_do_ar(conta):
+        raise ErroTransporte("net::ERR_PROXY_CONNECTION_FAILED em http://1.2.3.4:8080")
+
+    t.abrir_sessao = proxy_fora_do_ar
+    await Orquestrador(repo, t, raiz=tmp_path).passo()
+
+    conta = repo.conta(cid)
+    assert conta.saude is SaudeSessao.VIVA
+    assert conta.seca_ate is None
+    assert conta.saldo == 50          # a reserva voltou: o Flow nunca chegou a cobrar
+
+    j = repo.job(jid)
+    assert j.estado is EstadoJob.PENDENTE
+    assert j.tentativas == 1          # gasta tentativa, como toda falha de rede
+    assert "PROXY" in j.erro

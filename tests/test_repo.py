@@ -233,3 +233,14 @@ def test_proporcao_e_quantidade_sobrevivem_ao_banco(repo):
     j = repo.job(id_)
     assert j.proporcao == "16:9"
     assert j.quantidade == 4
+
+
+def test_proxy_da_conta_sobrevive_ao_banco(repo):
+    # cada conta sai por um IP proprio para o Google nao correlacionar as contas; um
+    # proxy que nao sobrevive ao restart faria a conta voltar a sair pelo IP de casa
+    id_ = repo.criar_conta(email="a@b.com", tier=Tier.FREE, perfil="p/1")
+    assert repo.conta(id_).proxy is None
+    c = repo.conta(id_)
+    c.proxy = "http://davi:segredo@1.2.3.4:8080"
+    repo.salvar_conta(c)
+    assert repo.conta(id_).proxy == "http://davi:segredo@1.2.3.4:8080"

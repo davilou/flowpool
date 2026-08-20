@@ -104,3 +104,12 @@ def test_imagem_aceita_lote_e_video_nao():
     assert quantidade_maxima(Modo.IMAGEM) == 4
     for modo in (Modo.T2V, Modo.FRAMES2V, Modo.INGREDIENTS2V):
         assert quantidade_maxima(modo) == 1
+
+
+def test_conta_nasce_sem_proxy():
+    # o campo e desenhado agora e fica vazio: enquanto nao ha IP contratado, o Davi
+    # destrava com uma VPN de sistema, que o app nem enxerga
+    c = Conta(id=1, email="a@b.com", tier=Tier.FREE, perfil="perfis/1")
+    assert c.proxy is None
+    c.proxy = "http://1.2.3.4:8080"
+    assert c.proxy == "http://1.2.3.4:8080"
