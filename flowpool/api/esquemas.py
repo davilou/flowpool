@@ -207,6 +207,28 @@ class NovaConta(BaseModel):
         return _proxy_usavel(v)
 
 
+class ItemPasta(BaseModel):
+    nome: str
+    # Sempre relativo a raiz do projeto e sempre com barra normal: e o mesmo texto que
+    # volta na querystring da navegacao e que o job guarda em `referencias`.
+    caminho: str
+
+
+class ItemImagem(BaseModel):
+    nome: str
+    caminho: str
+    tamanho: int
+
+
+class RespostaArquivos(BaseModel):
+    # "" e a raiz do projeto.
+    caminho: str
+    # `None` na raiz — nao ha para onde voltar. "" e um pai valido (a propria raiz).
+    pai: str | None = None
+    pastas: list[ItemPasta] = Field(default_factory=list)
+    arquivos: list[ItemImagem] = Field(default_factory=list)
+
+
 class Saude(BaseModel):
     contas_vivas: int
     credito_total: int

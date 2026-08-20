@@ -491,3 +491,89 @@ def test_rota_de_saldo_que_nao_conseguiu_ler_avisa_em_vez_de_mentir(tmp_path, mo
 
     assert r.status_code == 409
     assert "a@b.com" in r.json()["detail"]
+
+
+# ---------------- seletor de imagens ----------------
+
+
+@pytest.fixture
+def com_imagens(cliente, tmp_path):
+    """Arvore de arquivos DENTRO da raiz que a app recebeu (a fixture usa `tmp_path`)."""
+    (tmp_path / "Panelas Monaco" / "imagens").mkdir(parents=True)
+    (tmp_path / "Panelas Monaco" / "imagens" / "b.png").write_bytes(b"\x89PNG" + b"x" * 20)
+    (tmp_path / "Panelas Monaco" / "imagens" / "a.jpg").write_bytes(b"\xff\xd8" + b"y" * 5)
+    (tmp_path / "Panelas Monaco" / "notas.md").write_text("nao e imagem")
+    (tmp_path / ".git").mkdir()
+    return cliente
+
+
+def test_arquivos_lista_a_raiz_sem_o_ruido(com_imagens):
+    c, _ = com_imagens
+    r = c.get("/arquivos")
+    assert r.status_code == 200
+    corpo = r.json()
+    assert corpo["caminho"] == ""
+    assert corpo["pai"] is None
+    assert "Panelas Monaco" in [p["nome"] for p in corpo["pastas"]]
+    assert ".git" not in [p["nome"] for p in corpo["pastas"]]
+
+
+def test_arquivos_lista_so_imagem_com_nome_caminho_e_tamanho(com_imagens):
+    c, _ = com_imagens
+    corpo = c.get("/arquivos", params={"caminho": "Panelas Monaco/imagens"}).json()
+    assert [a["nome"] for a in corpo["arquivos"]] == ["a.jpg", "b.png"]
+    assert corpo["arquivos"][1]["caminho"] == "Panelas Monaco/imagens/b.png"
+    assert corpo["arquivos"][1]["tamanho"] == 24
+    assert corpo["pai"] == "Panelas Monaco"
+
+
+def test_arquivos_recusa_sair_da_raiz(com_imagens):
+    # 400 e nao 404: o caminho nao "nao existe", ele nao pode ser pedido
+    c, _ = com_imagens
+    assert c.get("/arquivos", params={"caminho": "../.."}).status_code == 400
+    assert c.get("/arquivos", params={"caminho": "a/../../b"}).status_code == 400
+    assert c.get("/arquivos", params={"caminho": "/etc"}).status_code == 400
+    assert c.get("/arquivos", params={"caminho": r"C:\Windows"}).status_code == 400
+
+
+def test_arquivos_recusa_pasta_de_ruido_pedida_na_querystring(com_imagens):
+    c, _ = com_imagens
+    assert c.get("/arquivos", params={"caminho": ".git"}).status_code == 400
+
+
+def test_arquivos_de_pasta_inexistente_da_404(com_imagens):
+    c, _ = com_imagens
+    assert c.get("/arquivos", params={"caminho": "nao existe"}).status_code == 404
+
+
+def test_arquivos_de_um_arquivo_da_400(com_imagens):
+    c, _ = com_imagens
+    r = c.get("/arquivos", params={"caminho": "Panelas Monaco/notas.md"})
+    assert r.status_code == 400
+
+
+def test_miniatura_serve_a_imagem_com_cache(com_imagens):
+    c, _ = com_imagens
+    r = c.get("/miniatura", params={"caminho": "Panelas Monaco/imagens/b.png"})
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "image/png"
+    assert "max-age" in r.headers["cache-control"]
+    assert r.content.startswith(b"\x89PNG")
+
+
+def test_miniatura_recusa_sair_da_raiz(com_imagens):
+    c, _ = com_imagens
+    assert c.get("/miniatura", params={"caminho": "../segredo.png"}).status_code == 400
+
+
+def test_miniatura_recusa_arquivo_que_nao_e_imagem(com_imagens):
+    # a checagem de extensao e o que impede esta rota de servir o .db do projeto
+    c, _ = com_imagens
+    r = c.get("/miniatura", params={"caminho": "Panelas Monaco/notas.md"})
+    assert r.status_code == 400
+
+
+def test_miniatura_de_imagem_inexistente_da_404(com_imagens):
+    c, _ = com_imagens
+    r = c.get("/miniatura", params={"caminho": "Panelas Monaco/imagens/sumiu.png"})
+    assert r.status_code == 404

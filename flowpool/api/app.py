@@ -8,9 +8,10 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 
+from flowpool.api.arquivos import CaminhoForaDaRaiz, arquivo_de_imagem, listar
 from flowpool.api.esquemas import (
-    NovaConta, PatchConta, PedidoJob, PedidoLote, RespostaConta, RespostaJob,
-    RespostaProjeto, Saude,
+    NovaConta, PatchConta, PedidoJob, PedidoLote, RespostaArquivos, RespostaConta,
+    RespostaJob, RespostaProjeto, Saude,
 )
 from flowpool.dados.repo import Repo
 from flowpool.motor.orquestrador import Orquestrador
@@ -25,6 +26,11 @@ from flowpool.transporte.pw.sessao import ChromeAusente, PerfilOcupado, cadastra
 # a um, por caminho fixo, e diferente de montar um `StaticFiles`: aqui nao ha diretorio
 # exposto, entao nao ha caminho que o navegador possa pedir e receber outra coisa.
 _PAINEL = Path(__file__).resolve().parent
+
+# Tipo declarado a mao em vez de `mimetypes.guess_type`: aquele le o registro do Windows,
+# onde a extensao pode estar associada a outra coisa por qualquer programa instalado.
+_TIPOS = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+          ".webp": "image/webp"}
 
 
 def _job_de(p: PedidoJob) -> Job:
@@ -91,6 +97,42 @@ def criar_app(repo: Repo, transporte: FlowTransport, raiz: Path | str,
     @app.get("/painel.js", include_in_schema=False)
     def painel_js() -> FileResponse:
         return FileResponse(_PAINEL / "painel.js", media_type="text/javascript")
+
+    @app.get("/arquivos", response_model=RespostaArquivos)
+    def arquivos(caminho: str = "") -> RespostaArquivos:
+        """Pastas e imagens de um diretorio, relativo a raiz do projeto.
+
+        Existe porque o painel escolhe imagem OLHANDO, e o transporte precisa do caminho
+        em disco: `set_input_files` abre o arquivo. Upload nao resolveria — o
+        `<input type=file>` do navegador entrega o conteudo e nunca o caminho real.
+        """
+        try:
+            return RespostaArquivos(**listar(raiz, caminho))
+        except CaminhoForaDaRaiz as e:
+            raise HTTPException(400, str(e)) from e
+        except FileNotFoundError as e:
+            raise HTTPException(404, str(e)) from e
+        except NotADirectoryError as e:
+            raise HTTPException(400, str(e)) from e
+
+    @app.get("/miniatura", include_in_schema=False)
+    def miniatura(caminho: str) -> FileResponse:
+        """Serve a imagem para a grade do seletor.
+
+        Serve o ORIGINAL, sem redimensionar: as imagens tem alguns MB, mas o servico e
+        local e a rede e o loopback. Reduzir custaria uma dependencia nova (Pillow) para
+        economizar um trafego que nunca sai da maquina — troca ruim. O `Cache-Control`
+        e o que faz a diferenca de verdade: a mesma pasta reaberta nao rele nada.
+        """
+        try:
+            alvo = arquivo_de_imagem(raiz, caminho)
+        except CaminhoForaDaRaiz as e:
+            raise HTTPException(400, str(e)) from e
+        except FileNotFoundError as e:
+            raise HTTPException(404, str(e)) from e
+        return FileResponse(alvo, media_type=_TIPOS.get(alvo.suffix.lower(),
+                                                        "application/octet-stream"),
+                            headers={"Cache-Control": "private, max-age=3600"})
 
     @app.post("/jobs", response_model=RespostaJob, status_code=201)
     def criar_job(p: PedidoJob) -> RespostaJob:
