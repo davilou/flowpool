@@ -424,7 +424,9 @@ document.addEventListener("click", (ev) => {
   const alvo = ev.target.closest("button");
   if (!alvo) return;
   const id = Number(alvo.dataset.id);
-  if (alvo.classList.contains("acao-revalidar")) revalidar(id, alvo.dataset.email);
+  if (alvo.classList.contains("abrir-seletor")) abrirSeletor(alvo.dataset.campo, !!alvo.dataset.multiplo);
+  else if (alvo.classList.contains("tira-x")) tirarEscolhido(alvo.dataset.campo, alvo.dataset.caminho);
+  else if (alvo.classList.contains("acao-revalidar")) revalidar(id, alvo.dataset.email);
   else if (alvo.classList.contains("acao-saldo")) lerSaldo(id, alvo.dataset.email, alvo);
   else if (alvo.classList.contains("acao-cancelar")) cancelar(id);
   else if (alvo.classList.contains("acao-proxy")) {
@@ -462,3 +464,213 @@ $("job-modo").addEventListener("change", ajustarFormulario);
 ajustarFormulario();
 atualizar();
 setInterval(() => { if (!document.hidden) atualizar(); }, INTERVALO_MS);
+
+/* ---------------- seletor de imagens ----------------
+
+   Por que o servidor navega o disco em vez de o navegador subir o arquivo: o transporte
+   entrega a imagem ao Flow com `set_input_files`, que precisa de um arquivo EM DISCO. E
+   o `<input type="file">` do navegador entrega o conteudo do arquivo e nunca o caminho
+   real — protecao do navegador, nao detalhe que se contorna. Como a API e local, caminho
+   e a moeda natural.
+
+   O CAMPO DE TEXTO continua sendo o dono do valor. Este modal so escreve nele, e a tira
+   de miniaturas abaixo do campo e o reflexo do que esta escrito. Uma fonte de verdade
+   so: quem digita o caminho ve a miniatura aparecer, e nao precisa navegar por nada. */
+
+const CAMPOS_DE_ARQUIVO = ["job-frame-inicial", "job-frame-final", "job-referencias"];
+const MAX_REFERENCIAS = 3;
+
+// A ultima pasta visitada volta na proxima abertura. As referencias do usuario moram em
+// poucas pastas conhecidas; comecar sempre da raiz cobraria a mesma descida toda vez.
+const ULTIMA_PASTA = "flowpool:ultima-pasta";
+
+let seletor = { campo: null, multiplo: false, caminho: "", pai: null, arquivos: [] };
+
+function ehMultiplo(campo) { return campo === "job-referencias"; }
+
+/* Le o campo como LISTA. Referencias sao uma por linha; frame e um caminho so. */
+function caminhosDoCampo(campo) {
+  const valor = $(campo).value;
+  if (ehMultiplo(campo)) return valor.split("\n").map((s) => s.trim()).filter(Boolean);
+  const um = valor.trim();
+  return um ? [um] : [];
+}
+
+function gravarCampo(campo, lista) {
+  $(campo).value = ehMultiplo(campo) ? lista.join("\n") : (lista[0] || "");
+  atualizarTiras();
+}
+
+function urlMiniatura(caminho) {
+  return `/miniatura?caminho=${encodeURIComponent(caminho)}`;
+}
+
+function tamanhoLegivel(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+  return `${(n / 1048576).toFixed(1)} MB`;
+}
+
+function atualizarTiras() {
+  CAMPOS_DE_ARQUIVO.forEach((campo) => {
+    const alvo = $(`tira-${campo}`);
+    if (!alvo) return;
+    alvo.innerHTML = caminhosDoCampo(campo).map((c) => {
+      const nome = c.split("/").pop();
+      return `<span class="tira" title="${esc(c)}">
+        <img src="${esc(urlMiniatura(c))}" alt="" loading="lazy">
+        <span class="tira-nome">${esc(nome)}</span>
+        <button type="button" class="tira-x" data-campo="${campo}" data-caminho="${esc(c)}"
+                title="tirar esta imagem">&times;</button></span>`;
+    }).join("");
+  });
+}
+
+function tirarEscolhido(campo, caminho) {
+  gravarCampo(campo, caminhosDoCampo(campo).filter((c) => c !== caminho));
+  if (seletor.campo === campo && !$("seletor").classList.contains("oculto")) repintarMarcas();
+}
+
+/* ---- modal ---- */
+
+async function abrirSeletor(campo, multiplo) {
+  seletor = { campo, multiplo, caminho: "", pai: null, arquivos: [] };
+  $("seletor-titulo").textContent = multiplo
+    ? "Escolher referências — até 3" : "Escolher imagem";
+  $("seletor-tres").classList.toggle("oculto", !multiplo);
+  esconder($("seletor-erro"));
+  $("seletor-corpo").innerHTML = `<div class="modal-vazio">Lendo a pasta…</div>`;
+  $("seletor").classList.remove("oculto");
+  // `true`: se a pasta guardada foi renomeada ou apagada desde a ultima vez, cai na raiz
+  // em vez de abrir o modal num erro
+  await navegar(localStorage.getItem(ULTIMA_PASTA) || "", true);
+}
+
+function fecharSeletor() {
+  $("seletor").classList.add("oculto");
+  seletor.campo = null;
+}
+
+async function navegar(caminho, cairNaRaiz = false) {
+  esconder($("seletor-erro"));
+  try {
+    const r = await api(`/arquivos?caminho=${encodeURIComponent(caminho)}`);
+    seletor.caminho = r.caminho;
+    seletor.pai = r.pai;
+    seletor.arquivos = r.arquivos;
+    try { localStorage.setItem(ULTIMA_PASTA, r.caminho); } catch (e) { /* modo privado */ }
+    pintarSeletor(r);
+  } catch (e) {
+    if (cairNaRaiz && caminho) { await navegar("", false); return; }
+    $("seletor-corpo").innerHTML = "";
+    mostrar($("seletor-erro"), e.message);
+  }
+}
+
+function atualizarRestam() {
+  if (!seletor.multiplo) { $("seletor-restam").textContent = ""; return; }
+  const quantas = caminhosDoCampo(seletor.campo).length;
+  const faltam = MAX_REFERENCIAS - quantas;
+  $("seletor-restam").textContent = faltam > 0
+    ? `${quantas} de 3 escolhidas — cabem mais ${faltam}`
+    : "3 de 3 escolhidas — clique numa marcada para tirar";
+}
+
+function pintarSeletor(r) {
+  $("seletor-caminho").textContent = r.caminho ? `/${r.caminho}` : "/ raiz do projeto";
+  $("seletor-voltar").disabled = r.pai === null;
+  $("seletor-tres").disabled = r.arquivos.length === 0;
+  atualizarRestam();
+
+  const escolhidos = caminhosDoCampo(seletor.campo);
+  const pastas = r.pastas.map((p) =>
+    `<button type="button" class="mini item-pasta ir-pasta"
+             data-caminho="${esc(p.caminho)}">${esc(p.nome)}</button>`).join("");
+  const imagens = r.arquivos.map((a) =>
+    `<button type="button" class="item-imagem escolher-imagem${
+        escolhidos.includes(a.caminho) ? " escolhida" : ""}"
+             data-caminho="${esc(a.caminho)}" title="${esc(a.caminho)}">
+       <img src="${esc(urlMiniatura(a.caminho))}" alt="" loading="lazy">
+       <span class="nome">${esc(a.nome)}</span>
+       <span class="tamanho">${tamanhoLegivel(a.tamanho)}</span>
+     </button>`).join("");
+
+  $("seletor-corpo").innerHTML =
+    (pastas ? `<div class="grade-pastas">${pastas}</div>` : "") +
+    (imagens ? `<div class="grade-imagens">${imagens}</div>`
+             : `<div class="modal-vazio">Nenhuma imagem nesta pasta.</div>`);
+}
+
+function repintarMarcas() {
+  const escolhidos = caminhosDoCampo(seletor.campo);
+  document.querySelectorAll("#seletor-corpo .escolher-imagem").forEach((b) => {
+    b.classList.toggle("escolhida", escolhidos.includes(b.dataset.caminho));
+  });
+  atualizarRestam();
+}
+
+function escolherImagem(caminho) {
+  if (!seletor.multiplo) {
+    gravarCampo(seletor.campo, [caminho]);
+    fecharSeletor();
+    return;
+  }
+  const atual = caminhosDoCampo(seletor.campo);
+  const i = atual.indexOf(caminho);
+  if (i >= 0) {
+    atual.splice(i, 1);          // clicar de novo na marcada tira — e como se corrige
+  } else if (atual.length >= MAX_REFERENCIAS) {
+    // impede a quarta AQUI em vez de deixar o 422 do servidor explicar depois
+    mostrar($("seletor-erro"),
+      "Já são 3 referências, e o Flow não aceita a quarta. Clique numa marcada para tirar.");
+    return;
+  } else {
+    atual.push(caminho);
+  }
+  esconder($("seletor-erro"));
+  gravarCampo(seletor.campo, atual);
+  repintarMarcas();
+}
+
+/* As tres primeiras imagens da pasta aberta, de uma vez. E o atalho do caso comum:
+   identidade de personagem se mantem com um trio fixo de referencias, e escolher as
+   mesmas tres a mao toda vez e atrito puro.
+
+   Deliberadamente "as 3 desta pasta" e nao "as 3 do personagem X": nao ha no projeto uma
+   convencao de pasta por personagem que permita descobrir isso sem chutar, e um botao
+   que as vezes pega o arquivo errado e pior do que nenhum botao. Aqui a pasta e a que
+   esta na tela, a ordem e a alfabetica que a grade mostra, e as tres escolhidas aparecem
+   marcadas na hora — nao ha o que adivinhar. */
+function usarTresDaPasta() {
+  const tres = seletor.arquivos.slice(0, MAX_REFERENCIAS).map((a) => a.caminho);
+  if (!tres.length) return;
+  esconder($("seletor-erro"));
+  gravarCampo(seletor.campo, tres);
+  repintarMarcas();
+}
+
+$("seletor").addEventListener("click", (ev) => {
+  if (ev.target === $("seletor")) { fecharSeletor(); return; }   // clique no fundo fecha
+  const b = ev.target.closest("button");
+  if (!b || b.disabled) return;
+  if (b.id === "seletor-fechar") fecharSeletor();
+  else if (b.id === "seletor-voltar") { if (seletor.pai !== null) navegar(seletor.pai); }
+  else if (b.id === "seletor-tres") usarTresDaPasta();
+  else if (b.classList.contains("ir-pasta")) navegar(b.dataset.caminho);
+  else if (b.classList.contains("escolher-imagem")) escolherImagem(b.dataset.caminho);
+});
+
+document.addEventListener("keydown", (ev) => {
+  if (ev.key === "Escape" && !$("seletor").classList.contains("oculto")) fecharSeletor();
+});
+
+/* Digitar continua valendo: a tira e o reflexo do campo, nao o contrario. Com uma
+   espera curta no meio — sem ela, cada tecla de um caminho pela metade viraria um pedido
+   de miniatura que responde 404, e o campo piscaria imagem quebrada enquanto se digita. */
+let tirasAgendadas = null;
+CAMPOS_DE_ARQUIVO.forEach((c) => $(c).addEventListener("input", () => {
+  clearTimeout(tirasAgendadas);
+  tirasAgendadas = setTimeout(atualizarTiras, 300);
+}));
+
+atualizarTiras();

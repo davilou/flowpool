@@ -188,23 +188,39 @@
           </label>
         </div>
 
+        <!-- Os campos de arquivo continuam sendo CAMPO DE TEXTO: quem já sabe o caminho
+             digita e pronto. O botão só abre o navegador de imagens por cima; o que ele
+             escolhe vira texto aqui dentro, e a miniatura abaixo é o reflexo do campo. -->
         <div class="linha-campos" id="campo-frames">
-          <label class="campo cresce">
+          <div class="campo cresce">
             <span>Frame inicial</span>
-            <input type="text" id="job-frame-inicial" class="mono" placeholder="Produto/frames/01.png">
-          </label>
-          <label class="campo cresce">
+            <div class="linha-arquivo">
+              <input type="text" id="job-frame-inicial" class="mono" placeholder="Produto/frames/01.png">
+              <button type="button" class="mini abrir-seletor" data-campo="job-frame-inicial">Escolher…</button>
+            </div>
+            <div class="tiras" id="tira-job-frame-inicial"></div>
+          </div>
+          <div class="campo cresce">
             <span>Frame final (opcional)</span>
-            <input type="text" id="job-frame-final" class="mono" placeholder="Produto/frames/09.png">
-          </label>
+            <div class="linha-arquivo">
+              <input type="text" id="job-frame-final" class="mono" placeholder="Produto/frames/09.png">
+              <button type="button" class="mini abrir-seletor" data-campo="job-frame-final">Escolher…</button>
+            </div>
+            <div class="tiras" id="tira-job-frame-final"></div>
+          </div>
         </div>
 
         <div class="linha-campos" id="campo-referencias">
-          <label class="campo cresce">
+          <div class="campo cresce">
             <span>Referências — até 3, uma por linha</span>
-            <textarea id="job-referencias" class="mono" rows="3"
-                      placeholder="_Personagens/imagens/Clara/clara_01_frontal.jpg"></textarea>
-          </label>
+            <div class="linha-arquivo">
+              <textarea id="job-referencias" class="mono" rows="3"
+                        placeholder="Panelas Monaco/imagens/panelas_isoladas.png"></textarea>
+              <button type="button" class="mini abrir-seletor" data-campo="job-referencias"
+                      data-multiplo="1">Escolher…</button>
+            </div>
+            <div class="tiras" id="tira-job-referencias"></div>
+          </div>
         </div>
 
         <div class="linha-campos">
@@ -246,6 +262,30 @@
   </section>
 
 </main>
+
+<!-- Seletor de imagens. Navega o DISCO pelo servidor (GET /arquivos), e não faz upload:
+     o transporte precisa de um caminho em disco para o `set_input_files`, e o
+     `<input type="file">` do navegador entrega o conteúdo do arquivo, nunca o caminho. -->
+<div class="modal-fundo oculto" id="seletor">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="seletor-titulo">
+    <div class="modal-topo">
+      <div class="modal-titulo">
+        <strong id="seletor-titulo">Escolher imagem</strong>
+        <div class="mono-peq caminho-atual" id="seletor-caminho">/</div>
+      </div>
+      <button type="button" class="mini" id="seletor-fechar">Fechar</button>
+    </div>
+
+    <div class="modal-barra">
+      <button type="button" class="mini" id="seletor-voltar">↑ Voltar</button>
+      <span class="leve" id="seletor-restam"></span>
+      <button type="button" class="mini oculto" id="seletor-tres">Usar as 3 primeiras desta pasta</button>
+    </div>
+
+    <div class="modal-corpo" id="seletor-corpo"></div>
+    <div class="aviso erro oculto" id="seletor-erro"></div>
+  </div>
+</div>
 
 <script src="/painel.js"></script>
 </body>
