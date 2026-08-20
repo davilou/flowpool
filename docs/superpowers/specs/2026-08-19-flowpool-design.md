@@ -13,6 +13,11 @@ quantidade e **dois** dropdowns de modelo (um de imagem, um de vídeo). Daí tr�
 novas, registradas em *Decisões de geração* e propagadas em *Modelo de dados*, *Escolha
 de conta*, *Contabilidade de crédito*, *Modos suportados* e *API HTTP*.
 
+**Terceira revisão de campo:** 2026-08-20 — o Flow **recusou geração a partir do IP
+doméstico** e uma VPN gratuita destravou. Daí o **proxy por conta**, desenhado agora e
+deixado opcional e vazio. Propagado em *Restrições assumidas*, *Modelo de dados*, *Fila
+e execução* e *API HTTP*, e removido de *Fora de escopo*.
+
 ## O que é
 
 Um serviço local que gera vídeos e imagens no Google Flow usando um pool de contas Google cadastradas, escolhendo sozinho qual conta usar conforme o crédito disponível. Expõe uma API HTTP; o painel web e os scripts do pipeline (`prompt_h3.py`, `frames.py`) são clientes dela.
@@ -36,6 +41,52 @@ O custo do **Omni Flash** foi medido (20/08): **12 créditos** em conta grátis,
 **A sessão expira em ~48 horas** (medido: o `expires` de `/fx/api/auth/session` volta dois dias à frente). Revalidar é o mesmo fluxo do cadastro — mesma janela, mesmo perfil, mesmas duas telas —, então não é um caminho excepcional do app: é rotina de dois em dois dias, por conta. Com vinte contas, isso é o custo humano recorrente do pool, e é ele que decide se vinte contas é um número praticável.
 
 **Pool misto:** 1–2 contas pagas (Pro = 1.000 créditos/mês; Ultra = 10.000 ou 25.000/mês) mais o resto grátis.
+
+**Cada conta precisa sair por um IP próprio.** Vinte contas atrás de um único IP
+doméstico entregam ao Google exatamente a correlação que o pool existe para desfazer:
+não importa quão limpo seja o comportamento de cada conta se todas se encontram no
+mesmo endereço. Por isso o proxy é campo **da conta** (`Conta.proxy`), e não uma
+configuração global — um proxy compartilhado por todo o pool não resolveria nada,
+apenas mudaria o IP em que as vinte se encontram.
+
+Medição de campo que dimensiona o problema (20/08): o Flow **já recusa geração** a
+partir do IP de casa do Davi, e uma **VPN gratuita destrava**. Isso diz duas coisas, e
+as duas importam. O bloqueio é por **reputação de IP**, não por comportamento — a conta
+está boa, o endereço não. E a **barra é baixa**: se um IP de VPN gratuita passa, não é
+preciso proxy residencial premium. É preciso **outro** IP.
+
+**O login tem que sair do mesmo IP do trabalho.** Esta é a restrição que decide o
+desenho, e não é óbvia. Se a conta nasce no IP de casa e só depois passa a operar por
+proxy, o Google vê uma conta que autenticou de um lugar e opera de outro — que é
+precisamente o sinal que o proxy existe para evitar. Consequência prática: o
+`chrome.exe` do cadastro (ver o fluxo de login acima) também recebe o proxy, e trocar o
+proxy de uma conta já cadastrada é uma mudança de IP como qualquer outra. Não é erro do
+app, mas também não é de graça.
+
+Daí sai uma incompatibilidade que precisa ser **erro explícito, nunca silêncio**: o
+Chrome cru aceita `--proxy-server=host:porta`, mas **não** aceita credencial embutida —
+ele abre um diálogo pedindo usuário e senha. Num cadastro dirigido por `subprocess`,
+esse diálogo é uma janela parada que ninguém preenche, e o processo fica pendurado até o
+teto de login, sem erro, sem log e sem pista. Proxy com credencial é portanto recusado
+**antes** de a janela abrir, com uma mensagem que diz as duas saídas reais: proxy
+autorizado por IP, ou um retransmissor local sem senha. Para a operação (Playwright) a
+credencial é aceita normalmente — quem não a suporta é só o Chrome do cadastro.
+
+**A decisão: o campo é desenhado agora e fica opcional e vazio.** Enquanto não houver
+proxy contratado, o Davi destrava com uma **VPN de sistema**, que atua abaixo do
+processo e que o app nem enxerga. Desenhar o campo antes de precisar dele custa quase
+nada; descobrir depois que ele precisa atravessar cadastro, transporte, banco e API
+custaria uma migração no meio de um pool já em uso.
+
+**A economia, com o número.** IP estático de ISP sai na casa de **US$ 0,27 por IP**.
+Esse preço é o que torna a engenharia de contorno gratuita — túneis WARP com `wgcf` e
+`wireproxy` — **não valer a pena**, e por dois motivos técnicos, não por preguiça: as
+saídas do WARP **colidem no mesmo datacenter Cloudflare**, então vinte contas voltariam
+a se encontrar num punhado de endereços, refazendo o problema que o proxy resolve; e são
+**faixas de infraestrutura**, não residenciais — exatamente a classe de IP que um filtro
+por reputação trata pior que o IP doméstico de onde se está saindo hoje. Vinte IPs a
+US$ 0,27 custam menos por mês do que um único vídeo pela Gemini API, e a comparação
+certa é essa, não a com zero.
 
 ## Arquitetura
 
@@ -68,7 +119,25 @@ Três decisões tomadas pelo Davi depois do mapeamento do painel de configuraç�
 
 ## Modelo de dados
 
-**conta** — id, email, tier (`free` | `pro` | `ultra`), caminho do perfil, saldo conhecido, timestamp da última leitura de saldo, timestamp do último reset observado, `seca_ate`, estado da sessão (`viva` | `expirada` | `bloqueada`), falhas consecutivas, ativa (bool).
+**conta** — id, email, tier (`free` | `pro` | `ultra`), caminho do perfil, saldo conhecido, timestamp da última leitura de saldo, timestamp do último reset observado, `seca_ate`, estado da sessão (`viva` | `expirada` | `bloqueada`), falhas consecutivas, ativa (bool), `proxy`.
+
+`proxy` é a URL pela qual **esta conta** sai — `http://host:porta`,
+`http://usuario:senha@host:porta` ou `socks5://host:porta`. É uma linha única, e não um
+par host/porta, porque é assim que o fornecedor entrega: quebrá-la em campos obrigaria o
+painel a pedir quatro coisas onde existe uma. A tradução para o que o Playwright e o
+Chrome querem é código puro e mora em `nucleo/proxy.py`, testável sem rede — `analisar`
+para o Playwright, `argumento_chrome` para o `chrome.exe` do cadastro, `mascarar` para a
+resposta da API.
+
+A coluna é **anulável, sem default**, e isso é deliberado: não ter proxy é o estado
+normal hoje, e `NULL` diz sozinho o que quer dizer. Um `NOT NULL DEFAULT ''`
+transformaria "sem proxy" em string vazia e obrigaria cada leitor a tratar dois valores
+como a mesma coisa.
+
+URL que existe mas não dá para usar levanta `ProxyInvalido` na hora do cadastro, nunca
+no meio de um job. Falhar cedo é a única alternativa a abrir um navegador que sai pelo
+IP errado sem ninguém perceber — e "sem ninguém perceber" é o modo de falha que este
+campo inteiro existe para evitar.
 
 `seca_ate` é até quando a conta está fora do pool. O Flow às vezes mostra saldo e mesmo assim recusa gerar — cota diária, throttle, rate limit. Sem um prazo gravado, o job recusado volta para a fila no mesmo instante, é despachado para a mesma conta e o motor gira em laço quente: CPU a 100%, um Chrome aberto e fechado por iteração, tabela de eventos crescendo sem parar, nenhuma tentativa consumida e nada nunca desistindo. É a materialização do que a seção *Fila e execução* já pedia com "marca a conta seca até o reset estimado".
 
@@ -196,6 +265,21 @@ Um worker por conta viva, com teto global de simultâneos (configurável; começ
 
 **Geração falha é repetida pelo card, e o motor nem fica sabendo.** Medido em 20/08: um card que falha mostra "Ops! Algo deu errado" e um botão `redo` **no próprio card, que repete sem cobrar de novo**. O transporte clica nele durante `consultar` e devolve `rodando` — então o polling do motor simplesmente continua, sem gastar tentativa do job, sem devolver à fila e sem reabrir navegador. Decisão do Davi: **não quer notificação**; a repetição tem que ser invisível e barata, e é o `redo` que a torna barata. Só depois de esgotadas as repetições o job vira falha de verdade.
 
+**Proxy morto não é conta morta.** Falha de conexão por proxy indisponível
+(`net::ERR_PROXY_CONNECTION_FAILED` e parentes) é **falha de rede**: gasta tentativa,
+estorna a reserva e devolve o job à fila, mas **não** marca a conta `expirada` nem seca.
+Marcar seria errado duas vezes — a conta está boa e cheia de crédito, e ela sumiria do
+pool por um problema de infraestrutura que se conserta trocando de IP, não mexendo na
+conta. `expirada` cobraria um login manual que ninguém precisa fazer; seca a tiraria do
+pool até um reset que nunca foi o problema. E o erro é correlacionado: com vinte contas
+atrás de proxies do mesmo fornecedor, uma queda do fornecedor marcaria o pool inteiro de
+uma vez, exigindo vinte logins manuais por nada. É o mesmo raciocínio do banner de alta
+demanda, logo abaixo, aplicado à camada de rede.
+
+Isso não exige código próprio: o ramo genérico de falha já se comporta assim. Exige um
+**teste que prenda o comportamento**, porque a regressão é de uma linha — basta alguém,
+caçando outro bug, acrescentar uma marcação de saúde àquele ramo.
+
 **Instabilidade do Google não é problema da conta.** O Flow mostra um banner — *"Flow is currently experiencing high demand, affecting video generation"* — em pico de demanda. Falha sob esse aviso **nunca** pode marcar a conta como seca nem como expirada: seria um pico do Google derrubando o pool inteiro de uma vez, e cada conta assim marcada exige reset estimado ou login humano para voltar. O transporte trata isso levantando o erro genérico de geração, que o motor já sabe repetir sem tocar na saúde da conta.
 
 **O teto de simultâneos é sobre janelas visíveis, e começa em 1.** Ver *Transporte* para as duas medições que derrubaram o 3.
@@ -243,6 +327,26 @@ Corpo de `POST /jobs`:
 `proporcao` é opcional e vale `9:16` quando ausente. Valor fora de `16:9 | 4:3 | 1:1 | 3:4 | 9:16` é **422**: o painel tem cinco botões, e um sexto valor não teria onde clicar.
 
 Medido em 20/08, e ainda **não** refletido aqui: em modo vídeo o chip oferece **só** `9:16` e `16:9`. As outras três só existem em imagem. Enquanto a API aceitar as cinco para qualquer modo, quem recusa é o transporte — cedo, antes de tocar no chip e com a reserva ainda estornável. O lugar certo é este 422, junto com o de `quantidade`, e isso entra no mesmo task que acrescentar `duracao`.
+
+`NovaConta` (`POST /contas`) e `PatchConta` (`PATCH /contas/{id}`) aceitam `proxy`.
+URL que não dá para usar é **422**, e a validação acontece na entrada justamente para
+que o erro apareça no cadastro, e não três dias depois num job que saiu pelo IP errado.
+No `PATCH`, o campo distingue dois sentidos que os outros não precisam distinguir:
+**ausente é "não mexe"; string vazia é "tira o proxy"** — sem os dois separados não
+haveria como devolver uma conta ao estado sem proxy, que é o estado em que todas
+nascem.
+
+`RespostaConta` devolve o proxy **mascarado** (`http://usuario:***@host:porta`) e nunca
+a senha. Motivo: a resposta vai para o painel e para log, e credencial de proxy não
+precisa passear por ali — é a mesma regra que já impede o access token de sair pelo DOM
+(*Erro e observabilidade*), aplicada à outra porta. Pelo mesmo motivo a construção da
+resposta de conta é **uma função só**: repetida em cada rota, bastava uma delas esquecer
+o mascaramento para a senha sair inteira no JSON, e ninguém notaria até ela aparecer num
+log.
+
+O que a API **não** faz é recusar proxy com credencial. Ele é perfeitamente usável pelo
+Playwright, que é quem opera; quem não o aceita é o `chrome.exe` do cadastro, e é lá que
+a recusa acontece — ver *Restrições assumidas*.
 
 `quantidade` é opcional, vale `1`, e o teto depende do modo: **imagem aceita 1 a 4; os três modos de vídeo aceitam somente 1.** Vídeo com `quantidade > 1` é **422**. Recusar na entrada é melhor do que gerar três vídeos que ninguém pediu — e a mesma quantidade multiplica o crédito reservado, ver *Contabilidade de crédito*.
 
@@ -394,7 +498,13 @@ E existe um teste que não é de código: rodar o **conferidor de seletores** (`
 
 ## Fora de escopo
 
-Não entra: multiusuário, autenticação da própria API (é local), proxy/rotação de IP, criação automática de contas, agendamento por horário, edição de vídeo (o pipeline já tem `montar.py`), e publicação. Um único usuário, uma máquina, uma pasta.
+Não entra: multiusuário, autenticação da própria API (é local), criação automática de contas, agendamento por horário, edição de vídeo (o pipeline já tem `montar.py`), e publicação. Um único usuário, uma máquina, uma pasta.
+
+**Rotação** de IP continua fora: o desenho é **um IP fixo por conta**, não um pool de
+saídas trocando a cada requisição. Rotacionar é o oposto do que se quer aqui — uma conta
+que aparece de um endereço diferente a cada sessão é mais estranha, não menos, do que
+uma que sempre aparece do mesmo. O que entrou (a partir da revisão de 20/08) é o proxy
+fixo por conta, descrito em *Restrições assumidas*.
 
 ## Fontes
 
