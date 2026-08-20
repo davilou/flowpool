@@ -38,3 +38,11 @@ def test_reavaliar_em_aceita_datetime():
     assert j.reavaliar_em is None
     j.reavaliar_em = datetime(2026, 8, 20, 3, 0, tzinfo=timezone.utc)
     assert j.reavaliar_em.year == 2026
+
+
+def test_conta_nasce_sem_prazo_de_seca():
+    # `seca_ate` e o que tira do pool a conta que o Flow recusou apesar do saldo
+    c = Conta(id=1, email="a@b.com", tier=Tier.FREE, perfil="perfis/1")
+    assert c.seca_ate is None
+    c.seca_ate = datetime(2026, 8, 20, 13, 0, tzinfo=timezone.utc)
+    assert c.seca_ate.hour == 13

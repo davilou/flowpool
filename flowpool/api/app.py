@@ -33,6 +33,9 @@ def criar_app(repo: Repo, transporte: FlowTransport, raiz: Path | str,
 
     @asynccontextmanager
     async def ciclo(app: FastAPI):
+        # antes de qualquer coisa: um crash anterior pode ter deixado job preso em
+        # `rodando` com credito reservado que nunca voltou
+        orq.recuperar()
         tarefa = asyncio.create_task(orq.rodar()) if rodar_motor else None
         yield
         if tarefa:

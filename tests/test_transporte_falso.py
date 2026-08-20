@@ -57,3 +57,31 @@ async def test_falhar_em_conta_especifica():
     s = await t.abrir_sessao(conta())
     id_remoto = await t.gerar(s, pedido())
     assert await t.consultar(s, id_remoto) is Estado.FALHOU
+
+
+async def test_passos_rodando_atrasa_o_pronto():
+    # geracao real nao fica pronta na primeira consulta; o motor precisa fazer polling
+    t = TransporteFalso(saldos={1: 50}, passos_rodando=2)
+    s = await t.abrir_sessao(conta())
+    id_remoto = await t.gerar(s, pedido())
+    assert await t.consultar(s, id_remoto) is Estado.RODANDO
+    assert await t.consultar(s, id_remoto) is Estado.RODANDO
+    assert await t.consultar(s, id_remoto) is Estado.PRONTO
+
+
+async def test_nunca_termina_fica_rodando_para_sempre():
+    t = TransporteFalso(saldos={1: 50}, nunca_termina={1})
+    s = await t.abrir_sessao(conta())
+    id_remoto = await t.gerar(s, pedido())
+    for _ in range(5):
+        assert await t.consultar(s, id_remoto) is Estado.RODANDO
+
+
+async def test_morre_ao_gerar_levanta_sessao_morta_sem_cobrar():
+    # a sessao do Google cai no meio de `gerar`, nao so em `abrir_sessao`
+    t = TransporteFalso(saldos={1: 50}, morre_ao_gerar={1})
+    s = await t.abrir_sessao(conta())
+    with pytest.raises(SessaoMorta):
+        await t.gerar(s, pedido())
+    assert await t.saldo(s) == 50
+    assert t.geracoes == {}

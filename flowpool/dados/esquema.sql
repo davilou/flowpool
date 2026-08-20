@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS conta (
     saldo_lido_em   TEXT,
     saldo_confiavel INTEGER NOT NULL DEFAULT 0,
     reset_em        TEXT,
+    seca_ate        TEXT,
     saude           TEXT    NOT NULL DEFAULT 'viva',
     falhas          INTEGER NOT NULL DEFAULT 0,
     ativa           INTEGER NOT NULL DEFAULT 1

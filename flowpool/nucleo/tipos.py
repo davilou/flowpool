@@ -51,6 +51,9 @@ class Conta:
     saldo_lido_em: datetime | None = None
     saldo_confiavel: bool = False
     reset_em: datetime | None = None
+    # Ate quando o Flow recusou gerar apesar do saldo aparente (cota diaria, throttle).
+    # Enquanto estiver no futuro a conta sai da escolha, senao o motor gira em laco quente.
+    seca_ate: datetime | None = None
     saude: SaudeSessao = SaudeSessao.VIVA
     falhas: int = 0
     ativa: bool = True

@@ -13,13 +13,28 @@ from flowpool.transporte.base import (
 
 
 class TransporteFalso:
+    """Simula os modos de falha reais do Flow.
+
+    - `mortas`: `abrir_sessao` levanta `SessaoMorta` (login caiu antes de comecar).
+    - `morre_ao_gerar`: `gerar` levanta `SessaoMorta` (o Chrome caiu no meio).
+    - `falha_em`: a geracao e aceita e volta `FALHOU`.
+    - `passos_rodando`: as N primeiras consultas de cada geracao voltam `RODANDO`.
+    - `nunca_termina`: a geracao fica `RODANDO` para sempre, para exercitar timeout.
+    """
+
     def __init__(self, saldos: dict[int, int], mortas: set[int] | None = None,
-                 falha_em: set[int] | None = None, latencia: float = 0.0) -> None:
+                 falha_em: set[int] | None = None, latencia: float = 0.0,
+                 passos_rodando: int = 0, nunca_termina: set[int] | None = None,
+                 morre_ao_gerar: set[int] | None = None) -> None:
         self.saldos = dict(saldos)
         self.mortas = mortas or set()
         self.falha_em = falha_em or set()
         self.latencia = latencia
+        self.passos_rodando = passos_rodando
+        self.nunca_termina = nunca_termina or set()
+        self.morre_ao_gerar = morre_ao_gerar or set()
         self.geracoes: dict[str, tuple[int, Estado]] = {}
+        self.consultas: dict[str, int] = {}
         self._seq = 0
 
     async def abrir_sessao(self, conta: Conta) -> Sessao:
@@ -32,18 +47,32 @@ class TransporteFalso:
 
     async def gerar(self, s: Sessao, p: Pedido) -> str:
         await asyncio.sleep(self.latencia)
+        # antes de debitar: sessao que cai aqui nao chegou a fazer o Flow cobrar
+        if s.conta.id in self.morre_ao_gerar:
+            raise SessaoMorta(f"sessao da conta {s.conta.email} caiu ao gerar")
         custo = custo_de(p.modelo, s.conta.tier)
         if self.saldos.get(s.conta.id, 0) < custo:
             raise SaldoInsuficiente(f"conta {s.conta.email} sem credito")
         self.saldos[s.conta.id] -= custo
         self._seq += 1
         id_remoto = f"falso-{self._seq}"
-        estado = Estado.FALHOU if s.conta.id in self.falha_em else Estado.PRONTO
-        self.geracoes[id_remoto] = (s.conta.id, estado)
+        if s.conta.id in self.nunca_termina:
+            final = Estado.RODANDO
+        elif s.conta.id in self.falha_em:
+            final = Estado.FALHOU
+        else:
+            final = Estado.PRONTO
+        self.geracoes[id_remoto] = (s.conta.id, final)
+        self.consultas[id_remoto] = 0
         return id_remoto
 
     async def consultar(self, s: Sessao, id_remoto: str) -> Estado:
-        return self.geracoes[id_remoto][1]
+        _, final = self.geracoes[id_remoto]
+        vistas = self.consultas[id_remoto]
+        self.consultas[id_remoto] = vistas + 1
+        if final is Estado.RODANDO:
+            return Estado.RODANDO
+        return Estado.RODANDO if vistas < self.passos_rodando else final
 
     async def baixar(self, s: Sessao, id_remoto: str, destino: Path) -> Path:
         destino.parent.mkdir(parents=True, exist_ok=True)

@@ -4,10 +4,14 @@ Nao ha navegador nem banco aqui. E o cenario que expoe qualquer regressao na
 contabilidade — reserva que zera saldo, estorno que nao volta, free que sobra.
 """
 
+from datetime import datetime, timezone
+
 from flowpool.nucleo.credito import liberar, reservar
 from flowpool.nucleo.custos import custo_de
 from flowpool.nucleo.escolha import escolher
 from flowpool.nucleo.tipos import Conta, Modelo, Tier
+
+AGORA = datetime(2026, 8, 20, 12, 0, tzinfo=timezone.utc)
 
 
 def conta(id, tier, saldo):
@@ -30,7 +34,7 @@ def test_dez_jobs_fast_drenam_as_free_antes_de_tocar_a_ultra():
     despachos = []
 
     for _ in range(10):
-        escolhida = escolher(contas, Modelo.VEO_FAST)
+        escolhida = escolher(contas, Modelo.VEO_FAST, AGORA)
         assert escolhida is not None, "o pool tem Ultra com 9000; nunca deveria secar"
         # so se reserva na conta que `escolher` devolveu — mesmo objeto, nao uma copia
         assert any(escolhida is c for c in contas)
@@ -58,7 +62,7 @@ def test_nenhuma_conta_e_reservada_sem_ter_sido_escolhida():
     tocadas = set()
 
     for _ in range(10):
-        escolhida = escolher(contas, Modelo.VEO_FAST)
+        escolhida = escolher(contas, Modelo.VEO_FAST, AGORA)
         reservar(escolhida, Modelo.VEO_FAST)
         tocadas.add(escolhida.id)
 
@@ -68,7 +72,7 @@ def test_nenhuma_conta_e_reservada_sem_ter_sido_escolhida():
 
 def test_falha_de_geracao_devolve_a_reserva_intacta():
     contas = pool()
-    escolhida = escolher(contas, Modelo.VEO_FAST)
+    escolhida = escolher(contas, Modelo.VEO_FAST, AGORA)
     antes = escolhida.saldo
 
     custo = reservar(escolhida, Modelo.VEO_FAST)

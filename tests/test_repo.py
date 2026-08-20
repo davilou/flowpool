@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -67,20 +67,79 @@ def test_referencias_sobrevivem_ao_banco(repo):
     assert repo.job(id_).referencias == ["a/1.png", "a/2.png", "a/3.png"]
 
 
-def test_proximo_pendente_respeita_prioridade(repo):
+def test_reivindicar_respeita_prioridade(repo):
     repo.criar_job(Job(id=0, modo=Modo.T2V, modelo=Modelo.VEO_FAST,
                        prompt="baixa", destino="d", nome="n1", prioridade=0))
     repo.criar_job(Job(id=0, modo=Modo.T2V, modelo=Modelo.VEO_FAST,
                        prompt="alta", destino="d", nome="n2", prioridade=9))
-    assert repo.proximo_pendente(agora=datetime.now(timezone.utc)).prompt == "alta"
+    assert repo.reivindicar(agora=datetime.now(timezone.utc)).prompt == "alta"
 
 
-def test_proximo_pendente_ignora_job_esperando_reset(repo):
+def test_reivindicar_ignora_job_esperando_reset(repo):
     futuro = datetime(2099, 1, 1, tzinfo=timezone.utc)
     j = Job(id=0, modo=Modo.T2V, modelo=Modelo.VEO_FAST, prompt="p", destino="d", nome="n")
     j.reavaliar_em = futuro
     repo.criar_job(j)
-    assert repo.proximo_pendente(agora=datetime.now(timezone.utc)) is None
+    assert repo.reivindicar(agora=datetime.now(timezone.utc)) is None
+
+
+def test_reivindicar_ja_devolve_o_job_marcado_rodando(repo):
+    jid = repo.criar_job(Job(id=0, modo=Modo.T2V, modelo=Modelo.VEO_FAST,
+                             prompt="p", destino="d", nome="n"))
+    j = repo.reivindicar(agora=datetime.now(timezone.utc))
+    assert j.id == jid
+    assert j.estado is EstadoJob.RODANDO
+    assert repo.job(jid).estado is EstadoJob.RODANDO
+
+
+def test_reivindicar_nao_entrega_o_mesmo_job_duas_vezes(repo):
+    # e este o passo que impede dois workers de gerarem (e pagarem) o mesmo job
+    repo.criar_job(Job(id=0, modo=Modo.T2V, modelo=Modelo.VEO_FAST,
+                       prompt="p", destino="d", nome="n"))
+    agora = datetime.now(timezone.utc)
+    assert repo.reivindicar(agora) is not None
+    assert repo.reivindicar(agora) is None
+
+
+def test_seca_ate_sobrevive_ao_banco(repo):
+    id_ = repo.criar_conta(email="a@b.com", tier=Tier.FREE, perfil="p/1")
+    c = repo.conta(id_)
+    c.seca_ate = datetime(2026, 8, 20, 13, 0, tzinfo=timezone.utc)
+    repo.salvar_conta(c)
+    assert repo.conta(id_).seca_ate == c.seca_ate
+
+
+def test_marcar_sessao_nao_toca_no_saldo(repo):
+    # dois workers na mesma conta: a marcacao de sessao nao pode carregar junto uma
+    # copia velha do saldo e desfazer o que o outro worker gravou
+    id_ = repo.criar_conta(email="a@b.com", tier=Tier.FREE, perfil="p/1")
+    velha = repo.conta(id_)
+    nova = repo.conta(id_); nova.saldo = 30; repo.salvar_conta(nova)
+
+    repo.marcar_sessao(velha.id, SaudeSessao.EXPIRADA, falhas=2)
+
+    lida = repo.conta(id_)
+    assert lida.saude is SaudeSessao.EXPIRADA
+    assert lida.falhas == 2
+    assert lida.saldo == 30
+
+
+def test_txt_normaliza_o_datetime_para_utc(repo):
+    # a comparacao de `reavaliar_em` no SQL e lexicografica: offset diferente
+    # quebraria a ordem em silencio
+    outro_fuso = timezone(timedelta(hours=-3))
+    j = Job(id=0, modo=Modo.T2V, modelo=Modelo.VEO_FAST, prompt="p", destino="d", nome="n")
+    j.reavaliar_em = datetime(2026, 8, 20, 9, 0, tzinfo=outro_fuso)   # 12:00 UTC
+    jid = repo.criar_job(j)
+
+    cru = repo.con.execute("SELECT reavaliar_em FROM job WHERE id=?", (jid,)).fetchone()[0]
+    assert cru == "2026-08-20T12:00:00+00:00"
+
+
+def test_close_libera_a_conexao(repo):
+    repo.close()
+    with pytest.raises(Exception):
+        repo.contas()
 
 
 def test_registrar_evento_e_listar_por_job(repo):
