@@ -151,11 +151,47 @@ OPCAO_MODELO = {
 # ATENCAO ao casar por texto: "Nano Banana 2" e prefixo de "Nano Banana 2 Lite".
 # Usar correspondencia exata, senao o Lite e escolhido quando se pediu o 2.
 
+# --- confirmacao do agente ----------------------------------------------
+# So aparece para geracao que CONSOME credito. Imagem nao pede confirmacao — e
+# gratuita (medido: saldo em 50 antes e depois de gerar uma imagem).
+#
+# O texto traz o CUSTO EXATO: "Você quer que eu inicie essa geração de vídeo 1,
+# que custa 7 créditos?". Isso permite reservar o valor REAL em vez do estimado —
+# a tabela de custos vira so palpite inicial para escolher a conta.
+PADRAO_CUSTO_CONFIRMACAO = r"custa (\d+) cr[eé]dito"
+BOTAO_APROVAR = 'text="Aprovar"'              # usar .last: a conversa acumula pedidos
+BOTAO_APROVAR_SEMPRE = 'text="Aprovar e não perguntar de novo"'
+BOTAO_REJEITAR = 'text="Rejeitar"'
+
+# --- card de midia na grade ---------------------------------------------
+# A grade e a fonte de verdade do estado, NAO a conversa: o agente so responde
+# quando perguntado, a grade atualiza sozinha.
+CARD_MIDIA = 'img[src*="media.getMedia"], img[src*="trpc"]'
+CARD_FALHA = 'text="Ops! Algo deu errado"'
+BOTAO_REPETIR_CARD = 'button:has-text("redo")'   # repete sem cobrar de novo
+
+# Menu do card: clique DIREITO sobre ele.
+MENU_ANIMAR = '[role=menuitem]:has-text("Animar")'          # imagem -> video (i2v)
+MENU_BAIXAR = '[role=menuitem]:has-text("Baixar")'
+MENU_REUTILIZAR = '[role=menuitem]:has-text("Reutilizar comando")'
+MENU_LIXEIRA_CARD = '[role=menuitem]:has-text("Mover para a lixeira")'
+
+# "Baixar" abre SUBMENU de resolucao. 4K exige plano pago.
+BAIXAR_1K = '[role=menuitem]:has-text("Tamanho original")'
+BAIXAR_2K = '[role=menuitem]:has-text("2K")'
+
+# O Flow nomeia o arquivo pelo conteudo e entrega JPEG, nao PNG:
+#   Red_ceramic_mug_on_table_202608201158.jpeg
+# Respeitar a extensao real de `download.suggested_filename` em vez de assumir.
+
+# --- instabilidade do Google --------------------------------------------
+# Banner que aparece no topo em pico de demanda:
+#   "Flow is currently experiencing high demand, affecting video generation."
+# Falha sob esse aviso NAO e problema da conta — e indisponibilidade do Google.
+# Tratar como "tentar mais tarde", nunca marcar a conta como seca ou expirada,
+# senao um pico do Google derrubaria o pool inteiro.
+AVISO_ALTA_DEMANDA = 'text=/high demand|alta demanda/i'
+
 # --- A PREENCHER --------------------------------------------------------
-# Só aparecem quando uma geracao acontece de verdade.
-BOTAO_CONFIRMAR_GERACAO = "..."   # o agente pergunta antes de gastar (modo "Sempre")
-CARD_GERANDO = "..."
-CARD_PRONTO = "..."
-BOTAO_DOWNLOAD = "..."
-AVISO_SEM_CREDITO = "..."
-BOTAO_PARAR = 'button:has-text("stop Parar")'   # aparece enquanto o agente trabalha
+AVISO_SEM_CREDITO = "..."   # so aparece com a conta realmente sem saldo
+BOTAO_PARAR = 'button:has-text("stop Parar")'
