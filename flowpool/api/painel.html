@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FlowPool</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/painel.css">
+</head>
+<body>
+
+<header class="topo">
+  <div class="marca">
+    <span class="ponto" id="ponto-servico"></span>
+    <h1>FlowPool</h1>
+    <span class="sub">pool de contas do Google Flow</span>
+  </div>
+  <div class="estado-conexao" id="estado-conexao">conectando…</div>
+</header>
+
+<main>
+
+  <!-- P3: saude do pool. Primeiro na pagina porque e o que exige acao. -->
+  <section class="faixa-alerta oculto" id="faixa-expiradas">
+    <div class="alerta-cabeca">
+      <strong id="titulo-expiradas">Sessões caídas</strong>
+      <span>Uma sessão do Flow vive ~48h. Enquanto estiver caída, a conta sai do pool.</span>
+    </div>
+    <div class="lista-expiradas" id="lista-expiradas"></div>
+  </section>
+
+  <section class="cartoes">
+    <div class="cartao destaque">
+      <div class="rotulo">Crédito no pool</div>
+      <div class="numerao mono" id="credito-total">—</div>
+      <div class="nota">soma das contas ativas com sessão viva</div>
+    </div>
+    <div class="cartao">
+      <div class="rotulo">Contas vivas</div>
+      <div class="numerao mono" id="contas-vivas">—</div>
+      <div class="nota">ativas e com sessão de pé</div>
+    </div>
+    <div class="cartao">
+      <div class="rotulo">Fila pendente</div>
+      <div class="numerao mono" id="fila-pendente">—</div>
+      <div class="nota">jobs esperando conta</div>
+    </div>
+  </section>
+
+  <!-- P2: contas. O centro do painel. -->
+  <section class="bloco">
+    <div class="bloco-cabeca">
+      <h2>Contas</h2>
+      <span class="contador mono" id="contador-contas"></span>
+    </div>
+
+    <div class="cadastro" id="cadastro">
+      <form id="form-conta" autocomplete="off">
+        <fieldset id="campos-conta">
+          <legend>Cadastrar nova conta</legend>
+          <div class="linha-campos">
+            <label class="campo cresce">
+              <span>E-mail da conta Google</span>
+              <input type="email" id="conta-email" required placeholder="conta@gmail.com">
+            </label>
+            <label class="campo">
+              <span>Tier</span>
+              <select id="conta-tier">
+                <option value="free" selected>free</option>
+                <option value="pro">pro</option>
+                <option value="ultra">ultra</option>
+              </select>
+            </label>
+            <label class="campo cresce">
+              <span>Proxy (opcional)</span>
+              <input type="text" id="conta-proxy" class="mono" placeholder="http://host:porta">
+            </label>
+            <button type="submit" id="botao-cadastrar" class="primario">Cadastrar conta</button>
+          </div>
+          <p class="dica">
+            O proxy entra <em>já no cadastro</em>: o login precisa sair do mesmo IP por onde a conta
+            vai operar. Sem proxy, a conta usa o IP desta máquina. Proxy com usuário e senha não
+            funciona no Chrome do cadastro — use um proxy sem credencial ou deixe em branco.
+          </p>
+        </fieldset>
+      </form>
+
+      <!-- O estado que evita o segundo clique. POST /contas bloqueia por minutos. -->
+      <div class="andamento oculto" id="andamento-cadastro">
+        <div class="andamento-cabeca">
+          <span class="girando"></span>
+          <strong id="andamento-titulo">Abri o Chrome. Agora é com você.</strong>
+        </div>
+        <ol class="passos">
+          <li>Faça o login na conta Google na janela que abriu.</li>
+          <li>Tela de consentimento: <strong>deixe as duas caixas desmarcadas</strong> e clique em “Avançar”.</li>
+          <li>Aviso de privacidade: <strong>role até o fim do texto</strong> — o botão “Continuar” só habilita
+              quando o fim entra na tela de verdade. Janela minimizada ou coberta por outra não conta.</li>
+          <li>Confirme que a lista de projetos do Flow carregou.</li>
+          <li><strong>Feche a janela do Chrome.</strong> Daí em diante é comigo.</li>
+        </ol>
+        <p class="andamento-rodape">
+          Não abra este mesmo perfil em outro Chrome enquanto isso, e não clique em cadastrar de novo:
+          o segundo Chrome rouba a janela do primeiro e o cadastro falha.
+          <br>Eu confirmo aqui quando a sessão estiver de pé. <span class="mono" id="cronometro">0:00</span>
+        </p>
+      </div>
+
+      <div class="aviso erro oculto" id="erro-cadastro"></div>
+      <div class="aviso ok oculto" id="ok-cadastro"></div>
+    </div>
+
+    <div class="rolagem">
+      <table class="tabela" id="tabela-contas">
+        <thead>
+          <tr>
+            <th>E-mail</th>
+            <th>Tier</th>
+            <th class="num">Saldo</th>
+            <th>Sessão</th>
+            <th>Proxy</th>
+            <th>Ativa</th>
+            <th>Ações</th>
+          </tr>
+        </thead>
+        <tbody id="corpo-contas">
+          <tr class="vazio"><td colspan="7">Carregando…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- P4: jobs. -->
+  <section class="bloco">
+    <div class="bloco-cabeca">
+      <h2>Jobs</h2>
+      <span class="contador mono" id="contador-jobs"></span>
+    </div>
+
+    <form id="form-job" autocomplete="off" class="cadastro">
+      <fieldset id="campos-job">
+        <legend>Novo job</legend>
+        <div class="linha-campos">
+          <label class="campo cresce">
+            <span>Produto</span>
+            <input type="text" id="job-produto" required placeholder="Panelas Monaco">
+          </label>
+          <label class="campo cresce">
+            <span>Nome do arquivo</span>
+            <input type="text" id="job-nome" required placeholder="c3-take1">
+          </label>
+          <label class="campo">
+            <span>Modo</span>
+            <select id="job-modo">
+              <option value="t2v" selected>vídeo — texto</option>
+              <option value="frames2v">vídeo — frames</option>
+              <option value="ingredients2v">vídeo — referências</option>
+              <option value="imagem">imagem</option>
+            </select>
+          </label>
+          <label class="campo">
+            <span>Modelo</span>
+            <select id="job-modelo"></select>
+          </label>
+          <label class="campo">
+            <span>Proporção</span>
+            <select id="job-proporcao"></select>
+          </label>
+          <label class="campo" id="campo-duracao">
+            <span>Duração</span>
+            <select id="job-duracao">
+              <option value="4s" selected>4s</option>
+              <option value="6s">6s</option>
+              <option value="8s">8s</option>
+              <option value="10s">10s</option>
+            </select>
+          </label>
+          <label class="campo" id="campo-quantidade">
+            <span>Quantidade</span>
+            <select id="job-quantidade">
+              <option value="1" selected>1</option>
+              <option value="2">2</option>
+              <option value="3">3</option>
+              <option value="4">4</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="linha-campos" id="campo-frames">
+          <label class="campo cresce">
+            <span>Frame inicial</span>
+            <input type="text" id="job-frame-inicial" class="mono" placeholder="Produto/frames/01.png">
+          </label>
+          <label class="campo cresce">
+            <span>Frame final (opcional)</span>
+            <input type="text" id="job-frame-final" class="mono" placeholder="Produto/frames/09.png">
+          </label>
+        </div>
+
+        <div class="linha-campos" id="campo-referencias">
+          <label class="campo cresce">
+            <span>Referências — até 3, uma por linha</span>
+            <textarea id="job-referencias" class="mono" rows="3"
+                      placeholder="_Personagens/imagens/Clara/clara_01_frontal.jpg"></textarea>
+          </label>
+        </div>
+
+        <div class="linha-campos">
+          <label class="campo cresce">
+            <span>Prompt</span>
+            <textarea id="job-prompt" rows="3" required
+                      placeholder="o que gerar"></textarea>
+          </label>
+          <label class="campo cresce">
+            <span>Destino (opcional)</span>
+            <input type="text" id="job-destino" class="mono" placeholder="deriva do produto: {produto}/clipes">
+          </label>
+          <button type="submit" id="botao-job" class="primario">Enfileirar</button>
+        </div>
+        <p class="dica" id="dica-job"></p>
+      </fieldset>
+      <div class="aviso erro oculto" id="erro-job"></div>
+    </form>
+
+    <div class="rolagem">
+      <table class="tabela" id="tabela-jobs">
+        <thead>
+          <tr>
+            <th class="num">#</th>
+            <th>Estado</th>
+            <th>Modo / modelo</th>
+            <th>Produto / nome</th>
+            <th>Config</th>
+            <th>Conta</th>
+            <th>Arquivo / erro</th>
+            <th>Ação</th>
+          </tr>
+        </thead>
+        <tbody id="corpo-jobs">
+          <tr class="vazio"><td colspan="8">Carregando…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+</main>
+
+<script src="/painel.js"></script>
+</body>
+</html>

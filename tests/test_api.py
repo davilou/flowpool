@@ -349,3 +349,31 @@ def test_nova_conta_aceita_proxy_e_recusa_url_torta():
         "http://1.2.3.4:8080"
     with pytest.raises(ValueError):
         NovaConta(email="a@b.com", proxy="ftp://1.2.3.4:8080")
+
+
+def test_raiz_serve_o_painel(cliente):
+    # o painel e servido pelo proprio FastAPI: sem build step, sem segundo servidor e
+    # sem StaticFiles apontando para fora do pacote
+    c, _ = cliente
+    r = c.get("/")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/html")
+    assert "FlowPool" in r.text
+
+
+def test_painel_referencia_o_css_e_o_js_que_a_api_serve(cliente):
+    # o HTML pede dois caminhos absolutos; se algum deles nao tiver rota, o painel sobe
+    # sem estilo ou sem comportamento nenhum e a falha nao aparece em teste algum
+    c, _ = cliente
+    html = c.get("/").text
+    assert "/painel.css" in html
+    assert "/painel.js" in html
+    assert c.get("/painel.css").status_code == 200
+    assert c.get("/painel.js").status_code == 200
+
+
+def test_css_e_js_saem_com_o_tipo_certo(cliente):
+    # CSS entregue como text/plain e ignorado pelo navegador em silencio
+    c, _ = cliente
+    assert c.get("/painel.css").headers["content-type"].startswith("text/css")
+    assert c.get("/painel.js").headers["content-type"].startswith("text/javascript")

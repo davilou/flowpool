@@ -1,0 +1,415 @@
+/* Painel do FlowPool. Escuro, denso, sobrio - e painel de operacao.
+   Prioridade visual, de cima para baixo: conta que precisa de acao, credito, fila,
+   historico. */
+
+:root {
+  --fundo: #0A0D0F;
+  --painel: #11161A;
+  --painel-alto: #161D22;
+  --borda: #212A31;
+  --borda-forte: #2E3A43;
+  --texto: #E4EBF1;
+  --texto-fraco: #8A98A4;
+  --primaria: #0FD68C;
+  --primaria-fraca: rgba(15, 214, 140, 0.12);
+  --alerta: #F0A63C;
+  --alerta-fraco: rgba(240, 166, 60, 0.12);
+  --erro: #FF5C5C;
+  --erro-fraco: rgba(255, 92, 92, 0.12);
+  --azul: #5AA9FF;
+
+  --titulo: "Space Grotesk", "Segoe UI", system-ui, sans-serif;
+  --corpo: "Inter", "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--fundo);
+  color: var(--texto);
+  font-family: var(--corpo);
+  font-size: 13px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+
+.mono { font-family: var(--mono); font-variant-ligatures: none; }
+.oculto { display: none !important; }
+
+/* ---------- topo ---------- */
+
+.topo {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 20px;
+  background: var(--painel);
+  border-bottom: 1px solid var(--borda);
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+
+.marca { display: flex; align-items: baseline; gap: 10px; }
+
+.marca h1 {
+  font-family: var(--titulo);
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  margin: 0;
+}
+
+.marca .sub { color: var(--texto-fraco); font-size: 12px; }
+
+.ponto {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--texto-fraco);
+  align-self: center;
+}
+.ponto.vivo { background: var(--primaria); box-shadow: 0 0 8px var(--primaria); }
+.ponto.morto { background: var(--erro); box-shadow: 0 0 8px var(--erro); }
+
+.estado-conexao { color: var(--texto-fraco); font-size: 12px; }
+.estado-conexao.falha { color: var(--erro); }
+
+main {
+  max-width: 1500px;
+  margin: 0 auto;
+  padding: 16px 20px 60px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* ---------- faixa de contas expiradas ---------- */
+
+.faixa-alerta {
+  background: var(--alerta-fraco);
+  border: 1px solid rgba(240, 166, 60, 0.4);
+  border-left: 3px solid var(--alerta);
+  border-radius: 6px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.alerta-cabeca { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.alerta-cabeca strong { font-family: var(--titulo); color: var(--alerta); font-size: 14px; }
+.alerta-cabeca span { color: var(--texto-fraco); font-size: 12px; }
+
+.lista-expiradas { display: flex; flex-wrap: wrap; gap: 8px; }
+
+.chip-expirada {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--painel);
+  border: 1px solid var(--borda-forte);
+  border-radius: 4px;
+  padding: 5px 6px 5px 10px;
+}
+.chip-expirada .email { font-family: var(--mono); font-size: 12px; }
+
+/* ---------- cartoes de saude ---------- */
+
+.cartoes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.cartao {
+  background: var(--painel);
+  border: 1px solid var(--borda);
+  border-radius: 6px;
+  padding: 14px 16px;
+}
+
+.cartao.destaque { border-color: rgba(15, 214, 140, 0.35); background: linear-gradient(180deg, var(--primaria-fraca), transparent 70%), var(--painel); }
+
+.cartao .rotulo {
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--texto-fraco);
+}
+
+.numerao {
+  font-size: 38px;
+  font-weight: 600;
+  line-height: 1.1;
+  margin-top: 4px;
+  letter-spacing: -0.02em;
+}
+.cartao.destaque .numerao { color: var(--primaria); }
+
+.cartao .nota { color: var(--texto-fraco); font-size: 11.5px; margin-top: 2px; }
+
+/* ---------- blocos ---------- */
+
+.bloco {
+  background: var(--painel);
+  border: 1px solid var(--borda);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.bloco-cabeca {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 11px 16px;
+  border-bottom: 1px solid var(--borda);
+  background: var(--painel-alto);
+}
+
+.bloco-cabeca h2 {
+  font-family: var(--titulo);
+  font-size: 14px;
+  font-weight: 500;
+  margin: 0;
+  letter-spacing: 0.01em;
+}
+
+.contador { color: var(--texto-fraco); font-size: 11.5px; }
+
+/* ---------- formularios ---------- */
+
+.cadastro { padding: 14px 16px; border-bottom: 1px solid var(--borda); }
+
+fieldset {
+  border: 1px solid var(--borda);
+  border-radius: 5px;
+  padding: 10px 14px 12px;
+  margin: 0;
+  min-width: 0;
+}
+fieldset:disabled { opacity: 0.45; }
+
+legend {
+  font-family: var(--titulo);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--texto-fraco);
+  padding: 0 6px;
+}
+
+.linha-campos {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: flex-end;
+}
+.linha-campos + .linha-campos { margin-top: 10px; }
+
+.campo { display: flex; flex-direction: column; gap: 4px; min-width: 120px; }
+.campo.cresce { flex: 1 1 220px; }
+
+.campo > span {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--texto-fraco);
+}
+
+input, select, textarea {
+  background: var(--fundo);
+  color: var(--texto);
+  border: 1px solid var(--borda-forte);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-family: var(--corpo);
+  font-size: 12.5px;
+  width: 100%;
+}
+input.mono, textarea.mono { font-family: var(--mono); font-size: 12px; }
+textarea { resize: vertical; }
+
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  border-color: var(--primaria);
+  box-shadow: 0 0 0 2px var(--primaria-fraca);
+}
+
+.dica { color: var(--texto-fraco); font-size: 11.5px; margin: 10px 0 0; max-width: 90ch; }
+.dica em { color: var(--texto); font-style: normal; }
+
+button {
+  background: var(--painel-alto);
+  color: var(--texto);
+  border: 1px solid var(--borda-forte);
+  border-radius: 4px;
+  padding: 6px 12px;
+  font-family: var(--corpo);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+button:hover:not(:disabled) { border-color: var(--primaria); color: var(--primaria); }
+button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+button.primario {
+  background: var(--primaria);
+  border-color: var(--primaria);
+  color: #05231A;
+  font-weight: 600;
+}
+button.primario:hover:not(:disabled) { background: #23E79E; color: #05231A; }
+
+button.alerta { border-color: var(--alerta); color: var(--alerta); }
+button.mini { padding: 3px 8px; font-size: 11px; }
+
+/* ---------- andamento do cadastro ---------- */
+
+.andamento {
+  margin-top: 12px;
+  border: 1px solid rgba(15, 214, 140, 0.35);
+  background: var(--primaria-fraca);
+  border-radius: 5px;
+  padding: 12px 14px;
+}
+
+.andamento-cabeca { display: flex; align-items: center; gap: 10px; }
+.andamento-cabeca strong { font-family: var(--titulo); font-size: 14px; color: var(--primaria); }
+
+.girando {
+  width: 12px; height: 12px;
+  border: 2px solid rgba(15, 214, 140, 0.3);
+  border-top-color: var(--primaria);
+  border-radius: 50%;
+  animation: girar 0.8s linear infinite;
+  flex: none;
+}
+@keyframes girar { to { transform: rotate(360deg); } }
+
+.passos { margin: 8px 0 0; padding-left: 20px; }
+.passos li { margin: 3px 0; }
+
+.andamento-rodape { color: var(--texto-fraco); font-size: 11.5px; margin: 10px 0 0; }
+
+.aviso {
+  margin-top: 12px;
+  border-radius: 5px;
+  padding: 10px 12px;
+  font-size: 12.5px;
+  border: 1px solid transparent;
+  white-space: pre-wrap;
+}
+.aviso.erro { background: var(--erro-fraco); border-color: rgba(255, 92, 92, 0.4); color: #FFB4B4; }
+.aviso.ok { background: var(--primaria-fraca); border-color: rgba(15, 214, 140, 0.4); color: var(--primaria); }
+
+/* ---------- tabelas ---------- */
+
+.rolagem { overflow-x: auto; }
+
+.tabela { width: 100%; border-collapse: collapse; }
+
+.tabela th {
+  text-align: left;
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+  color: var(--texto-fraco);
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--borda);
+  white-space: nowrap;
+}
+
+.tabela td {
+  padding: 7px 12px;
+  border-bottom: 1px solid rgba(33, 42, 49, 0.6);
+  vertical-align: middle;
+}
+
+.tabela tbody tr:hover { background: rgba(255, 255, 255, 0.02); }
+.tabela .num { text-align: right; font-family: var(--mono); }
+.tabela td select, .tabela td input { padding: 3px 6px; font-size: 11.5px; }
+.tabela .vazio td { color: var(--texto-fraco); text-align: center; padding: 22px; }
+
+tr.precisa-acao { background: var(--alerta-fraco); }
+tr.inativa { opacity: 0.5; }
+
+.email-conta { font-family: var(--mono); font-size: 12.5px; }
+
+.saldo { font-family: var(--mono); font-size: 16px; font-weight: 600; }
+.saldo.zerado { color: var(--texto-fraco); }
+.saldo .duvida { color: var(--alerta); font-size: 12px; }
+
+.pilula {
+  display: inline-block;
+  border-radius: 3px;
+  padding: 2px 7px;
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  border: 1px solid transparent;
+}
+.pilula.viva { color: var(--primaria); border-color: rgba(15, 214, 140, 0.4); background: var(--primaria-fraca); }
+.pilula.expirada { color: var(--alerta); border-color: rgba(240, 166, 60, 0.5); background: var(--alerta-fraco); }
+.pilula.bloqueada { color: var(--erro); border-color: rgba(255, 92, 92, 0.5); background: var(--erro-fraco); }
+.pilula.pendente { color: var(--texto-fraco); border-color: var(--borda-forte); }
+.pilula.rodando { color: var(--azul); border-color: rgba(90, 169, 255, 0.5); background: rgba(90, 169, 255, 0.12); }
+.pilula.pronto { color: var(--primaria); border-color: rgba(15, 214, 140, 0.4); background: var(--primaria-fraca); }
+.pilula.falhou { color: var(--erro); border-color: rgba(255, 92, 92, 0.5); background: var(--erro-fraco); }
+.pilula.cancelado { color: var(--texto-fraco); border-color: var(--borda-forte); }
+
+.falhas { color: var(--erro); font-size: 11px; margin-left: 6px; }
+.leve { color: var(--texto-fraco); font-size: 11.5px; }
+.mono-peq { font-family: var(--mono); font-size: 11.5px; }
+
+.corta {
+  display: inline-block;
+  max-width: 34ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+
+.acoes { display: flex; gap: 6px; flex-wrap: wrap; }
+
+.linha-proxy { display: flex; gap: 6px; align-items: center; }
+.linha-proxy input { min-width: 110px; max-width: 150px; }
+
+/* O valor atual e TEXTO, nao campo: ele chega mascarado da API, e um input preenchido
+   com ele devolveria `***` no lugar da senha ao primeiro Salvar. */
+.proxy-atual {
+  display: inline-block;
+  max-width: 26ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Interruptor de ativa/inativa. */
+.interruptor { display: inline-flex; align-items: center; cursor: pointer; }
+.interruptor input { position: absolute; opacity: 0; width: 0; height: 0; }
+.interruptor .trilho {
+  width: 32px; height: 17px;
+  background: var(--borda-forte);
+  border-radius: 9px;
+  position: relative;
+  transition: background 0.15s;
+}
+.interruptor .trilho::after {
+  content: "";
+  position: absolute;
+  top: 2px; left: 2px;
+  width: 13px; height: 13px;
+  border-radius: 50%;
+  background: var(--texto-fraco);
+  transition: transform 0.15s, background 0.15s;
+}
+.interruptor input:checked + .trilho { background: rgba(15, 214, 140, 0.35); }
+.interruptor input:checked + .trilho::after { transform: translateX(15px); background: var(--primaria); }

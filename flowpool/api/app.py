@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 
 from flowpool.api.esquemas import (
     NovaConta, PatchConta, PedidoJob, PedidoLote, RespostaConta, RespostaJob,
@@ -18,6 +19,12 @@ from flowpool.nucleo.proxy import mascarar
 from flowpool.nucleo.tipos import Conta, EstadoJob, Job, SaudeSessao
 from flowpool.transporte.base import FlowTransport, SessaoMorta
 from flowpool.transporte.pw.sessao import ChromeAusente, PerfilOcupado, cadastrar
+
+
+# Os tres arquivos do painel moram AO LADO deste modulo, dentro do pacote. Servi-los um
+# a um, por caminho fixo, e diferente de montar um `StaticFiles`: aqui nao ha diretorio
+# exposto, entao nao ha caminho que o navegador possa pedir e receber outra coisa.
+_PAINEL = Path(__file__).resolve().parent
 
 
 def _job_de(p: PedidoJob) -> Job:
@@ -51,8 +58,11 @@ def _resposta_conta(c: Conta) -> RespostaConta:
 
 
 def criar_app(repo: Repo, transporte: FlowTransport, raiz: Path | str,
-              rodar_motor: bool = False) -> FastAPI:
-    orq = Orquestrador(repo, transporte, raiz)
+              rodar_motor: bool = False, max_simultaneos: int = 3) -> FastAPI:
+    # o default fica em 3 de proposito: baixa-lo aqui mudaria o comportamento dos testes
+    # da API, que rodam com transporte falso e nenhuma janela. Quem sabe do custo de
+    # tela e o `__main__`, e e ele que passa 1.
+    orq = Orquestrador(repo, transporte, raiz, max_simultaneos=max_simultaneos)
 
     @asynccontextmanager
     async def ciclo(app: FastAPI):
@@ -68,6 +78,19 @@ def criar_app(repo: Repo, transporte: FlowTransport, raiz: Path | str,
     app = FastAPI(title="FlowPool", lifespan=ciclo)
     app.state.repo = repo
     app.state.orq = orq
+
+    @app.get("/", include_in_schema=False)
+    def painel() -> FileResponse:
+        """O painel. HTML/JS puro servido pelo proprio FastAPI, sem build step."""
+        return FileResponse(_PAINEL / "painel.html", media_type="text/html")
+
+    @app.get("/painel.css", include_in_schema=False)
+    def painel_css() -> FileResponse:
+        return FileResponse(_PAINEL / "painel.css", media_type="text/css")
+
+    @app.get("/painel.js", include_in_schema=False)
+    def painel_js() -> FileResponse:
+        return FileResponse(_PAINEL / "painel.js", media_type="text/javascript")
 
     @app.post("/jobs", response_model=RespostaJob, status_code=201)
     def criar_job(p: PedidoJob) -> RespostaJob:
