@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -12,9 +13,11 @@ from flowpool.api.esquemas import (
 )
 from flowpool.dados.repo import Repo
 from flowpool.motor.orquestrador import Orquestrador
+from flowpool.nucleo.erros import ProxyInvalido
 from flowpool.nucleo.proxy import mascarar
 from flowpool.nucleo.tipos import Conta, EstadoJob, Job, SaudeSessao
-from flowpool.transporte.base import FlowTransport
+from flowpool.transporte.base import FlowTransport, SessaoMorta
+from flowpool.transporte.pw.sessao import ChromeAusente, PerfilOcupado, cadastrar
 
 
 def _job_de(p: PedidoJob) -> Job:
@@ -128,6 +131,58 @@ def criar_app(repo: Repo, transporte: FlowTransport, raiz: Path | str,
     @app.get("/contas", response_model=list[RespostaConta])
     def listar_contas() -> list[RespostaConta]:
         return [_resposta_conta(c) for c in repo.contas()]
+
+    @app.post("/contas", response_model=RespostaConta, status_code=201)
+    async def nova_conta(p: NovaConta) -> RespostaConta:
+        raiz_perfis = Path(raiz) / "flowpool" / "perfis"
+        try:
+            # o proxy entra JA no cadastro: o login tem que sair do mesmo IP por onde
+            # a conta vai operar, senao o Google ve a mudanca de IP entre o login e o
+            # uso — que e o sinal que o proxy existe para evitar
+            perfil, expira_em = await cadastrar(raiz_perfis, p.email, p.proxy)
+        except ProxyInvalido as e:
+            # 409, nao 500: proxy com credencial no chrome.exe do cadastro e uma
+            # combinacao que nao existe, e a mensagem ja diz as duas saidas reais
+            raise HTTPException(409, str(e)) from e
+        except (ChromeAusente, PerfilOcupado) as e:
+            raise HTTPException(409, str(e)) from e
+        except SessaoMorta as e:
+            # a pessoa fechou a janela antes de terminar o login. 409, nao 500: nao e
+            # defeito do servico, e passo faltando — e a mensagem tem que dizer isso.
+            raise HTTPException(409, f"login nao concluiu: {e}") from e
+        try:
+            id_ = repo.criar_conta(p.email, p.tier, str(perfil))
+        except ValueError as e:
+            raise HTTPException(409, str(e)) from e
+        c = repo.conta(id_)
+        # `criar_conta` nao recebe proxy — a coluna e so onde o valor descansa entre
+        # uma sessao e outra. Sem esta gravacao, o cadastro sairia pelo proxy e todas
+        # as geracoes seguintes pelo IP de casa, que e o pior dos dois mundos.
+        c.proxy = p.proxy
+        repo.salvar_conta(c)
+        # a expiracao vai para evento, nao para coluna: a sessao vive ~48h e quem
+        # descobre que caiu e a propria geracao, marcando `expirada`. Guardar a data
+        # numa coluna exigiria migracao para uma informacao que ninguem consulta.
+        repo.registrar_evento(None, c.id, "sessao_validada",
+                              json.dumps({"expira_em": expira_em.isoformat()}))
+        return _resposta_conta(c)
+
+    @app.post("/contas/{id_}/revalidar", response_model=RespostaConta)
+    async def revalidar(id_: int) -> RespostaConta:
+        c = repo.conta(id_)
+        if c is None:
+            raise HTTPException(404, "conta nao existe")
+        # revalidar E cadastrar: mesmo perfil, mesmo Chrome, mesmas duas telas. A
+        # sessao expira em ~48h medidas, entao isto vira rotina, nao excecao. E pelo
+        # MESMO proxy: revalidar por outro IP e o unico jeito de a conta trocar de IP
+        # sem ninguem pedir.
+        _, expira_em = await cadastrar(Path(c.perfil).parent, c.email, c.proxy)
+        c.saude = SaudeSessao.VIVA
+        c.falhas = 0
+        repo.salvar_conta(c)
+        repo.registrar_evento(None, c.id, "sessao_revalidada",
+                              json.dumps({"expira_em": expira_em.isoformat()}))
+        return _resposta_conta(c)
 
     @app.patch("/contas/{id_}", response_model=RespostaConta)
     def alterar_conta(id_: int, p: PatchConta) -> RespostaConta:
