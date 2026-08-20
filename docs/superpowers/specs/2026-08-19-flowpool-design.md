@@ -2,6 +2,10 @@
 
 **Data:** 2026-08-19
 **Estado:** aprovado, com uma decisão em aberto (transporte)
+**Revisão de campo:** 2026-08-20 — seis descobertas medidas contra o Flow real (login sob
+Playwright, visibilidade de janela, deep link, varredura de DOM, locale na URL, seletores
+por texto). Propagadas nas seções *Restrições assumidas*, *Projetos*, *Transporte* e *Erro
+e observabilidade*. Referência primária: `flowpool/transporte/pw/seletores.py`.
 
 ## O que é
 
@@ -17,7 +21,7 @@ A aritmética que justifica o esforço: conta sem assinatura recebe 50 créditos
 
 **Manter várias contas para contornar o limite gratuito contraria os Termos do Google, e acesso automatizado também.** O risco prático é banimento das contas. Decisão do Davi, tomada com o aviso na mesa.
 
-**Login não se automatiza.** Google barra login roteirizado com captcha e 2FA. Cadastrar conta é sempre: o app abre uma janela, a pessoa loga na mão, o app guarda o perfil. Vinte contas = vinte logins manuais, uma vez, mais revalidação esporádica.
+**Login não se automatiza — e não é só por captcha e 2FA.** Medido em campo (20/08): o Google recusa o login com "Esse navegador ou app pode não ser seguro" sempre que o Chrome é dirigido por CDP — é a marca de automação que o próprio Playwright deixa, não falta de captcha resolvido. Por isso cadastrar conta **não abre o Chrome pelo Playwright**: sobe um `chrome.exe` comum via `subprocess.Popen`, com `--user-data-dir=<perfil>`, `--no-first-run`, `--no-default-browser-check` e a URL do Flow — sem CDP, sem flag de automação. A pessoa loga, passa as telas de boas-vindas nessa janela comum e **fecha**. Só então o app abre o mesmo perfil com Playwright para validar: `GET /fx/api/auth/session` precisa devolver `access_token`. A checagem antibot é exclusiva do fluxo de login — uma vez autenticado, o Playwright reaproveita o perfil sem reclamação nenhuma (foi medido: token válido, sem tela de login, sem aviso de boas-vindas, lista de projetos carregando). Consequência prática que o modelo precisa saber: **um perfil não pode ser aberto por dois Chromes ao mesmo tempo** — o segundo apenas entrega a URL para o primeiro ("Abrindo em uma sessão de navegador existente") e fecha, e o Playwright que tentar essa mesma sessão falha com `TargetClosedError`. O app precisa esperar o Chrome de cadastro terminar (ou confirmar que nenhum `chrome.exe` ainda usa aquele `--user-data-dir`) antes de validar com Playwright. Vinte contas = vinte logins manuais, uma vez, mais revalidação esporádica — pelo mesmo caminho.
 
 **Conta grátis nunca roda Veo Quality.** São 100 créditos por geração contra teto de 50/dia. Quality é exclusivo das contas pagas. Grátis roda Lite, Fast e imagem.
 
@@ -101,7 +105,9 @@ Uma exceção antes de tudo isso: job que volta para a fila **com `id_remoto`** 
 
 ## Projetos
 
-Observação de campo (20/08), no Flow real: a app vive em `labs.google/fx/tools/flow/[id]`. Toda geração acontece **dentro de um projeto**, e o projeto tem id na URL. Não existe gerar "solto". Sem gerenciar isso, cada geração criaria um projeto novo e, em poucos dias, a conta seria um lixão de projetos órfãos com um clipe dentro de cada.
+Observação de campo (20/08), no Flow real: a app vive em `labs.google/fx/pt/tools/flow/project/[id]`. Toda geração acontece **dentro de um projeto**, e o projeto tem id na URL. Não existe gerar "solto". Sem gerenciar isso, cada geração criaria um projeto novo e, em poucos dias, a conta seria um lixão de projetos órfãos com um clipe dentro de cada.
+
+(O `pt` no meio da URL é o locale, não decoração — ver *Transporte* para o porquê de ele ficar fixo.)
 
 ### A restrição que define o desenho
 
@@ -134,6 +140,8 @@ Pelo mesmo motivo, `DELETE /projetos/{id}` **esquece o vínculo local e não toc
 Três operações: `listar_projetos`, `criar_projeto` (devolve o id remoto) e `abrir_projeto`. Todas partem de uma sessão já aberta, porque não existe lista global de projetos — cada conta enxerga só os seus. `criar_projeto` devolve o id lido **da URL** depois que o projeto abre: um id inventado gravaria no banco um vínculo que nunca abre, e a geração seguinte criaria outro projeto do mesmo produto.
 
 O transporte não decide projeto: ele lista, cria e abre. Quem decide é o motor, e por isso a política inteira continua testável sem navegador nenhum.
+
+`abrir_projeto` não pode ser um `page.goto` direto para a URL do projeto. Medido em campo (20/08): `page.goto("https://labs.google/fx/pt/tools/flow/project/<uuid>")` derruba a aplicação com "Application error: a client-side exception has occurred" — o Next.js espera chegar ali por navegação interna, não por carga direta da URL. `abrir_projeto` por isso navega para a lista (a mesma tela que `listar_projetos` usa) e **clica no card** cujo `href` contém o id remoto; nunca faz `goto` direto ao id.
 
 
 ## Fila e execução
@@ -196,6 +204,8 @@ Os quatro do Flow: **text-to-video**, **frames-to-video** (1º e opcionalmente �
 
 Os quatro rodam **dentro de um projeto**, e do mesmo projeto: o projeto é escolhido pelo `produto` do job, não pelo modo. Um produto que gera imagem de referência e depois o vídeo a partir dela guarda as duas coisas no mesmo lugar — que é como uma pessoa usaria o Flow na mão. Ver *Projetos*.
 
+Observação de campo (20/08): a UI tem **um único** `input[type=file]` (`multiple=True`, `accept="image/*"`), não três campos separados para referência/frame inicial/frame final. A distinção entre "isto é uma referência" e "isto é o frame inicial" acontece por outro caminho da interface, ainda não mapeado — o transporte manda os arquivos certos para o mesmo input; quem decide o que cada um significa é a UI, não o seletor.
+
 Observação de campo (19/08): o Flow passou a expor um modelo **Gemini Omni** — vídeo a partir de qualquer referência, com edição conversacional. Não entra no escopo inicial, mas o desenho do modo `ingredients2v` deve deixar o campo `modelo` aberto para acomodá-lo sem migração.
 
 ## Transporte — DECIDIDO: Playwright com Chrome real
@@ -232,9 +242,10 @@ A autenticação **é** replicável: cookie `__Secure-next-auth.session-token` �
 
 Consequências diretas para a implementação:
 
-- **Usar `channel="chrome"`, apontando para uma instalação real do Chrome.** O Chromium empacotado do Playwright é rejeitado pelo stack de auth do Google. Falhar cedo e com mensagem clara se o Chrome não for encontrado.
-- **Headless está fora** para a geração de vídeo. Janela real, mesmo que minimizada/fora de tela.
-- **O teto de simultâneos é baixo por natureza** — cada worker segura uma janela de Chrome. Começar em 3.
+- **Usar `channel="chrome"`, apontando para uma instalação real do Chrome.** O Chromium empacotado do Playwright é rejeitado pelo stack de auth do Google. Falhar cedo e com mensagem clara se o Chrome não for encontrado. Isso vale para o Chrome que **opera** a sessão já autenticada — o login em si não passa por aqui, ver *Restrições assumidas*.
+- **Headless está fora, mas não basta não ser headless.** Medido em campo (20/08): `document.visibilityState` só fica `'visible'` com a janela realmente visível — minimizada, fora de tela ou em aba de segundo plano conta como oculta para o navegador, e isso impede o `IntersectionObserver` de disparar. Duas partes da UI dependem dele: o botão "Continuar" do aviso de privacidade do onboarding nunca habilita, e os cards da lista de projetos nunca terminam de renderizar. Cada worker precisa portanto de uma janela de verdade ocupando espaço de tela — não dá para escondê-la atrás de outra janela nem jogá-la para fora da área visível.
+- **O teto de simultâneos deixa de ser sobre RAM/CPU e passa a ser sobre espaço de tela.** Cada worker precisa de uma janela visível de verdade, então o teto real é quantas janelas cabem visíveis ao mesmo tempo na máquina do Davi — não quantos processos de Chrome ela aguenta. O número 3 é um chute de partida herdado do raciocínio antigo (RAM) e **precisa ser reavaliado por medição** assim que a Task 9+ estiver rodando. Fica em aberto, e a medir, se a geração em si — não só o onboarding e a lista — também depende de visibilidade.
+- **Seletores são por texto/role, nunca por classe CSS.** As classes são styled-components com hash (`button.sc-e8425ea6-0.hOBPaw`) e mudam a cada deploy do Google; os textos vêm de um dicionário i18n versionado, e é por eles que a navegação se mantém estável entre deploys. Ver `flowpool/transporte/pw/seletores.py`.
 - **C (híbrido) fica como otimização futura**, restrita ao que não é vídeo: leitura de saldo e possivelmente geração de imagem. Vale medir depois que o A estiver de pé, nunca antes.
 
 ### Nota de custo a confirmar por medição
@@ -244,6 +255,8 @@ O `gflow-cli` afirma que **crédito só é gasto em vídeo — imagem e operaç�
 ## Erro e observabilidade
 
 Todo job carrega a razão da última falha em texto legível. O painel mostra três coisas em destaque: contas com sessão caída (exigem ação humana), crédito total vivo no pool, e jobs parados esperando reset. Eventos ficam no banco; nada de log só em arquivo.
+
+**Regra dura, sem exceção: nenhuma varredura de DOM inclui `SCRIPT`, `STYLE` ou `NOSCRIPT`.** O `__NEXT_DATA__` da página carrega o access_token OAuth **em texto puro**, junto com nome e e-mail do usuário — varrer o DOM sem excluir essas tags captura o token junto. Isso já aconteceu de verdade: um vazamento para disco durante o mapeamento manual (Task 9) foi causado exatamente por essa varredura ingênua. Nada que vier do DOM — texto, atributo, HTML capturado para depuração — pode ir para log ou para o banco de eventos sem passar por esse filtro antes.
 
 ## Testes
 
