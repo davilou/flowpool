@@ -48,12 +48,27 @@ const CHIP_DO_MODO = {
 
 // Quantos arquivos cada modo anexa, e o que cada um significa. O transporte usa UM
 // `input[type=file]` para tudo e deixa o MODO decidir o papel de cada arquivo — em
-// `frames2v` viram frame inicial e final, em `ingredients2v` viram referencias. Nos
-// outros dois o transporte simplesmente nao anexa nada, e por isso o `+` fica travado.
+// `frames2v` viram frame inicial e final, em `ingredients2v` e em `imagem` viram
+// referencias. Em `t2v` o transporte nao anexa nada, e por isso o `+` la troca o modo.
+//
+// IMAGEM ENTROU AQUI, e nao e detalhe: o Flow gera imagem A PARTIR de uma foto (e o
+// Nano Banana), e o pipeline do usuario COMECA nisso — foto da roupa -> imagem da
+// modelo vestida. Enquanto imagem nao estava neste mapa, colar uma referencia trocava
+// o modo para video sozinho, e trocar de volta para imagem apagava a referencia: o
+// vaivem que a pessoa relatou como "colo a imagem e ela some".
 const PAPEIS = {
   "frames2v": ["frame inicial", "frame final"],
   "ingredients2v": ["referência 1", "referência 2", "referência 3"],
+  "imagem": ["referência 1", "referência 2", "referência 3"],
 };
+
+// ACEITAR arquivo e EXIGIR arquivo sao coisas diferentes. `frames2v` sem frame inicial
+// e `ingredients2v` sem referencia nao tem o que gerar; imagem sem referencia e o caso
+// comum — geracao por texto puro. Confundir as duas transformaria toda geracao de
+// imagem num erro antes de sair. Mesma regra do servidor (`tipos.exige_arquivo`).
+const EXIGEM_ANEXO = ["frames2v", "ingredients2v"];
+
+function exigeAnexo() { return EXIGEM_ANEXO.includes(cfg.modo); }
 
 let contas = [];
 let jobs = [];
@@ -438,16 +453,15 @@ function ajustarChip() {
       + "só oferece 9:16 e 16:9. A duração muda o preço: 4s custa 7 créditos e 8s custa 12 "
       + "no Omni Flash."
     : "Imagem não tem duração (o painel do Flow não oferece o grupo nesse modo) e aceita até "
-      + "4 variações na mesma geração — cada uma custa cheio.";
+      + "4 variações na mesma geração — cada uma custa cheio. Aceita também até 3 "
+      + "referências: é assim que a foto da roupa vira a imagem da modelo vestida.";
 
   $("chip-texto").textContent = textoDoChip();
 
-  // O `+` fica clicavel em TODOS os modos, e nos que nao anexam nada (t2v, imagem) ele
-  // troca o modo para "referências" — que e o que a pessoa quis dizer ao anexar. A
-  // alternativa, travar o botao, ficou insustentavel quando Ctrl+V passou a existir:
-  // colar em modo imagem troca o modo (e o que faz o arquivo chegar ao Flow em vez de
-  // ser ignorado em silencio), e um `+` travado ao lado de um Ctrl+V que funciona sao
-  // duas regras discordando na mesma barra.
+  // O `+` fica clicavel em TODOS os modos. Em `t2v` — o unico que nao anexa nada — ele
+  // troca o modo para "vídeo — referências", que e o que a pessoa quis dizer ao anexar.
+  // Nos outros tres o modo FICA COMO ESTA: era o vaivem antigo que trocava imagem por
+  // video sozinho e fazia a referencia sumir na volta.
   $("botao-mais").title = PAPEIS[cfg.modo]
     ? "anexar imagens do disco (ou cole com Ctrl+V, ou arraste para cá)"
     : "anexar referências — o tipo passa para “vídeo — referências”";
@@ -565,7 +579,11 @@ function corpoDoJob() {
     corpo.frame_inicial = anexos[0] || "";
     if (anexos[1]) corpo.frame_final = anexos[1];
   }
-  if (cfg.modo === "ingredients2v") corpo.referencias = anexos.slice(0, MAX_REFERENCIAS);
+  // referencias valem em `ingredients2v` E em `imagem` — nos dois o teto e tres. Em
+  // imagem a lista pode ser vazia, e vazia significa geracao por texto puro.
+  if (PAPEIS[cfg.modo] && cfg.modo !== "frames2v") {
+    corpo.referencias = anexos.slice(0, MAX_REFERENCIAS);
+  }
   return corpo;
 }
 
@@ -591,7 +609,7 @@ async function enviar(ev) {
     mostrar($("erro-job"), "Espere a imagem terminar de anexar — falta um instante.");
     return;
   }
-  if (!anexos.length && PAPEIS[cfg.modo]) {
+  if (!anexos.length && exigeAnexo()) {
     mostrar($("erro-job"), cfg.modo === "frames2v"
       ? "Este modo gera a partir de frames: use o + para escolher ao menos o frame inicial."
       : "Este modo gera a partir de referências: use o + para escolher ao menos uma.");
@@ -851,7 +869,9 @@ async function abrirSeletor() {
   seletor = { caminho: "", pai: null, arquivos: [] };
   $("seletor-titulo").textContent = cfg.modo === "frames2v"
     ? "Escolher os frames — inicial e final" : "Escolher referências — até 3";
-  $("seletor-tres").classList.toggle("oculto", cfg.modo !== "ingredients2v");
+  // o atalho das tres serve a qualquer modo de referencia, e imagem virou um deles
+  $("seletor-tres").classList.toggle("oculto", cfg.modo === "frames2v"
+                                    || !PAPEIS[cfg.modo]);
   esconder($("seletor-erro"));
   $("seletor-corpo").innerHTML = `<div class="modal-vazio">Lendo a pasta…</div>`;
   $("seletor").classList.remove("oculto");
@@ -975,9 +995,15 @@ function urlDeImagem(texto) {
   }
 }
 
-/* Anexar uma referencia E dizer que se quer gerar com referencia. Em `t2v` e em `imagem`
-   o transporte nao anexa nada, entao aceitar o arquivo e nao trocar o modo seria aceitar
-   e ignorar em silencio. */
+/* Trocar o modo e o ULTIMO recurso, nao o primeiro. Se o modo atual ja aceita arquivo,
+   fica como esta — e por isso imagem, que agora aceita, deixou de ser sequestrada.
+
+   O vaivem que a pessoa descreveu vinha justamente daqui: colava, o painel forcava
+   `ingredients2v`; ela trocava para imagem, e a referencia caia fora pelo teto zero;
+   colava de novo, voltava para video. Duas regras discordando na mesma barra.
+
+   Em `t2v` a troca continua: la o transporte nao anexa nada, entao aceitar o arquivo e
+   nao trocar o modo seria aceitar e ignorar em silencio. */
 function garantirModoQueAceitaArquivo() {
   if (PAPEIS[cfg.modo]) return;
   cfg.modo = "ingredients2v";
