@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -32,16 +33,80 @@ def _txt(d: datetime | None) -> str | None:
     return d.astimezone(timezone.utc).isoformat()
 
 
+class _Resultado:
+    """O resultado de um `execute` ja DRENADO, com a mesma cara de um cursor.
+
+    Existe para que a trava de `_Conexao` possa ser solta com seguranca: se o cursor
+    saisse vivo, o `fetchall` do chamador aconteceria FORA dela, que e exatamente onde
+    a corrida acontecia. Nenhum lugar do Repo consome resultado aos poucos — todo mundo
+    ja chamava `fetchone`/`fetchall` na linha seguinte —, entao drenar nao muda nada
+    alem de fechar a janela.
+    """
+
+    __slots__ = ("_linhas", "lastrowid")
+
+    def __init__(self, linhas: list[sqlite3.Row], lastrowid: int | None) -> None:
+        self._linhas = linhas
+        self.lastrowid = lastrowid
+
+    def fetchone(self) -> sqlite3.Row | None:
+        return self._linhas[0] if self._linhas else None
+
+    def fetchall(self) -> list[sqlite3.Row]:
+        return self._linhas
+
+
+class _Conexao:
+    """A conexao do sqlite, serializada por uma trava.
+
+    `check_same_thread=False` AUTORIZA outra thread a usar a conexao, mas nao torna o
+    uso simultaneo seguro: a conexao tem um cache de statements, e duas threads pedindo
+    o mesmo SQL pegam o MESMO statement compilado. Uma reinicia enquanto a outra
+    caminha, e o que volta e linha com a descricao de uma consulta e os dados de outra
+    — que aparecia como `IndexError: tuple index out of range` ou
+    `ValueError: '' is not a valid Tier`, em 1 de cada 60 leituras concorrentes.
+
+    E concorrencia real, nao teorica: o FastAPI roda rota `def` sincrona num pool de
+    threads, e o painel pede `/saude`, `/contas` e `/jobs` de uma vez.
+
+    A trava, e nao uma conexao por thread: mesma conexao, mesma transacao, mesma
+    visibilidade de escrita que o resto do sistema ja assume. O custo e nulo — sqlite
+    local ja serializa a escrita de qualquer jeito, e as consultas daqui sao de tabelas
+    de dezenas de linhas.
+    """
+
+    def __init__(self, caminho: Path) -> None:
+        self._trava = threading.RLock()
+        self._con = sqlite3.connect(caminho, check_same_thread=False)
+        self._con.row_factory = sqlite3.Row
+        self._con.execute("PRAGMA foreign_keys = ON")
+        # Varios workers escrevem na mesma base. Sem isto o segundo escritor recebe
+        # "database is locked" na hora em vez de esperar a transacao curta do outro.
+        self._con.execute("PRAGMA busy_timeout = 5000")
+
+    def execute(self, sql: str, parametros=()) -> _Resultado:
+        with self._trava:
+            cur = self._con.execute(sql, parametros)
+            return _Resultado(cur.fetchall(), cur.lastrowid)
+
+    def executescript(self, sql: str) -> None:
+        with self._trava:
+            self._con.executescript(sql)
+
+    def commit(self) -> None:
+        with self._trava:
+            self._con.commit()
+
+    def close(self) -> None:
+        with self._trava:
+            self._con.close()
+
+
 class Repo:
     def __init__(self, caminho: Path | str) -> None:
         self.caminho = Path(caminho)
         self.caminho.parent.mkdir(parents=True, exist_ok=True)
-        self.con = sqlite3.connect(self.caminho, check_same_thread=False)
-        self.con.row_factory = sqlite3.Row
-        self.con.execute("PRAGMA foreign_keys = ON")
-        # Varios workers escrevem na mesma base. Sem isto o segundo escritor recebe
-        # "database is locked" na hora em vez de esperar a transacao curta do outro.
-        self.con.execute("PRAGMA busy_timeout = 5000")
+        self.con = _Conexao(self.caminho)
 
     def close(self) -> None:
         """Fecha a conexao.

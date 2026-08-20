@@ -260,3 +260,39 @@ def test_duracao_sobrevive_ao_banco(repo):
     id_ = repo.criar_job(Job(id=0, modo=Modo.T2V, modelo=Modelo.OMNI_FLASH,
                              prompt="p", destino="d", nome="n", duracao="10s"))
     assert repo.job(id_).duracao == "10s"
+
+
+def test_leitura_de_varias_threads_nao_embaralha_linha(repo):
+    """A conexao e compartilhada e o FastAPI roda rota sincrona num pool de threads.
+
+    Sem a trava, duas threads pedindo o mesmo SQL pegavam o MESMO statement compilado
+    do cache da conexao: uma reiniciava enquanto a outra caminhava, e voltava linha com
+    a descricao de uma consulta e os dados de outra. Dava `IndexError: tuple index out
+    of range` no `r["id"]` e `ValueError: '' is not a valid Tier`, em cerca de 1 de cada
+    60 leituras — o bastante para o painel tomar 500 sozinho enquanto ninguem mexia
+    nele, e raro o bastante para parecer fantasma.
+    """
+    import threading
+
+    for i in range(8):
+        repo.criar_conta(f"c{i}@x.com", Tier.FREE, f"p{i}")
+        repo.criar_job(Job(id=0, modo=Modo.T2V, modelo=Modelo.OMNI_FLASH, prompt="p",
+                           destino="d", nome=f"n{i}"))
+
+    falhas = []
+
+    def ler():
+        for _ in range(150):
+            try:
+                assert len(repo.contas()) == 8
+                assert len(repo.jobs()) == 8
+            except Exception as e:               # noqa: BLE001 — o teste E sobre isso
+                falhas.append(f"{type(e).__name__}: {e}")
+
+    fios = [threading.Thread(target=ler) for _ in range(4)]
+    for f in fios:
+        f.start()
+    for f in fios:
+        f.join()
+
+    assert falhas == []
