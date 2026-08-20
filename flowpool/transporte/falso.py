@@ -8,7 +8,8 @@ from pathlib import Path
 from flowpool.nucleo.custos import custo_de
 from flowpool.nucleo.tipos import Conta
 from flowpool.transporte.base import (
-    Estado, Pedido, SaldoInsuficiente, Sessao, SessaoMorta,
+    ErroTransporte, Estado, Pedido, ProjetoRemoto, SaldoInsuficiente, Sessao,
+    SessaoMorta,
 )
 
 
@@ -20,12 +21,15 @@ class TransporteFalso:
     - `falha_em`: a geracao e aceita e volta `FALHOU`.
     - `passos_rodando`: as N primeiras consultas de cada geracao voltam `RODANDO`.
     - `nunca_termina`: a geracao fica `RODANDO` para sempre, para exercitar timeout.
+    - `projetos`: nomes de projeto que ja existem em cada conta, como se tivessem sido
+      criados na mao pelo site. E o que exercita a adocao.
     """
 
     def __init__(self, saldos: dict[int, int], mortas: set[int] | None = None,
                  falha_em: set[int] | None = None, latencia: float = 0.0,
                  passos_rodando: int = 0, nunca_termina: set[int] | None = None,
-                 morre_ao_gerar: set[int] | None = None) -> None:
+                 morre_ao_gerar: set[int] | None = None,
+                 projetos: dict[int, list[str]] | None = None) -> None:
         self.saldos = dict(saldos)
         self.mortas = mortas or set()
         self.falha_em = falha_em or set()
@@ -36,6 +40,16 @@ class TransporteFalso:
         self.geracoes: dict[str, tuple[int, Estado]] = {}
         self.consultas: dict[str, int] = {}
         self._seq = 0
+        # projetos por conta: nenhuma conta enxerga os projetos da outra
+        self.projetos: dict[int, list[ProjetoRemoto]] = {}
+        self.abertos: dict[int, str] = {}
+        # quantas vezes `criar_projeto` foi chamado; e o contador que denuncia
+        # duplicacao quando o reuso ou a adocao param de funcionar
+        self.criacoes_projeto = 0
+        self._seq_projeto = 0
+        for conta_id, nomes in (projetos or {}).items():
+            for nome in nomes:
+                self._novo_projeto(conta_id, nome)
 
     async def abrir_sessao(self, conta: Conta) -> Sessao:
         if conta.id in self.mortas:
@@ -44,6 +58,28 @@ class TransporteFalso:
 
     async def saldo(self, s: Sessao) -> int:
         return self.saldos.get(s.conta.id, 0)
+
+    def _novo_projeto(self, conta_id: int, nome: str) -> ProjetoRemoto:
+        self._seq_projeto += 1
+        p = ProjetoRemoto(id_remoto=f"proj-{self._seq_projeto}", nome=nome)
+        self.projetos.setdefault(conta_id, []).append(p)
+        return p
+
+    async def listar_projetos(self, s: Sessao) -> list[ProjetoRemoto]:
+        return list(self.projetos.get(s.conta.id, []))
+
+    async def criar_projeto(self, s: Sessao, nome: str) -> str:
+        self.criacoes_projeto += 1
+        return self._novo_projeto(s.conta.id, nome).id_remoto
+
+    async def abrir_projeto(self, s: Sessao, id_remoto: str) -> None:
+        # a conta so abre projeto seu: o Flow devolve erro para id de outra conta, e o
+        # falso precisa reproduzir isso ou o motor passaria no teste e falharia no real
+        meus = {p.id_remoto for p in self.projetos.get(s.conta.id, [])}
+        if id_remoto not in meus:
+            raise ErroTransporte(
+                f"projeto {id_remoto} nao pertence a conta {s.conta.email}")
+        self.abertos[s.conta.id] = id_remoto
 
     async def gerar(self, s: Sessao, p: Pedido) -> str:
         await asyncio.sleep(self.latencia)

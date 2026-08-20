@@ -87,7 +87,20 @@ class Orquestrador:
             if job is None:
                 return False
 
-            conta = self._conta_para(job, agora)
+            try:
+                conta = self._conta_para(job, agora)
+            except Exception as e:
+                # `reivindicar` ja marcou o job `rodando`. Deixar a excecao subir
+                # daqui o deixaria travado nesse estado ate o proximo boot — e
+                # `ModeloSemCusto`, que e erro de configuracao, e exatamente o caso
+                # que chega aqui. Gasta tentativa: reprocessar para sempre um modelo
+                # sem custo cadastrado nao conserta o cadastro.
+                erro = f"{type(e).__name__}: {e}"
+                self.repo.registrar_evento(job.id, None, "escolha_falhou",
+                                           json.dumps({"erro": erro}))
+                self._devolver(job, erro, gasta_tentativa=True)
+                return True
+
             if conta is None:
                 job.estado = EstadoJob.PENDENTE
                 job.reavaliar_em = agora + ESPERA_RESET
@@ -127,6 +140,7 @@ class Orquestrador:
         sessao = None
         try:
             sessao = await self.transporte.abrir_sessao(conta)
+            await self._resolver_projeto(sessao, job, conta)
             if not retomando:
                 # a conta mudou: a geracao anterior nao serve mais, comeca do zero
                 job.id_remoto = None
@@ -220,6 +234,44 @@ class Orquestrador:
                 except Exception as e:
                     self.repo.registrar_evento(job.id, conta.id, "fechar_falhou",
                                                json.dumps({"erro": str(e)}))
+
+    async def _resolver_projeto(self, sessao, job: Job, conta: Conta) -> None:
+        """Deixa a sessao dentro do projeto certo antes de gerar.
+
+        Toda geracao do Flow acontece dentro de um projeto, e o projeto tem id na URL.
+        A politica e um projeto por produto EM CADA CONTA — projeto pertence a uma
+        conta so, entao nao existe "o projeto do Vestido Vermelho", existe um em cada
+        conta que gerou algo dele.
+
+        Ordem: banco local, depois lista remota (adocao), depois criacao. O passo do
+        meio existe porque sem ele apagar o `flowpool.db` ou criar um projeto na mao
+        pelo site faria o app duplicar tudo, e projeto duplicado no Flow e bagunca que
+        ninguem limpa depois.
+
+        Job sem `produto` (criado direto pelo repo) nao tem projeto a resolver: criar
+        um chamado "" seria pior do que nao criar nada.
+        """
+        if not job.produto:
+            return
+
+        conhecido = self.repo.projeto_de(conta.id, job.produto)
+        if conhecido is not None:
+            await self.transporte.abrir_projeto(sessao, conhecido.id_remoto)
+            return
+
+        remotos = await self.transporte.listar_projetos(sessao)
+        achado = next((p for p in remotos if p.nome == job.produto), None)
+        if achado is not None:
+            id_remoto, nome, tipo = achado.id_remoto, achado.nome, "projeto_adotado"
+        else:
+            id_remoto = await self.transporte.criar_projeto(sessao, job.produto)
+            nome, tipo = job.produto, "projeto_criado"
+
+        self.repo.registrar_projeto(conta.id, job.produto, id_remoto, nome)
+        self.repo.registrar_evento(
+            job.id, conta.id, tipo,
+            json.dumps({"produto": job.produto, "id_remoto": id_remoto}))
+        await self.transporte.abrir_projeto(sessao, id_remoto)
 
     def _evento_de_falha(self, job: Job, conta: Conta, tipo: str,
                          extra: dict | None = None) -> None:

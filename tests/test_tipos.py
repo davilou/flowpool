@@ -1,6 +1,8 @@
 from datetime import datetime, timezone
 
-from flowpool.nucleo.tipos import Conta, EstadoJob, Job, Modelo, Modo, SaudeSessao, Tier
+from flowpool.nucleo.tipos import (
+    Conta, EstadoJob, Job, Modelo, Modo, Projeto, SaudeSessao, Tier,
+)
 
 
 def test_conta_nasce_viva_e_ativa():
@@ -46,3 +48,24 @@ def test_conta_nasce_sem_prazo_de_seca():
     assert c.seca_ate is None
     c.seca_ate = datetime(2026, 8, 20, 13, 0, tzinfo=timezone.utc)
     assert c.seca_ate.hour == 13
+
+
+def test_projeto_liga_uma_conta_a_um_produto():
+    # projeto pertence a UMA conta: a chave e o par (conta, produto), nunca o produto
+    # sozinho — a conta g2 nao enxerga nem abre projeto da g1
+    p = Projeto(id=1, conta_id=2, produto="Panelas Monaco",
+                id_remoto="a1b2c3", nome_remoto="Panelas Monaco")
+    assert p.conta_id == 2
+    assert p.produto == "Panelas Monaco"
+    assert p.id_remoto == "a1b2c3"
+    assert p.criado_em is None
+
+
+def test_job_nasce_sem_produto():
+    # o default existe so para nao quebrar a ordem dos campos da dataclass;
+    # na pratica a API exige `produto`
+    j = Job(id=1, modo=Modo.T2V, modelo=Modelo.VEO_FAST, prompt="p", destino="x", nome="c1")
+    assert j.produto == ""
+    outro = Job(id=2, modo=Modo.T2V, modelo=Modelo.VEO_FAST, prompt="p", destino="x",
+                nome="c1", produto="Panelas Monaco")
+    assert outro.produto == "Panelas Monaco"

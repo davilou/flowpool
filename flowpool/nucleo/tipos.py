@@ -67,6 +67,10 @@ class Job:
     prompt: str
     destino: str
     nome: str
+    # Pasta do produto na pasta do usuario ("Panelas Monaco") e, ao mesmo tempo, o nome
+    # do projeto no Flow. Tem default so para nao quebrar a ordem dos campos da
+    # dataclass; a API exige.
+    produto: str = ""
     referencias: list[str] = field(default_factory=list)
     frame_inicial: str | None = None
     frame_final: str | None = None
@@ -81,3 +85,20 @@ class Job:
     reavaliar_em: datetime | None = None
     criado_em: datetime | None = None
     atualizado_em: datetime | None = None
+
+
+@dataclass
+class Projeto:
+    """Vinculo entre uma conta e um projeto do Flow.
+
+    Projeto pertence a UMA conta: a `g2` nao enxerga nem abre projeto da `g1`. Por isso
+    a chave e o par (conta, produto) — nao existe "o projeto do Vestido Vermelho",
+    existe um projeto do Vestido Vermelho em cada conta que gerou algo dele.
+    """
+
+    id: int
+    conta_id: int
+    produto: str
+    id_remoto: str
+    nome_remoto: str
+    criado_em: datetime | None = None

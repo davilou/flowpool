@@ -18,7 +18,7 @@ def cliente(tmp_path):
 def test_criar_job_devolve_id_e_estado_pendente(cliente):
     c, _ = cliente
     r = c.post("/jobs", json={"modo": "t2v", "modelo": "veo-fast", "prompt": "uma gata",
-                              "destino": "clipes", "nome": "c1"})
+                              "produto": "Video Roupa", "nome": "c1"})
     assert r.status_code == 201
     assert r.json()["estado"] == "pendente"
     assert isinstance(r.json()["id"], int)
@@ -32,8 +32,8 @@ def test_consultar_job_inexistente_da_404(cliente):
 def test_lote_cria_varios_jobs(cliente):
     c, _ = cliente
     corpo = {"jobs": [
-        {"modo": "t2v", "modelo": "veo-fast", "prompt": "a", "destino": "d", "nome": "c1"},
-        {"modo": "t2v", "modelo": "veo-lite", "prompt": "b", "destino": "d", "nome": "c2"},
+        {"modo": "t2v", "modelo": "veo-fast", "prompt": "a", "produto": "Moda", "nome": "c1"},
+        {"modo": "t2v", "modelo": "veo-lite", "prompt": "b", "produto": "Moda", "nome": "c2"},
     ]}
     r = c.post("/jobs/lote", json=corpo)
     assert r.status_code == 201
@@ -43,7 +43,7 @@ def test_lote_cria_varios_jobs(cliente):
 def test_ingredients2v_recusa_mais_de_tres_referencias(cliente):
     c, _ = cliente
     r = c.post("/jobs", json={"modo": "ingredients2v", "modelo": "veo-fast",
-                              "prompt": "p", "destino": "d", "nome": "n",
+                              "prompt": "p", "produto": "Moda", "nome": "n",
                               "referencias": ["1.png", "2.png", "3.png", "4.png"]})
     assert r.status_code == 422
 
@@ -51,14 +51,40 @@ def test_ingredients2v_recusa_mais_de_tres_referencias(cliente):
 def test_frames2v_exige_frame_inicial(cliente):
     c, _ = cliente
     r = c.post("/jobs", json={"modo": "frames2v", "modelo": "veo-fast", "prompt": "p",
+                              "produto": "Moda", "nome": "n"})
+    assert r.status_code == 422
+
+
+def test_produto_e_obrigatorio(cliente):
+    # sem produto nao ha projeto a resolver: cada geracao criaria um projeto novo
+    c, _ = cliente
+    r = c.post("/jobs", json={"modo": "t2v", "modelo": "veo-fast", "prompt": "p",
                               "destino": "d", "nome": "n"})
     assert r.status_code == 422
+
+
+def test_destino_deriva_do_produto_quando_ausente(cliente):
+    # na pasta do usuario cada produto ja e uma pasta; repetir o caminho e ruido
+    c, repo = cliente
+    jid = c.post("/jobs", json={"modo": "t2v", "modelo": "veo-fast", "prompt": "p",
+                                "produto": "Panelas Monaco", "nome": "n"}).json()["id"]
+    j = repo.job(jid)
+    assert j.produto == "Panelas Monaco"
+    assert j.destino == "Panelas Monaco/clipes"
+
+
+def test_destino_explicito_e_respeitado(cliente):
+    c, repo = cliente
+    jid = c.post("/jobs", json={"modo": "t2v", "modelo": "veo-fast", "prompt": "p",
+                                "produto": "Panelas Monaco", "nome": "n",
+                                "destino": "Benchmark Roupa/brutos"}).json()["id"]
+    assert repo.job(jid).destino == "Benchmark Roupa/brutos"
 
 
 def test_cancelar_job_pendente(cliente):
     c, _ = cliente
     jid = c.post("/jobs", json={"modo": "t2v", "modelo": "veo-fast", "prompt": "p",
-                                "destino": "d", "nome": "n"}).json()["id"]
+                                "produto": "Moda", "nome": "n"}).json()["id"]
     assert c.delete(f"/jobs/{jid}").status_code == 200
     assert c.get(f"/jobs/{jid}").json()["estado"] == "cancelado"
 
@@ -81,8 +107,38 @@ def test_saude_resume_o_pool(cliente):
     cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
     conta = repo.conta(cid); conta.saldo = 40; repo.salvar_conta(conta)
     c.post("/jobs", json={"modo": "t2v", "modelo": "veo-fast", "prompt": "p",
-                          "destino": "d", "nome": "n"})
+                          "produto": "Moda", "nome": "n"})
     s = c.get("/saude").json()
     assert s["contas_vivas"] == 1
     assert s["credito_total"] == 40
     assert s["fila_pendente"] == 1
+
+
+def test_listar_projetos_e_filtrar(cliente):
+    c, repo = cliente
+    g1 = repo.criar_conta("g1@b.com", Tier.FREE, "p/1")
+    g2 = repo.criar_conta("g2@b.com", Tier.FREE, "p/2")
+    repo.registrar_projeto(g1, "Moda", "rem-1", "Moda")
+    repo.registrar_projeto(g1, "Vestir", "rem-2", "Vestir")
+    repo.registrar_projeto(g2, "Moda", "rem-3", "Moda")
+
+    assert len(c.get("/projetos").json()) == 3
+    assert len(c.get("/projetos", params={"conta_id": g1}).json()) == 2
+    por_produto = c.get("/projetos", params={"produto": "Moda"}).json()
+    assert {p["id_remoto"] for p in por_produto} == {"rem-1", "rem-3"}
+
+
+def test_esquecer_projeto_avisa_que_o_flow_nao_e_tocado(cliente):
+    c, repo = cliente
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    pid = repo.registrar_projeto(cid, "Moda", "rem-1", "Moda")
+
+    r = c.delete(f"/projetos/{pid}")
+    assert r.status_code == 200
+    assert "Flow" in r.json()["aviso"]
+    assert repo.projeto_de(cid, "Moda") is None
+
+
+def test_esquecer_projeto_inexistente_da_404(cliente):
+    c, _ = cliente
+    assert c.delete("/projetos/999").status_code == 404

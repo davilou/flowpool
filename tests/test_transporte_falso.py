@@ -1,7 +1,9 @@
 import pytest
 
 from flowpool.nucleo.tipos import Conta, Modelo, Modo, Tier
-from flowpool.transporte.base import Pedido, SaldoInsuficiente, SessaoMorta, Estado
+from flowpool.transporte.base import (
+    ErroTransporte, Estado, Pedido, ProjetoRemoto, SaldoInsuficiente, SessaoMorta,
+)
 from flowpool.transporte.falso import TransporteFalso
 
 
@@ -85,3 +87,47 @@ async def test_morre_ao_gerar_levanta_sessao_morta_sem_cobrar():
         await t.gerar(s, pedido())
     assert await t.saldo(s) == 50
     assert t.geracoes == {}
+
+
+async def test_conta_nova_nao_tem_projeto_nenhum():
+    t = TransporteFalso(saldos={1: 50})
+    s = await t.abrir_sessao(conta())
+    assert await t.listar_projetos(s) == []
+
+
+async def test_criar_projeto_devolve_id_e_conta_as_chamadas():
+    t = TransporteFalso(saldos={1: 50})
+    s = await t.abrir_sessao(conta())
+    assert await t.criar_projeto(s, "Panelas Monaco") == "proj-1"
+    assert await t.criar_projeto(s, "Video Roupa") == "proj-2"
+    assert t.criacoes_projeto == 2
+    assert await t.listar_projetos(s) == [
+        ProjetoRemoto(id_remoto="proj-1", nome="Panelas Monaco"),
+        ProjetoRemoto(id_remoto="proj-2", nome="Video Roupa"),
+    ]
+
+
+async def test_projeto_de_uma_conta_nao_aparece_na_outra():
+    # e a restricao que define o desenho: projeto pertence a UMA conta
+    t = TransporteFalso(saldos={1: 50, 2: 50})
+    g1 = await t.abrir_sessao(conta())
+    g2 = await t.abrir_sessao(Conta(id=2, email="g2@b.com", tier=Tier.FREE, perfil="p"))
+    await t.criar_projeto(g1, "Moda")
+    assert await t.listar_projetos(g2) == []
+
+
+async def test_abrir_projeto_registra_o_aberto():
+    t = TransporteFalso(saldos={1: 50})
+    s = await t.abrir_sessao(conta())
+    id_remoto = await t.criar_projeto(s, "Moda")
+    await t.abrir_projeto(s, id_remoto)
+    assert t.abertos[1] == id_remoto
+
+
+async def test_abrir_projeto_de_outra_conta_levanta():
+    t = TransporteFalso(saldos={1: 50, 2: 50})
+    g1 = await t.abrir_sessao(conta())
+    g2 = await t.abrir_sessao(Conta(id=2, email="g2@b.com", tier=Tier.FREE, perfil="p"))
+    alheio = await t.criar_projeto(g1, "Moda")
+    with pytest.raises(ErroTransporte):
+        await t.abrir_projeto(g2, alheio)

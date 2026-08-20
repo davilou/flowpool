@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS job (
     prompt         TEXT    NOT NULL,
     destino        TEXT    NOT NULL,
     nome           TEXT    NOT NULL,
+    produto        TEXT    NOT NULL DEFAULT '',
     referencias    TEXT    NOT NULL DEFAULT '[]',
     frame_inicial  TEXT,
     frame_final    TEXT,
@@ -37,6 +38,16 @@ CREATE TABLE IF NOT EXISTS job (
 );
 
 CREATE INDEX IF NOT EXISTS idx_job_fila ON job (estado, prioridade DESC, id);
+
+CREATE TABLE IF NOT EXISTS projeto (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    conta_id    INTEGER NOT NULL REFERENCES conta(id),
+    produto     TEXT    NOT NULL,
+    id_remoto   TEXT    NOT NULL,
+    nome_remoto TEXT    NOT NULL,
+    criado_em   TEXT    NOT NULL,
+    UNIQUE (conta_id, produto)
+);
 
 CREATE TABLE IF NOT EXISTS evento (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,

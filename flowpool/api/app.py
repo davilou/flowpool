@@ -7,7 +7,8 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 
 from flowpool.api.esquemas import (
-    NovaConta, PatchConta, PedidoJob, PedidoLote, RespostaConta, RespostaJob, Saude,
+    NovaConta, PatchConta, PedidoJob, PedidoLote, RespostaConta, RespostaJob,
+    RespostaProjeto, Saude,
 )
 from flowpool.dados.repo import Repo
 from flowpool.motor.orquestrador import Orquestrador
@@ -16,15 +17,18 @@ from flowpool.transporte.base import FlowTransport
 
 
 def _job_de(p: PedidoJob) -> Job:
+    # `destino` nunca chega None aqui: o validador de `PedidoJob` ja o derivou do
+    # produto quando o pedido veio sem ele.
     return Job(id=0, modo=p.modo, modelo=p.modelo, prompt=p.prompt, destino=p.destino,
-               nome=p.nome, referencias=p.referencias, frame_inicial=p.frame_inicial,
-               frame_final=p.frame_final, prioridade=p.prioridade)
+               nome=p.nome, produto=p.produto, referencias=p.referencias,
+               frame_inicial=p.frame_inicial, frame_final=p.frame_final,
+               prioridade=p.prioridade)
 
 
 def _resposta(j: Job) -> RespostaJob:
     return RespostaJob(id=j.id, estado=j.estado, modo=j.modo, modelo=j.modelo,
-                       nome=j.nome, conta_id=j.conta_id, arquivo=j.arquivo,
-                       tentativas=j.tentativas, erro=j.erro)
+                       nome=j.nome, produto=j.produto, conta_id=j.conta_id,
+                       arquivo=j.arquivo, tentativas=j.tentativas, erro=j.erro)
 
 
 def criar_app(repo: Repo, transporte: FlowTransport, raiz: Path | str,
@@ -75,6 +79,36 @@ def criar_app(repo: Repo, transporte: FlowTransport, raiz: Path | str,
         j.estado = EstadoJob.CANCELADO
         repo.salvar_job(j)
         return _resposta(j)
+
+    @app.get("/projetos", response_model=list[RespostaProjeto])
+    def listar_projetos(conta_id: int | None = None,
+                        produto: str | None = None) -> list[RespostaProjeto]:
+        """Projetos do Flow ja vinculados a cada conta.
+
+        Um produto aparece uma vez por conta que gerou algo dele: projeto pertence a
+        uma conta so, e a `g2` nao abre o projeto da `g1`.
+        """
+        achados = repo.projetos(conta_id)
+        if produto is not None:
+            achados = [p for p in achados if p.produto == produto]
+        return [RespostaProjeto(id=p.id, conta_id=p.conta_id, produto=p.produto,
+                                id_remoto=p.id_remoto, nome_remoto=p.nome_remoto)
+                for p in achados]
+
+    @app.delete("/projetos/{id_}")
+    def esquecer_projeto(id_: int) -> dict:
+        """Esquece o vinculo LOCAL. NAO apaga o projeto no Flow.
+
+        O projeto continua la, com tudo que ja foi gerado dentro dele. Na proxima
+        geracao daquele produto naquela conta ele volta a ser adotado pelo nome.
+        """
+        alvo = next((p for p in repo.projetos() if p.id == id_), None)
+        if alvo is None:
+            raise HTTPException(404, "projeto nao existe")
+        repo.esquecer_projeto(id_)
+        return {"id": id_, "esquecido": True,
+                "aviso": "o vinculo local foi apagado; o projeto continua existindo "
+                         "no Flow e sera readotado pelo nome na proxima geracao"}
 
     @app.get("/contas", response_model=list[RespostaConta])
     def listar_contas() -> list[RespostaConta]:

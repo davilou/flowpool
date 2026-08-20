@@ -149,3 +149,68 @@ def test_registrar_evento_e_listar_por_job(repo):
     eventos = repo.eventos(job_id=jid)
     assert len(eventos) == 1
     assert eventos[0]["tipo"] == "despachado"
+
+
+def test_registrar_e_ler_projeto(repo):
+    cid = repo.criar_conta(email="a@b.com", tier=Tier.FREE, perfil="p/1")
+    pid = repo.registrar_projeto(cid, "Panelas Monaco", "a1b2c3", "Panelas Monaco")
+    p = repo.projeto_de(cid, "Panelas Monaco")
+    assert p.id == pid
+    assert p.id_remoto == "a1b2c3"
+    assert p.nome_remoto == "Panelas Monaco"
+    assert p.criado_em is not None
+
+
+def test_projeto_de_produto_nunca_visto_e_none(repo):
+    cid = repo.criar_conta(email="a@b.com", tier=Tier.FREE, perfil="p/1")
+    assert repo.projeto_de(cid, "Furadeira Pnoeoce") is None
+
+
+def test_mesmo_produto_em_duas_contas_sao_dois_projetos(repo):
+    # projeto pertence a UMA conta: a g2 nao abre o projeto da g1, entao o mesmo
+    # produto precisa de um projeto proprio em cada conta
+    g1 = repo.criar_conta(email="g1@b.com", tier=Tier.FREE, perfil="p/1")
+    g2 = repo.criar_conta(email="g2@b.com", tier=Tier.FREE, perfil="p/2")
+    repo.registrar_projeto(g1, "Video Roupa", "rem-1", "Video Roupa")
+    repo.registrar_projeto(g2, "Video Roupa", "rem-2", "Video Roupa")
+
+    assert repo.projeto_de(g1, "Video Roupa").id_remoto == "rem-1"
+    assert repo.projeto_de(g2, "Video Roupa").id_remoto == "rem-2"
+    assert len(repo.projetos()) == 2
+
+
+def test_registrar_o_mesmo_par_duas_vezes_nao_duplica(repo):
+    # duas corridas simultaneas na mesma dupla (conta, produto) nao podem virar duas
+    # linhas: projeto duplicado no Flow e bagunca que ninguem limpa depois
+    cid = repo.criar_conta(email="a@b.com", tier=Tier.FREE, perfil="p/1")
+    primeiro = repo.registrar_projeto(cid, "Moda", "rem-1", "Moda")
+    segundo = repo.registrar_projeto(cid, "Moda", "rem-2", "Moda")
+    assert primeiro == segundo
+    assert len(repo.projetos(cid)) == 1
+    assert repo.projeto_de(cid, "Moda").id_remoto == "rem-2"
+
+
+def test_projetos_filtra_por_conta(repo):
+    g1 = repo.criar_conta(email="g1@b.com", tier=Tier.FREE, perfil="p/1")
+    g2 = repo.criar_conta(email="g2@b.com", tier=Tier.FREE, perfil="p/2")
+    repo.registrar_projeto(g1, "Moda", "rem-1", "Moda")
+    repo.registrar_projeto(g1, "Vestir", "rem-2", "Vestir")
+    repo.registrar_projeto(g2, "Moda", "rem-3", "Moda")
+
+    assert len(repo.projetos(g1)) == 2
+    assert [p.id_remoto for p in repo.projetos(g2)] == ["rem-3"]
+
+
+def test_esquecer_projeto_apaga_so_o_vinculo_local(repo):
+    cid = repo.criar_conta(email="a@b.com", tier=Tier.FREE, perfil="p/1")
+    pid = repo.registrar_projeto(cid, "Moda", "rem-1", "Moda")
+    repo.esquecer_projeto(pid)
+    assert repo.projeto_de(cid, "Moda") is None
+    assert repo.projetos() == []
+
+
+def test_produto_do_job_sobrevive_ao_banco(repo):
+    id_ = repo.criar_job(Job(id=0, modo=Modo.T2V, modelo=Modelo.VEO_FAST, prompt="p",
+                             destino="Panelas Monaco/clipes", nome="c1",
+                             produto="Panelas Monaco"))
+    assert repo.job(id_).produto == "Panelas Monaco"

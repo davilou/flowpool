@@ -20,9 +20,9 @@ def repo(tmp_path):
     return r
 
 
-def job_fast(nome="c1", modelo=Modelo.VEO_FAST):
+def job_fast(nome="c1", modelo=Modelo.VEO_FAST, produto=""):
     return Job(id=0, modo=Modo.T2V, modelo=modelo, prompt="uma gata",
-               destino="clipes", nome=nome)
+               destino="clipes", nome=nome, produto=produto)
 
 
 async def test_job_roda_e_fica_pronto(repo, tmp_path):
@@ -348,3 +348,92 @@ async def test_workers_simultaneos_nao_pegam_o_mesmo_job(repo, tmp_path):
     assert len(t.geracoes) == 2
     assert repo.job(j1).estado is EstadoJob.PRONTO
     assert repo.job(j2).estado is EstadoJob.PRONTO
+
+
+async def test_projeto_e_criado_na_primeira_geracao_e_reusado_na_segunda(repo, tmp_path):
+    # sem reuso, cada geracao criaria um projeto novo e a conta viraria um lixao
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 500; repo.salvar_conta(c)
+    repo.criar_job(job_fast(nome="c1", produto="Panelas Monaco"))
+    repo.criar_job(job_fast(nome="c2", produto="Panelas Monaco"))
+
+    t = TransporteFalso(saldos={cid: 500})
+    orq = Orquestrador(repo, t, raiz=tmp_path)
+    await orq.passo()
+    await orq.passo()
+
+    assert t.criacoes_projeto == 1
+    assert len(repo.projetos(cid)) == 1
+    assert repo.projeto_de(cid, "Panelas Monaco").id_remoto == t.abertos[cid]
+
+
+async def test_mesmo_produto_em_duas_contas_gera_dois_projetos(repo, tmp_path):
+    # nao existe "o projeto do Vestido Vermelho": existe um em cada conta que gerou
+    g1 = repo.criar_conta("g1@b.com", Tier.FREE, "p/1")
+    g2 = repo.criar_conta("g2@b.com", Tier.FREE, "p/2")
+    for cid in (g1, g2):
+        c = repo.conta(cid); c.saldo = 20; repo.salvar_conta(c)   # cada uma paga 1 Fast
+    repo.criar_job(job_fast(nome="c1", produto="Vestido Vermelho"))
+    repo.criar_job(job_fast(nome="c2", produto="Vestido Vermelho"))
+
+    t = TransporteFalso(saldos={g1: 20, g2: 20})
+    orq = Orquestrador(repo, t, raiz=tmp_path)
+    await orq.passo()
+    await orq.passo()
+
+    assert t.criacoes_projeto == 2
+    remotos = {p.conta_id: p.id_remoto for p in repo.projetos()}
+    assert set(remotos) == {g1, g2}
+    assert remotos[g1] != remotos[g2]
+
+
+async def test_projeto_que_existe_no_remoto_e_adotado_sem_criar(repo, tmp_path):
+    # apagar o flowpool.db ou criar o projeto na mao pelo site nao pode duplicar tudo
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 50; repo.salvar_conta(c)
+    jid = repo.criar_job(job_fast(produto="Moda"))
+
+    t = TransporteFalso(saldos={cid: 50}, projetos={cid: ["Moda"]})
+    orq = Orquestrador(repo, t, raiz=tmp_path)
+    await orq.passo()
+
+    assert t.criacoes_projeto == 0
+    assert repo.projeto_de(cid, "Moda").id_remoto == "proj-1"
+    assert "projeto_adotado" in [e["tipo"] for e in repo.eventos(jid)]
+
+
+async def test_job_sem_produto_nao_mexe_em_projeto(repo, tmp_path):
+    # job criado direto pelo repo, sem produto: nao ha projeto a resolver
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 50; repo.salvar_conta(c)
+    jid = repo.criar_job(job_fast())
+
+    t = TransporteFalso(saldos={cid: 50})
+    orq = Orquestrador(repo, t, raiz=tmp_path)
+    await orq.passo()
+
+    assert repo.job(jid).estado is EstadoJob.PRONTO
+    assert t.criacoes_projeto == 0
+    assert repo.projetos() == []
+
+
+async def test_modelo_sem_custo_na_escolha_devolve_o_job_e_gasta_tentativa(
+        repo, tmp_path, monkeypatch):
+    # regressao: com a reivindicacao atomica o job ja esta `rodando` quando `escolher`
+    # levanta. Sem tratar aqui ele so seria destravado no proximo boot.
+    from flowpool.nucleo import custos
+
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 50; repo.salvar_conta(c)
+    jid = repo.criar_job(job_fast())
+
+    monkeypatch.setattr(custos, "_CUSTO", {})   # nenhum modelo tem custo cadastrado
+
+    orq = Orquestrador(repo, TransporteFalso(saldos={cid: 50}), raiz=tmp_path)
+    assert await orq.passo() is True
+
+    j = repo.job(jid)
+    assert j.estado is EstadoJob.PENDENTE
+    assert j.tentativas == 1          # erro de configuracao nao reprocessa para sempre
+    assert "escolha_falhou" in [e["tipo"] for e in repo.eventos(jid)]
+    assert repo.reivindicar(datetime.now(timezone.utc)) is not None   # ja destravado
