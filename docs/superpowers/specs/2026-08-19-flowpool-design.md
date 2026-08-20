@@ -46,7 +46,9 @@ Python 3.13 (mesmo do pipeline), FastAPI + uvicorn, SQLite, Playwright async, ht
 
 **conta** — id, email, tier (`free` | `pro` | `ultra`), caminho do perfil, saldo conhecido, timestamp da última leitura de saldo, timestamp do último reset observado, estado da sessão (`viva` | `expirada` | `bloqueada`), falhas consecutivas, ativa (bool).
 
-**job** — id, modo, prompt, referências (caminhos), modelo, custo estimado, prioridade, estado (`pending` | `running` | `done` | `failed` | `cancelled`), conta usada, id remoto da geração, caminho do arquivo final, tentativas, erro, timestamps.
+**job** — id, modo, prompt, referências (caminhos), modelo, prioridade, estado (`pending` | `running` | `done` | `failed` | `cancelled`), conta usada, id remoto da geração, caminho do arquivo final, tentativas, `custo_estimado`, erro, timestamps.
+
+`custo_estimado` é quanto o job reservou da conta ao ser despachado, e fica gravado no banco. É o que permite estornar a reserva de um job que morreu antes de gerar — inclusive depois de um restart do serviço, quando não há mais nada em memória dizendo quanto aquele job tinha travado.
 
 **evento** — id, job, conta, tipo, payload, timestamp. Trilha de auditoria; é o que permite descobrir por que um lote saiu torto três dias depois.
 
@@ -56,9 +58,19 @@ O saldo é **lido do Flow e reconciliado** com o débito previsto, não apenas d
 
 Regra: descontar o custo previsto na hora de despachar (para não estourar o saldo com jobs simultâneos) e reconciliar com a leitura real ao término. Divergência acima de um limiar vira evento e derruba a confiança no valor até a próxima leitura.
 
+Três detalhes que a regra acima esconde e sem os quais o pool se estraga sozinho:
+
+**Toda reserva que não vira geração é estornada** (`liberar`). Falha de rede, sessão que caiu, timeout — o Flow nunca chegou a cobrar, então o crédito volta. Sem estorno, três timeouts numa conta grátis de 50 créditos zeram o saldo local com os 50 créditos intactos no Flow, e a conta some do pool para sempre: ninguém despacha job para conta que parece seca. Pelo mesmo motivo, reservar sem saldo **recusa** (`SaldoInsuficiente`) em vez de zerar o saldo — zerar apagaria crédito real que ainda daria outra geração mais barata.
+
+**A divergência é medida com sinal, não em módulo.** Positivo significa que sobrou crédito (o custo real é menor que a tabela); negativo, que faltou (o Google cobrou mais). A distinção importa por dois motivos: é ela que responde a pergunta em aberto sobre imagem custar ou sair de graça, e só a direção pessimista derruba a confiança no saldo. Sobrar crédito é notícia boa, não sintoma de contabilidade furada.
+
+**O reset diário da conta grátis não é divergência.** Conta grátis que aparece de volta no teto de 50 não divergiu: ela resetou. O sistema registra o reset observado e mantém a confiança no saldo, em vez de tratar o salto como erro de contabilidade — o que derrubaria a confiança de todas as contas grátis uma vez por dia, todo dia.
+
 ## Escolha de conta
 
-Função pura: `escolher(contas, custo, permite_free) -> conta | None`.
+Função pura: `escolher(contas, modelo) -> Conta | None`.
+
+O parâmetro é o **modelo**, não um custo: o custo depende do tier (Ultra paga 10 por um Fast que custa 20 na grátis), então um número único não descreveria um pool misto — e é o modelo, não o custo, que diz se o job é Quality e portanto proibido em conta grátis.
 
 (`prioridade` no job é outra coisa: ordena a **fila**, não influencia a conta. Inteiro, maior primeiro, empate resolvido por ordem de chegada.)
 
