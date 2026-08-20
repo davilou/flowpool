@@ -307,5 +307,12 @@ BAIXAR = {
 AVISO_ALTA_DEMANDA = 'text=/high demand|alta demanda/i'
 
 # --- A PREENCHER --------------------------------------------------------
-AVISO_SEM_CREDITO = PENDENTE   # so aparece com a conta realmente sem saldo
+# MEDIDO 2026-08-20, numa conta que esgotou de verdade. Texto completo:
+#   "Seus creditos do Google Flow acabaram. Voce pode esperar a atualizacao deles ou
+#    fazer upgrade para receber mais creditos agora mesmo."
+# Casa-se so pelo comeco, que e a parte estavel — o resto da frase muda com a oferta
+# comercial da vez. E sem acento no seletor: o `:has-text` do Playwright compara o
+# texto cru da pagina, entao "creditos" sem acento NAO casaria. Por isso a classe de
+# caractere, que aceita as duas formas sem depender de como o arquivo foi salvo.
+AVISO_SEM_CREDITO = 'text=/Seus cr[eé]ditos do Google Flow acabaram/'
 BOTAO_PARAR = 'button:has-text("stop Parar")'
