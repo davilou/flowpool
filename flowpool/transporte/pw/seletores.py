@@ -98,7 +98,11 @@ UPLOAD = 'input[type=file]'
 # "50 Créditos do Google Flow". Ler saldo custa dois cliques (abrir e fechar o menu)
 # por geracao — considerar isso ao ajustar a frequencia de reconciliacao.
 AVATAR_CONTA = 'img[src*="googleusercontent"]'
-PADRAO_CREDITOS = r"(\d[\d.,]*)\s+Cr[ée]ditos"   # aplicar no innerText do menu aberto
+# `(?i)` e as duas grafias de "credito" nao sao zelo excessivo: `dom.seguro`
+# normaliza texto (minusculas, sem acento) para poder imprimir em console cp1252,
+# e no dia em que alguem ligar a leitura de saldo nele o padrao pararia de casar
+# e o saldo sumiria sem erro nenhum.
+PADRAO_CREDITOS = r"(?i)(\d[\d.,]*)\s+cr[ée]ditos"   # no innerText do menu aberto
 
 # --- menu do projeto (via BOTAO_MAIS_OPCOES) ----------------------------
 MENU_RENOMEAR = '[role=menuitem]:has-text("Renomear")'
@@ -141,8 +145,15 @@ BOTAO_MODO = {k: f'button:has-text("{lig}")' for k, lig in MODO_ICONE.items()}
 
 # O rotulo que o CHIP mostra para cada modo, ja normalizado (dom.sem_acento). E o que
 # a verificacao procura no texto do chip depois de configurar.
+# MEDIDO 2026-08-20 — o chip NAO nomeia o modo quando ele e imagem:
+#     video : "Video . 720p . 8s crop_9_16 x1"
+#     imagem: "<emoji> nano banana 2 lite crop_9_16 x1"
+# Em imagem, o lugar do nome do modo e ocupado pelo nome do MODELO. Procurar a palavra
+# "imagem" ali faz a verificacao recusar uma configuracao que estava correta — foi o
+# que aconteceu na primeira fumaca. `None` significa "este modo nao se anuncia no chip,
+# confira o resto"; o modelo ja e conferido a parte, no painel aberto.
 ROTULO_MODO_NO_CHIP = {
-    "imagem": "imagem", "t2v": "video",
+    "imagem": None, "t2v": "video",
     "frames2v": "frames", "ingredients2v": "elementos",
 }
 
@@ -187,16 +198,25 @@ QUANTIDADE = {n: f'button:text-is("x{n}")' for n in (1, 2, 3, 4)}
 DROPDOWN_MODELO = 'button:has-text("arrow_drop_down")'
 
 # Rotulos exatos, medidos em 2026-08-20 numa conta gratuita.
+# MEDIDO 2026-08-20 — o innerText de cada opcao tem PREFIXO, e ele muda por familia:
+#   imagem: '\U0001f34c Nano Banana 2 Lite'      (emoji)
+#   video : 'volume_up\nVeo 3.1 - Lite'   (ligadura + quebra de linha)
+# Por isso `:text-is` nunca casou: ele exige o texto INTEIRO, prefixo incluso.
+#
+# E `:has-text` sozinho tambem nao serve: "Nano Banana 2" e prefixo de "Nano Banana 2
+# Lite", entao casaria dois e o `exigir_unico` recusaria — corretamente, mas travando a
+# geracao. A saida e ancorar o FIM do rotulo com `:text-matches`, que ignora o prefixo
+# e distingue o par ambiguo.
 OPCAO_MODELO = {
     # video
-    "omni-flash": '[role=menuitem]:text-is("Omni Flash")',
-    "veo-lite": '[role=menuitem]:text-is("Veo 3.1 - Lite")',
-    "veo-fast": '[role=menuitem]:text-is("Veo 3.1 - Fast")',
-    "veo-quality": '[role=menuitem]:text-is("Veo 3.1 - Quality")',
+    "omni-flash": r'[role=menuitem]:text-matches("Omni Flash$")',
+    "veo-lite": r'[role=menuitem]:text-matches("Veo 3\.1 - Lite$")',
+    "veo-fast": r'[role=menuitem]:text-matches("Veo 3\.1 - Fast$")',
+    "veo-quality": r'[role=menuitem]:text-matches("Veo 3\.1 - Quality$")',
     # imagem
-    "nano-banana-pro": '[role=menuitem]:text-is("Nano Banana Pro")',
-    "nano-banana-2": '[role=menuitem]:text-is("Nano Banana 2")',
-    "nano-banana": '[role=menuitem]:text-is("Nano Banana 2 Lite")',
+    "nano-banana-pro": r'[role=menuitem]:text-matches("Nano Banana Pro$")',
+    "nano-banana-2": r'[role=menuitem]:text-matches("Nano Banana 2$")',
+    "nano-banana": r'[role=menuitem]:text-matches("Nano Banana 2 Lite$")',
 }
 # `:text-is` aqui nao e capricho: "Nano Banana 2" e prefixo de "Nano Banana 2 Lite", e
 # com `:has-text` pedir o 2 escolheria o Lite — mais barato, mais feio, sem erro.

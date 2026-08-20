@@ -92,10 +92,21 @@ class TransportePlaywright:
         _, _, pagina = s.handle
         await pagina.locator(sel.AVATAR_CONTA).first.click(timeout=15_000)
         try:
-            await pagina.wait_for_timeout(1200)
-            # a varredura passa por `dom` (regra 2: o __NEXT_DATA__ carrega o
-            # access_token em texto puro); quem interpreta e `analise`, que tem teste
-            return analise.saldo_do_texto(await pagina.evaluate(dom.TEXTOS_CURTOS, 60))
+            # ESPERA PELO CONTEUDO, nao por tempo. A versao anterior dormia 1200ms
+            # fixos e falhava de forma intermitente — passava numa execucao e quebrava
+            # na seguinte, com o menu ainda sem renderizar. Espera fixa em interface
+            # sempre vira isso: funciona ate a vez em que a maquina esta mais lenta.
+            erro: Exception | None = None
+            for _ in range(10):
+                await pagina.wait_for_timeout(600)
+                # a varredura passa por `dom` (regra 2: o __NEXT_DATA__ carrega o
+                # access_token em texto puro); quem interpreta e `analise`, que tem teste
+                try:
+                    return analise.saldo_do_texto(
+                        await pagina.evaluate(dom.TEXTOS_CURTOS, 60))
+                except GeracaoFalhou as e:
+                    erro = e
+            raise erro if erro else GeracaoFalhou("saldo nao apareceu no menu")
         finally:
             # sem fechar, o menu fica por cima do chip e do prompt na proxima geracao
             await pagina.keyboard.press("Escape")
@@ -105,16 +116,35 @@ class TransportePlaywright:
         _, _, pagina = s.handle
         await pagina.goto(sel.URL_FLOW, wait_until="domcontentloaded")
         await pagina.locator(sel.CARD_PROJETO).first.wait_for(timeout=30_000)
+        # MEDIDO: o proprio <a> do card NAO tem texto — `inner_text()` volta vazio e
+        # qualquer `.splitlines()[0]` estoura. O nome mora num ancestral. Sobe-se ate o
+        # ultimo ancestral que ainda contem UM SO link de projeto: acima disso vem o
+        # container da grade, cujo texto junta todos os projetos num so.
+        pares = await pagina.evaluate(
+            """(seletor) => [...document.querySelectorAll(seletor)].map(a => {
+                 let no = a, card = a;
+                 for (let i = 0; i < 6 && no.parentElement; i++) {
+                   no = no.parentElement;
+                   if (no.querySelectorAll(seletor).length === 1) card = no; else break;
+                 }
+                 return {href: a.getAttribute('href'),
+                         texto: (card.innerText || '').trim()};
+               })""",
+            sel.CARD_PROJETO,
+        )
         achados: list[ProjetoRemoto] = []
-        for card in await pagina.locator(sel.CARD_PROJETO).all():
-            id_remoto = analise.id_do_href(await card.get_attribute("href"))
+        for par in pares:
+            id_remoto = analise.id_do_href(par["href"])
             if not id_remoto:
                 continue
-            # `sem_segredo` e nao `seguro`: o nome do projeto e comparado com
-            # `job.produto`, entao tirar o acento aqui faria "Panelas Monaco" deixar de
-            # casar consigo mesmo e a adocao criaria um projeto novo a cada geracao.
-            nome = dom.sem_segredo((await card.inner_text()).strip()).splitlines()[0]
-            achados.append(ProjetoRemoto(id_remoto=id_remoto, nome=nome))
+            # `sem_segredo` e nao `seguro`: o nome e comparado com `job.produto`, entao
+            # tirar o acento aqui faria "Panelas Monaco" deixar de casar consigo mesmo e
+            # a adocao criaria um projeto novo a cada geracao.
+            linhas = dom.sem_segredo(par["texto"]).splitlines()
+            if not linhas:
+                # card sem nome legivel: ignorar e melhor que adotar o projeto errado
+                continue
+            achados.append(ProjetoRemoto(id_remoto=id_remoto, nome=linhas[0].strip()))
         return achados
 
     async def criar_projeto(self, s: Sessao, nome: str) -> str:
@@ -150,7 +180,15 @@ class TransportePlaywright:
         if sel.PADRAO_PROJETO + id_remoto in pagina.url:
             return
         await pagina.goto(sel.URL_FLOW, wait_until="domcontentloaded")
+        # A lista e preguicosa (IntersectionObserver). Contar antes de ela carregar da
+        # zero e produz a mensagem errada: "nao e da conta" quando na verdade a pagina
+        # ainda estava vazia. Espera-se o card especifico; se ele nunca aparecer, ai sim
+        # a conclusao vale.
         card = pagina.locator(f'a[href*="{id_remoto}"]')
+        try:
+            await card.first.wait_for(timeout=30_000)
+        except Exception:
+            pass
         if await card.count() == 0:
             # projeto de outra conta simplesmente nao aparece na lista. Seguir daqui
             # geraria no projeto errado — ou em nenhum.
@@ -175,6 +213,16 @@ class TransportePlaywright:
         do menu do card e "Mover para a lixeira". Ambiguidade e erro, nao escolha.
         """
         loc = escopo.locator(seletor)
+        # ESPERAR antes de contar. `count()` responde na hora, e no Flow quase tudo
+        # aparece depois de uma animacao: menu que abre, painel que troca de modo, lista
+        # que carrega. Contar primeiro da zero e vira "achei 0 candidatos" — mensagem
+        # que manda procurar um seletor errado quando o seletor estava certo e so
+        # chegou cedo. Este mesmo engano custou tres execucoes: saldo, lista de
+        # projetos e menu de modelo.
+        try:
+            await loc.first.wait_for(timeout=15_000)
+        except Exception:
+            pass   # segue para o exigir_unico, que da a mensagem boa
         analise.exigir_unico(await loc.count(), seletor, o_que)
         await loc.click(timeout=15_000)
 
@@ -198,8 +246,16 @@ class TransportePlaywright:
         await pagina.wait_for_timeout(1200)
 
         await self._clicar_unico(painel, sel.DROPDOWN_MODELO, "dropdown de modelo")
-        await pagina.wait_for_timeout(1000)
-        await self._clicar_unico(pagina, sel.OPCAO_MODELO[p.modelo.value], "modelo")
+        # A escolha do modelo NAO sai por seletor CSS. Medido: o rotulo tem prefixo que
+        # muda por familia (emoji na imagem, ligadura no video), o que mata `:text-is`;
+        # e "Nano Banana 2" e prefixo de "Nano Banana 2 Lite", o que torna `:has-text`
+        # ambiguo. Le-se os rotulos e escolhe-se em Python, por sufixo — mesmo padrao
+        # do submenu de download, e testavel.
+        itens = pagina.locator(sel.MENU_ITEM)
+        await itens.first.wait_for(timeout=15_000)
+        indice = analise.indice_por_sufixo(
+            await itens.all_inner_texts(), sel.ROTULO_MODELO[p.modelo.value])
+        await itens.nth(indice).click(timeout=15_000)
         await pagina.wait_for_timeout(1000)
 
         # o modelo NAO aparece no texto do chip: confere-se aqui, com o painel aberto

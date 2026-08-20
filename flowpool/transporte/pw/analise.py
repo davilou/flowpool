@@ -142,10 +142,52 @@ def faltando_no_chip(chip: str, modo: str, proporcao: str, quantidade: int,
     O MODELO nao entra: ele nao aparece no texto do chip, e e conferido no painel.
     """
     alvos = [
-        sel.ROTULO_MODO_NO_CHIP[modo],
         sel.LIGADURA_PROPORCAO[proporcao],
         f"x{quantidade}",
     ]
+    rotulo_modo = sel.ROTULO_MODO_NO_CHIP[modo]
+    if rotulo_modo:
+        alvos.insert(0, rotulo_modo)
+    else:
+        # Imagem nao se anuncia no chip — o lugar do nome do modo fica com o do modelo.
+        # Mas NAO verificar seria abrir o buraco que esta funcao existe para fechar: um
+        # chip que continuou em video passaria como imagem. Confirma-se por AUSENCIA:
+        # nenhum marcador dos outros modos pode estar la.
+        intrusos = [r for m, r in sel.ROTULO_MODO_NO_CHIP.items()
+                    if r and m != modo and r in chip]
+        if intrusos:
+            return [f"modo {modo} (o chip ainda diz {intrusos[0]!r})"]
     if duracao:
         alvos.append(duracao)
     return [a for a in alvos if a not in chip]
+
+
+def indice_por_sufixo(rotulos, alvo: str) -> int:
+    """Acha o item cujo rotulo TERMINA em `alvo`. Recusa empate e ausencia.
+
+    Existe porque nenhum seletor CSS do Playwright da conta do menu de modelos, e
+    MEDIDO em 2026-08-20 e o que prova cada tentativa:
+
+      textos crus: '\U0001f34c Nano Banana Pro', '\U0001f34c Nano Banana 2', '\U0001f34c Nano Banana 2 Lite'
+        :text-is("\U0001f34c Nano Banana 2 Lite")  -> 0   (o emoji atrapalha)
+        :text-matches("Nano Banana 2 Lite$")       -> 0   (nao ancora como se espera)
+        :has-text("Nano Banana 2 Lite")            -> 1   (casa, mas...)
+        :has-text("Nano Banana 2")                 -> 2   (...pega o Lite junto)
+
+    O prefixo muda por familia — emoji na imagem, ligadura `volume_up` mais quebra de
+    linha no video —, entao correspondencia exata e inutil; e "Nano Banana 2" e prefixo
+    de "Nano Banana 2 Lite", entao substring e ambigua. Ancorar o FIM resolve as duas
+    coisas, e em Python o ancoramento funciona.
+
+    Mesmo padrao que `escolher_opcao` usa no submenu de download: ler os rotulos e
+    escolher aqui, onde da para testar, em vez de espremer a regra num seletor.
+    """
+    achados = [
+        i for i, bruto in enumerate(rotulos)
+        if (bruto or "").strip().splitlines()[-1].strip().endswith(alvo)
+    ]
+    if len(achados) != 1:
+        raise GeracaoFalhou(
+            f"modelo {alvo!r}: esperava 1 rotulo terminando nele, achei "
+            f"{len(achados)} em {list(rotulos)!r}")
+    return achados[0]

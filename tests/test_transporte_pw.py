@@ -195,30 +195,39 @@ def test_aceita_destino_em_texto():
 # --- configurou, confere ------------------------------------------------
 
 
+CHIP_VIDEO = "video - 720p - 8s crop_9_16 x1"
+
+
 def test_chip_que_bate_com_o_pedido_nao_tem_pendencia():
-    chip = "video · 720p · 8s crop_9_16 x1"
-    assert faltando_no_chip(chip, "t2v", "9:16", 1, "8s") == []
+    assert faltando_no_chip(CHIP_VIDEO, "t2v", "9:16", 1, "8s") == []
 
 
 def test_duracao_que_nao_pegou_e_apontada():
     # o caso real: pedidos 4s, saiu 8s, credito debitado e ninguem percebeu
-    chip = "video · 720p · 8s crop_9_16 x1"
-    assert faltando_no_chip(chip, "t2v", "9:16", 1, "4s") == ["4s"]
+    assert faltando_no_chip(CHIP_VIDEO, "t2v", "9:16", 1, "4s") == ["4s"]
 
 
 def test_proporcao_que_nao_pegou_e_apontada():
-    chip = "video · 720p · 8s crop_16_9 x1"
+    chip = "video - 720p - 8s crop_16_9 x1"
     assert faltando_no_chip(chip, "t2v", "9:16", 1, "8s") == ["crop_9_16"]
 
 
 def test_quantidade_que_nao_pegou_e_apontada():
-    chip = "video · 720p · 8s crop_9_16 x1"
-    assert faltando_no_chip(chip, "t2v", "9:16", 4, "8s") == ["x4"]
+    assert faltando_no_chip(CHIP_VIDEO, "t2v", "9:16", 4, "8s") == ["x4"]
 
 
-def test_modo_que_nao_trocou_e_apontado():
-    chip = "video · 720p · 8s crop_9_16 x1"
-    assert faltando_no_chip(chip, "imagem", "9:16", 1, None) == ["imagem"]
+def test_modo_que_nao_trocou_para_imagem_e_apontado():
+    # MEDIDO: imagem NAO se anuncia no chip — o lugar do nome do modo fica com o do
+    # modelo ("<emoji> nano banana 2 lite crop_9_16 x1"). Confirma-se por AUSENCIA dos
+    # outros modos, senao um chip que continuou em video passaria como imagem. A
+    # mensagem precisa dizer o que ele ainda diz, ou quem le o log procura errado.
+    faltou = faltando_no_chip(CHIP_VIDEO, "imagem", "9:16", 1, None)
+    assert len(faltou) == 1 and "imagem" in faltou[0] and "video" in faltou[0]
+
+
+def test_chip_de_imagem_legitimo_nao_tem_pendencia():
+    chip = "nano banana 2 lite crop_9_16 x1"
+    assert faltando_no_chip(chip, "imagem", "9:16", 1, None) == []
 
 
 def test_imagem_nao_cobra_duracao_do_chip():
