@@ -18,7 +18,13 @@ from pathlib import Path, PurePosixPath
 
 # So imagem. Video e .md nao servem de referencia para o Flow e so atrapalhariam a
 # leitura da grade.
-EXTENSOES = frozenset({".png", ".jpg", ".jpeg", ".webp"})
+#
+# `.gif` entrou junto com a colagem (`colar.py`): a validacao por assinatura reconhece
+# GIF, entao um GIF colado VAI existir em `_coladas/`. Sem a extensao aqui, ele seria
+# gravado e logo em seguida recusado pela propria `/miniatura` — a tira do painel
+# nasceria quebrada, e o seletor nao conseguiria mostrar o arquivo que o painel acabou
+# de criar. Duas listas discordando sobre o que e imagem e o comeco de um bug calado.
+EXTENSOES = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif"})
 
 # O que a GALERIA mostra e o que o download entrega. Diferente de `EXTENSOES`, que e a
 # lista do seletor de referencias: la video nao serve de entrada para o Flow, aqui video
@@ -30,8 +36,8 @@ EXTENSOES_VIDEO = frozenset({".mp4", ".webm", ".mov"})
 # onde a extensao pode estar associada a outra coisa por qualquer programa instalado.
 TIPOS = {
     ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-    ".webp": "image/webp", ".mp4": "video/mp4", ".webm": "video/webm",
-    ".mov": "video/quicktime",
+    ".webp": "image/webp", ".gif": "image/gif", ".mp4": "video/mp4",
+    ".webm": "video/webm", ".mov": "video/quicktime",
 }
 
 # Pastas que nao tem nada que interesse e enterrariam o que interessa. `flowpool/perfis`

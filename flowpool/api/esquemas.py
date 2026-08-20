@@ -257,6 +257,22 @@ class RespostaArquivos(BaseModel):
     arquivos: list[ItemImagem] = Field(default_factory=list)
 
 
+class PedidoColarUrl(BaseModel):
+    # O texto vem de um Ctrl+V: quando a pessoa usa "Copiar endereco da imagem" em vez
+    # de "Copiar imagem" (duas opcoes vizinhas no menu do navegador), e isto que chega.
+    # A validacao de verdade — esquema e endereco de rede — mora em `colar.validar_url`,
+    # que e funcao pura e testada a parte; aqui so se limita o tamanho do texto.
+    url: str = Field(min_length=1, max_length=4096)
+
+
+class RespostaColagem(BaseModel):
+    nome: str
+    # Relativo a raiz e com barra normal, igual ao que o seletor devolve: e o mesmo
+    # texto que o job guarda em `referencias`, entao o painel nao traduz nada no meio.
+    caminho: str
+    tamanho: int
+
+
 class Saude(BaseModel):
     contas_vivas: int
     credito_total: int
