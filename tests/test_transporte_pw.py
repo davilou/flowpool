@@ -1351,3 +1351,86 @@ async def test_sem_dialogo_nenhum_nao_esta_pronto():
                           opcoes=0, abas=0)
     assert await TransportePlaywright()._esperar_seletor_midia(
         painel, teto_ms=750) is False
+
+
+# --- o aviso de credito zerado nao decide; o card decide -------------------
+
+
+class _PaginaDoEnvio:
+    """A grade logo depois de enviar o comando.
+
+    `aviso_na_volta` = quando o banner "Seus creditos acabaram" entra na tela.
+    `card_na_volta`  = quando o card novo aparece (None = nunca aparece).
+    """
+
+    def __init__(self, aviso_na_volta=None, card_na_volta=None, antes=3):
+        self.aviso_na_volta = aviso_na_volta
+        self.card_na_volta = card_na_volta
+        self.antes = antes
+        self.voltas = 0
+        self.clicados = []
+
+    def quantos(self, seletor):
+        if seletor == sel.CARD_GRADE:
+            chegou = (self.card_na_volta is not None
+                      and self.voltas >= self.card_na_volta)
+            return self.antes + 1 if chegou else self.antes
+        if seletor == sel.AVISO_SEM_CREDITO:
+            return 1 if (self.aviso_na_volta is not None
+                         and self.voltas >= self.aviso_na_volta) else 0
+        return 0
+
+    def locator(self, seletor):
+        return _LocatorContado(self, seletor)
+
+    async def wait_for_timeout(self, ms):
+        self.voltas += 1
+
+
+async def test_ultimo_credito_gera_o_video_e_o_aviso_nao_pode_recusar():
+    # RELATADO pelo usuario: "o video e gerado com o ultimo credito da conta e o robo
+    # nao esta pegando que o video foi gerado, esta deixando o trabalho como pendente
+    # falando que a conta esta sem saldo. Porem o video e gerado."
+    #
+    # O aviso aparece JUNTO com o aceite, porque ele diz "o saldo agora e zero" e nao
+    # "recusei este pedido". A ordem antiga lia o aviso antes do card e concluia recusa
+    # — o job voltava para a fila com o video gerado e pago.
+    pagina = _PaginaDoEnvio(aviso_na_volta=0, card_na_volta=2)
+
+    apareceu = await TransportePlaywright()._esperar_card_novo(
+        pagina, pagina.antes, Diario(1))
+
+    assert apareceu is True
+
+
+async def test_sem_credito_de_verdade_nao_espera_o_teto_inteiro():
+    # com o aviso na tela e NENHUM card, insistir os 120 s seria desperdicio: o aviso
+    # nao decide, mas encurta o prazo
+    pagina = _PaginaDoEnvio(aviso_na_volta=0, card_na_volta=None)
+
+    apareceu = await TransportePlaywright()._esperar_card_novo(
+        pagina, pagina.antes, Diario(1), teto_ms=120_000, graca_do_aviso_ms=10_000)
+
+    assert apareceu is False
+    # a graca sao 10 s a 2 s por volta: bem antes das 60 voltas do teto cheio
+    assert pagina.voltas <= 8
+
+
+async def test_sem_aviso_o_card_continua_tendo_o_teto_cheio():
+    # o caso comum: conta com saldo, card que demora. Encurtar aqui inventaria falha
+    pagina = _PaginaDoEnvio(aviso_na_volta=None, card_na_volta=20)
+
+    apareceu = await TransportePlaywright()._esperar_card_novo(
+        pagina, pagina.antes, Diario(1))
+
+    assert apareceu is True
+
+
+async def test_nem_card_nem_aviso_devolve_falso_no_teto():
+    # sem card e sem aviso a causa nao e saldo, e quem chama tem que poder dizer isso
+    pagina = _PaginaDoEnvio(aviso_na_volta=None, card_na_volta=None)
+
+    apareceu = await TransportePlaywright()._esperar_card_novo(
+        pagina, pagina.antes, Diario(1), teto_ms=6_000)
+
+    assert apareceu is False

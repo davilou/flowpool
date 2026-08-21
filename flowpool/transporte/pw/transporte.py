@@ -652,11 +652,34 @@ class TransportePlaywright:
         d.passo(f"enviando o comando ({len(p.prompt)} caracteres)")
         await pagina.locator(sel.BOTAO_ENVIAR).first.click(timeout=15_000)
 
-        if await self._sem_credito(pagina):
-            raise SaldoInsuficiente(f"conta {s.conta.email} sem credito")
+        # O CARD DECIDE, O AVISO NAO. Esta ordem estava invertida, e custou videos
+        # gerados e pagos com o job voltando para a fila como pendente.
+        #
+        # RELATADO pelo usuario: "o video e gerado com o ultimo credito da conta e o
+        # robo nao esta pegando que o video foi gerado, esta deixando o trabalho como
+        # pendente falando que a conta esta sem saldo. Porem o video e gerado."
+        #
+        # A causa e que o aviso "Seus creditos do Google Flow acabaram" nao quer dizer
+        # "recusei este pedido" — quer dizer "o saldo agora e zero". Quando a geracao
+        # consome o ULTIMO credito, o Flow faz as DUAS coisas: aceita o pedido E mostra
+        # o aviso. Ler o aviso antes do card lia a consequencia e concluia sobre a
+        # causa.
+        #
+        # O sinal que separa recusa de aceite e o CARD NOVO, e so ele. Por isso o aviso
+        # deixou de decidir e passou a ENCURTAR O PRAZO: com ele na tela, esperar os
+        # 120 s inteiros por um card que nao vem seria desperdicio; sem ele, o card
+        # continua sendo a unica confirmacao.
+        if not await self._esperar_card_novo(pagina, antes, d):
+            if await self._sem_credito(pagina):
+                raise SaldoInsuficiente(f"conta {s.conta.email} sem credito")
+            raise GeracaoFalhou("o Flow nao criou card novo depois do envio")
 
-        # o card novo aparecendo e a UNICA confirmacao de que o Flow aceitou o pedido
-        await self._esperar_card_novo(pagina, antes, d)
+        if await self._sem_credito(pagina):
+            # aceitou E zerou: o job segue normalmente, e quem tira a conta do pool e a
+            # reconciliacao de saldo no fim. Registrar importa porque este e o caso que
+            # antes virava "pendente sem motivo", e o log e onde a pessoa vai olhar.
+            d.passo("o Flow aceitou o pedido E avisou que o credito acabou: "
+                    "era o ULTIMO credito desta conta")
         indice = 0 if sel.CARDS_NOVOS_PRIMEIRO else antes
         id_remoto = f"card-{indice}"
         d.passo(f"o Flow aceitou: {id_remoto}")
@@ -677,15 +700,37 @@ class TransportePlaywright:
         return await pagina.locator(sel.AVISO_SEM_CREDITO).count() > 0
 
     async def _esperar_card_novo(self, pagina, antes: int, d: Diario,
-                                 teto_ms: int = 120_000) -> None:
+                                 teto_ms: int = 120_000,
+                                 graca_do_aviso_ms: int = 20_000) -> bool:
+        """Espera o card novo aparecer na grade. Devolve SE apareceu.
+
+        Devolve `bool` em vez de levantar porque quem chama precisa decidir o que a
+        ausencia do card significa — recusa por saldo ou falha de envio —, e a
+        mensagem certa depende disso.
+
+        O AVISO DE CREDITO NAO DECIDE, ELE ENCURTA O PRAZO. Ver o comentario em
+        `_gerar`: o aviso significa "o saldo agora e zero", nao "recusei este pedido",
+        e a geracao que gasta o ULTIMO credito produz os dois ao mesmo tempo.
+
+        Mas ele e informacao util: com o aviso na tela e nenhum card, esperar os 120 s
+        inteiros e desperdicio. Entao ele passa a valer um prazo curto — tempo de
+        sobra para um card que ja estivesse a caminho, e nada perto do teto cheio.
+        """
         gasto = 0
+        prazo_do_aviso: int | None = None
         while gasto < teto_ms:
             if await pagina.locator(sel.CARD_GRADE).count() > antes:
-                return
+                return True
+            if prazo_do_aviso is None and await self._sem_credito(pagina):
+                prazo_do_aviso = gasto + graca_do_aviso_ms
+                d.passo(f"o aviso de credito zerado apareceu; dou "
+                        f"{graca_do_aviso_ms // 1000}s ao card antes de concluir recusa")
+            if prazo_do_aviso is not None and gasto >= prazo_do_aviso:
+                return False
             await pagina.wait_for_timeout(2000)
             gasto += 2000
             d.esperando("o card novo aparecer na grade")
-        raise GeracaoFalhou("o Flow nao criou card novo depois do envio")
+        return False
 
     async def _anexar(self, pagina, p: Pedido, d: Diario) -> None:
         """Faz cada arquivo virar REFERENCIA DA GERACAO, pelo seletor de midia.
