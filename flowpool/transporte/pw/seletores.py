@@ -91,6 +91,65 @@ BOTAO_ANEXAR = 'button:has-text("add_2")'
 BOTAO_ENVIAR = 'button:has-text("arrow_forward")'
 BOTAO_INSTRUCOES_AGENTE = 'button:has-text("article_spark")'
 
+# --- o interruptor do AGENTE. NAO E DECORACAO ---------------------------
+# MEDIDO AO VIVO 2026-08-21, os DOIS estados, no perfil conta1.
+#
+# Este botao fica na barra do prompt, colado no `+`, e TROCA O MODO DE OPERACAO do
+# Flow. O transporte inteiro foi construido para o modo que ele DESLIGA:
+#
+#   desligado -> o prompt vai direto para a geracao, configurada pelo chip.
+#                Deterministico. E o que `_configurar` e `_gerar` assumem.
+#   ligado    -> o prompt vai para um agente conversacional que interpreta o pedido,
+#                decide o que gerar e PERGUNTA antes de gastar ("Voce quer que eu
+#                inicie essa geracao de video 1, que custa 7 creditos?", com Aprovar /
+#                Rejeitar). O chip pode nem valer, e a geracao so acontece depois de
+#                uma confirmacao que o transporte nao sabe dar.
+#
+# A DECISAO DE DESENHO e usar o modo direto — esta no spec, em *Transporte*. O que
+# faltava era GARANTIR o estado do interruptor em vez de torcer para ele estar certo.
+#
+# O QUE ELE QUEBRA, medido: com o agente LIGADO, `CHIP_CONFIG` casa ZERO elementos. O
+# chip some da barra e no lugar dele entram `tune Configuracoes` e `article_spark
+# Instrucoes para o agente`. Ou seja, `_configurar` morre na PRIMEIRA linha, com
+# "Timeout ao clicar no chip" — uma mensagem que fala do chip e nunca do interruptor
+# que o tirou da tela. Era este o "o playwright nao consegue identificar as coisas".
+# E por isso que a verificacao roda ANTES de mexer no chip, e nao depois.
+#
+# O SELETOR TEM DUAS METADES, e cada uma cobre um erro medido:
+#
+# * `:has-text("Agente")` SOZINHO casa DOIS elementos com o agente ligado — o `has-text`
+#   do Playwright e substring e ignora maiuscula, entao ele pega tambem
+#   `article_spark Instrucoes para o agente`, que so existe nesse estado. Medido: 1
+#   candidato desligado, 2 ligado. Um seletor que muda de ambiguidade conforme o estado
+#   que ele deveria ler e inutilizavel.
+# * `[aria-pressed]` SOZINHO casa 1 nos dois estados hoje — e a metade estrutural, a que
+#   nao depende do rotulo i18n. Mas sozinha ela adota qualquer interruptor futuro que o
+#   Google coloque na tela.
+#
+# Juntas: 1 candidato nos DOIS estados, medido. Uma segura contra o rotulo mudar de
+# vizinho, a outra contra o marcador ganhar companhia.
+#
+# `:text-is("Agente")` NAO SERVE, e a medicao e clara: ZERO candidatos nos dois estados.
+# O texto mora num neto — `<div><span class="content">Agente</span></div>` —, e o motor
+# de texto do Playwright casa o MENOR elemento que contem a frase, que e o `span`, nunca
+# o `button`. Mesma familia da armadilha ja anotada nos botoes de proporcao.
+BOTAO_AGENTE = 'button[aria-pressed]:has-text("Agente")'
+
+# O ESTADO sai em `aria-pressed`, medido nos dois lados: "false" desligado, "true"
+# ligado. O atributo EXISTE nos dois estados — nao e ausencia contra presenca.
+#
+# A classe tambem muda (`sc-59223abb-3 dmZGYv` -> `sc-59223abb-3 bdRbOx`) e NAO se usa:
+# regra 1 deste arquivo, styled-component com hash que morre no proximo deploy. O
+# `aria-pressed` existe porque o botao e um toggle acessivel, e isso e contrato de ARIA,
+# nao detalhe de estilo.
+#
+# Os tres nomes abaixo existem para que a leitura do estado seja um dicionario, e nao
+# uma string solta no meio de uma corrotina — mesmo motivo de `LIGADURA_PROPORCAO` e
+# `ROTULO_MODELO`.
+ATRIBUTO_AGENTE = "aria-pressed"
+AGENTE_LIGADO = "true"
+AGENTE_DESLIGADO = "false"
+
 BOTAO_VER_CENAS = 'button:has-text("Ver cenas")'
 BOTAO_PERSONAGENS = 'button:has-text("Personagens")'
 BOTAO_ADICIONAR_MIDIA = 'button:has-text("Adicionar mídia")'
@@ -641,6 +700,13 @@ NAO_CURAVEIS = frozenset({
     "BOTAO_CONCORDO", "CAIXA_CONSENTIMENTO",
     # parar uma geracao em curso joga fora credito ja gasto
     "BOTAO_PARAR",
+    # o interruptor do Agente mora na barra do prompt, e o VIZINHO dele e o botao de
+    # ENVIAR. Um seletor curado errado ali nao custa um clique perdido: dispara uma
+    # geracao de verdade, com credito de verdade — e ela sai com o que estiver no campo
+    # naquele instante, porque `_exigir_agente_desligado` roda ANTES de o prompt ser
+    # escrito e limpo. Zero candidatos aqui significa que o interruptor sumiu da tela,
+    # e a resposta certa e erro claro, nao um modelo de visao chutando naquela barra.
+    "BOTAO_AGENTE",
     # o botao de repetir mora numa fila de tres botoes DENTRO do card de falha, e um
     # deles apaga a geracao. Mesmo motivo do menu do card: um vizinho errado nao custa
     # um clique perdido, custa o trabalho do usuario.

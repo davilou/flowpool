@@ -11,6 +11,7 @@ solta no meio de uma corrotina:
 * escolher a opcao de download por rotulo -> os rotulos tem QUEBRA DE LINHA
 * respeitar `suggested_filename`          -> o banco apontando para arquivo mentiroso
 * conferir o texto do chip                -> 4s pedidos que sairam 8s, com credito gasto
+* ler o interruptor do Agente             -> ligado, o chip SOME e nada mais casa
 
 Sem rede, sem navegador, sem I/O.
 """
@@ -210,6 +211,50 @@ def etapas_ate_o_modo(modo: str, visivel: bool) -> list[str]:
             f"modo {modo} nao esta no painel e nao e submodo de nenhum outro — se o "
             f"botao sumiu de vez, o conserto e em seletores.MODO_ICONE")
     return [pai, modo]
+
+
+def agente_ligado(pressed: str | None) -> bool:
+    """O interruptor "Agente" da barra do prompt esta ligado? True = precisa clicar.
+
+    MEDIDO 2026-08-21, os dois estados: o botao carrega `aria-pressed`, e ele vale
+    "true" ligado e "false" desligado. O atributo EXISTE nos dois — nao e ausencia
+    contra presenca, e e isso que torna o terceiro caso abaixo diagnostico em vez de
+    normal.
+
+    Ligado, o Flow troca de modo de operacao: o prompt vai para um agente
+    conversacional que pergunta antes de gastar, e o CHIP SOME DA BARRA (medido:
+    `CHIP_CONFIG` casa zero). O transporte inteiro depende do chip, entao ligado nao e
+    "um pouco diferente", e sim outro aplicativo.
+
+    MARCADOR DESCONHECIDO E ERRO, NAO "DESLIGADO". Tratar `None` como desligado seria
+    reabrir exatamente o defeito que esta funcao fecha: num deploy que troque o
+    atributo, toda geracao voltaria a rodar com o agente possivelmente ligado, e o
+    sintoma seria de novo um timeout falando do chip. Falhar aqui nomeia a causa e
+    acontece antes de qualquer credito sair.
+    """
+    if pressed == sel.AGENTE_LIGADO:
+        return True
+    if pressed == sel.AGENTE_DESLIGADO:
+        return False
+    raise GeracaoFalhou(
+        f"nao da para saber se o Agente esta ligado: {sel.ATRIBUTO_AGENTE} vale "
+        f"{pressed!r}, e o medido e {sel.AGENTE_LIGADO!r} ou {sel.AGENTE_DESLIGADO!r}. "
+        f"Rode `python -m flowpool.transporte.pw.conferir <perfil> <uuid>` e reveja "
+        f"seletores.BOTAO_AGENTE")
+
+
+def exigir_agente_desligado(pressed: str | None) -> None:
+    """O veredito DEPOIS do clique: continuou ligado e ERRO, nao aviso.
+
+    Seguir em frente com o agente ligado nao da erro na hora — da um timeout tres
+    passos depois, falando do chip que o proprio agente tirou da tela. E o job teria
+    gastado a tentativa para descobrir isso.
+    """
+    if agente_ligado(pressed):
+        raise GeracaoFalhou(
+            "cliquei no interruptor do Agente e ele continuou LIGADO "
+            f"({sel.ATRIBUTO_AGENTE}={pressed!r}). Com o agente ligado o chip nao "
+            f"existe na barra, e configurar a geracao e impossivel")
 
 
 def custo_do_texto(texto: str) -> int:

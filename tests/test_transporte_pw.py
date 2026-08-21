@@ -14,10 +14,10 @@ from flowpool.transporte.base import GeracaoFalhou, Pedido
 from flowpool.transporte.pw import seletores as sel
 from flowpool.transporte.pw.dom import seguro
 from flowpool.transporte.pw.analise import (
-    arquivos_do_pedido, caminho_final, confirmacao_fraca, custo_do_texto,
-    escolher_item_enviado, escolher_opcao, etapas_ate_o_modo,
-    exigir_proporcao_do_modo, exigir_unico, faltando_no_chip, id_do_href,
-    item_pronto, nome_do_item, saldo_do_texto,
+    agente_ligado, arquivos_do_pedido, caminho_final, confirmacao_fraca,
+    custo_do_texto, escolher_item_enviado, escolher_opcao, etapas_ate_o_modo,
+    exigir_agente_desligado, exigir_proporcao_do_modo, exigir_unico,
+    faltando_no_chip, id_do_href, item_pronto, nome_do_item, saldo_do_texto,
 )
 from flowpool.transporte.pw.transporte import (
     MAX_REPETICOES, TransportePlaywright,
@@ -260,92 +260,50 @@ def test_video_vertical_passa():
     exigir_proporcao_do_modo("t2v", "9:16")
 
 
-# --- Frames e Elementos sao SUBMODOS de Video ---------------------------
+# --- o interruptor do Agente: garantir o modo, nao torcer ---------------
 #
-# MEDIDO 2026-08-20, ao vivo, num job que falhou tres vezes com
-#   "modo: esperava 1 candidato para 'button:has-text(\"chrome_extension\")', achei 0"
-# A lista de modos do painel DEPENDE do modo atual:
-#   chip em VIDEO  -> image Imagem | videocam Video | crop_free Frames | chrome_extension Elementos
-#   chip em IMAGEM -> image Imagem | videocam Video
-# Frames e Elementos nao existem enquanto o chip estiver em imagem.
+# VISTO EM PRODUCAO: "as vezes aquele botaozinho de agente esta clicado. E ai o
+# playwright nao consegue identificar as coisas."
+#
+# MEDIDO 2026-08-21, os dois estados, no perfil conta1:
+#   <button aria-pressed="false">Agente</button>   -> modo direto, o chip existe
+#   <button aria-pressed="true">Agente</button>    -> agente conversacional, e
+#                                                     `CHIP_CONFIG` casa ZERO elementos
+# Ligado, `_configurar` morre na primeira linha com um timeout que fala do CHIP e nunca
+# do interruptor que o tirou da tela. Por isso a garantia roda antes de tocar no chip.
 
 
-def test_frames_e_elementos_sao_submodos_de_video():
-    # a hierarquia e um FATO DA INTERFACE, e por isso mora em seletores.py — nao numa
-    # esperteza escondida na sequencia do transporte
-    assert sel.MODO_PAI["frames2v"] == "t2v"
-    assert sel.MODO_PAI["ingredients2v"] == "t2v"
+def test_agente_ligado_precisa_de_clique():
+    assert agente_ligado(sel.AGENTE_LIGADO) is True
 
 
-def test_os_dois_modos_de_topo_nao_tem_pai():
-    assert "t2v" not in sel.MODO_PAI
-    assert "imagem" not in sel.MODO_PAI
+def test_agente_desligado_nao_precisa_de_clique():
+    assert agente_ligado(sel.AGENTE_DESLIGADO) is False
 
 
-def test_modo_visivel_no_painel_e_um_clique_so():
-    # nao forcar dois passos quando um basta: cada clique extra e uma animacao a mais
-    # e uma chance a mais de o painel redesenhar no meio
-    assert etapas_ate_o_modo("imagem", True) == ["imagem"]
-    assert etapas_ate_o_modo("frames2v", True) == ["frames2v"]
+def test_o_marcador_medido_e_aria_pressed_true_e_false():
+    # se alguem trocar os valores em seletores.py sem medir, os testes acima passariam
+    # comparando a constante consigo mesma. Esta linha ancora no que foi MEDIDO.
+    assert (sel.ATRIBUTO_AGENTE, sel.AGENTE_LIGADO, sel.AGENTE_DESLIGADO) == (
+        "aria-pressed", "true", "false")
 
 
-def test_submodo_ausente_passa_pelo_video_primeiro():
-    # e a correcao do defeito: vindo de imagem, `chrome_extension` nao existe no painel
-    assert etapas_ate_o_modo("ingredients2v", False) == ["t2v", "ingredients2v"]
-    assert etapas_ate_o_modo("frames2v", False) == ["t2v", "frames2v"]
+@pytest.mark.parametrize("pressed", [None, "", "mixed", "TRUE", "1"])
+def test_marcador_desconhecido_e_erro_e_nao_desligado(pressed):
+    # tratar o desconhecido como "desligado" reabriria o defeito: num deploy que troque
+    # o atributo, toda geracao voltaria a rodar com o agente possivelmente ligado, e o
+    # sintoma seria de novo um timeout falando do chip
+    with pytest.raises(GeracaoFalhou, match="nao da para saber se o Agente"):
+        agente_ligado(pressed)
 
 
-def test_modo_de_topo_ausente_e_erro_e_nao_caminho_inventado():
-    # `imagem` e `videocam` existem nos dois estados do painel; um deles sumir e deploy
-    # do Google, e o conserto e em seletores.py — nao um clique adivinhado aqui
-    for modo in ("imagem", "t2v"):
-        with pytest.raises(GeracaoFalhou, match="painel"):
-            etapas_ate_o_modo(modo, False)
+def test_clicou_e_continuou_ligado_e_erro():
+    with pytest.raises(GeracaoFalhou, match="continuou LIGADO"):
+        exigir_agente_desligado(sel.AGENTE_LIGADO)
 
 
-# --- o rotulo do submodo no chip: tolerancia declarada ------------------
-
-
-CHIP_FRAMES = "frames - 720p - 4s crop_9_16 x1"
-CHIP_SO_VIDEO = "video - 720p - 4s crop_9_16 x1"
-CHIP_IMAGEM = "nano banana 2 lite crop_9_16 x1"
-
-
-def test_chip_que_nomeia_o_submodo_confirma():
-    assert faltando_no_chip(CHIP_FRAMES, "frames2v", "9:16", 1, "4s") == []
-
-
-def test_chip_que_so_diz_video_ainda_confirma_o_submodo():
-    # NAO MEDIDO: nao se sabe se o chip nomeia "Frames"/"Elementos" ou se mostra so
-    # "Video" nos submodos. Recusar aqui seria falso negativo — bloquearia o modo
-    # inteiro por causa de uma palavra que talvez nunca apareca.
-    assert faltando_no_chip(CHIP_SO_VIDEO, "frames2v", "9:16", 1, "4s") == []
-    assert faltando_no_chip(CHIP_SO_VIDEO, "ingredients2v", "9:16", 1, "4s") == []
-
-
-def test_chip_que_continuou_em_imagem_reprova_o_submodo():
-    # ESTE e o caso que o defeito produzia: o clique no submodo nao acontecia e a
-    # geracao seguia em imagem. Tolerar o rotulo do pai nao pode tolerar isto.
-    faltou = faltando_no_chip(CHIP_IMAGEM, "ingredients2v", "9:16", 1, "4s")
-    assert "elementos" in faltou
-
-
-def test_chip_de_video_puro_nao_e_confundido_com_frames():
-    # o contrario tambem: t2v so aceita "video", e um chip que diz "frames" reprova
-    assert faltando_no_chip(CHIP_FRAMES, "t2v", "9:16", 1, "4s") == ["video"]
-
-
-def test_confirmacao_pelo_rotulo_do_pai_e_declarada():
-    # a tolerancia nao pode ser calada: a corrida imprime a medicao que falta, e a
-    # linha vira o valor definitivo de ROTULO_MODO_NO_CHIP
-    aviso = confirmacao_fraca(CHIP_SO_VIDEO, "frames2v")
-    assert aviso and "frames2v" in aviso and "video" in aviso
-
-
-def test_confirmacao_pelo_rotulo_proprio_nao_avisa_nada():
-    assert confirmacao_fraca(CHIP_FRAMES, "frames2v") is None
-    assert confirmacao_fraca(CHIP_VIDEO, "t2v") is None
-    assert confirmacao_fraca(CHIP_IMAGEM, "imagem") is None
+def test_clicou_e_desligou_passa():
+    exigir_agente_desligado(sel.AGENTE_DESLIGADO)
 
 
 # --- quais arquivos o pedido anexa -------------------------------------
