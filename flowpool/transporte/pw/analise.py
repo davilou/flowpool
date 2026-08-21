@@ -105,6 +105,38 @@ def escolher_opcao(rotulos: list[str], chave: str) -> int:
     return achados[0]
 
 
+def achar_no_submenu(menus: list[list[str]], chave: str) -> tuple[int, int] | None:
+    """Em QUAL menu aberto, e em qual item dele, esta a opcao pedida.
+
+    `None` = nenhum menu na tela tem essa opcao, ou seja ESPERE MAIS. Essa distincao e
+    o conserto de um defeito que custou dois videos gerados e pagos (jobs 29 e 30):
+
+      `baixar` esperava o submenu de resolucao por um SONO FIXO de 1,5 s e depois
+      pegava `MENU_CARD.last`. Quando o submenu demorava — e ele demora justamente
+      quando a pagina acabou de renderizar um video novo — o `.last` ainda era o menu
+      DE CIMA ("Baixar", "Animar", "Mover para a lixeira"), que nao tem "720p". Saia
+      "esperava 1 candidato para o rotulo '720p', achei 0", as tres tentativas se
+      esgotavam, e o video ficava gerado e cobrado sem ninguem baixar.
+
+    Um menu que ainda nao tem a opcao pedida e "espere mais", nao "achei 0".
+
+    IDENTIFICA PELO CONTEUDO, nao por posicao. `.last` com dois menus abertos e tao
+    fragil quanto indice em lista que reordena — e no menu do card o vizinho errado e
+    "Mover para a lixeira". O submenu de resolucao e o que TEM os rotulos de resolucao;
+    e essa a identidade dele.
+
+    Empate entre menus continua sendo ERRO, pela regra dura deste arquivo: quando o
+    texto casa com mais de um candidato nao se "pega o primeiro".
+    """
+    alvo = dom.sem_acento(chave).strip()
+    achados = [(m, i) for m, rotulos in enumerate(menus)
+               for i, r in enumerate(rotulos) if alvo in _chaves_do_rotulo(r)]
+    if not achados:
+        return None
+    exigir_unico(len(achados), f"rotulo {chave!r}", "opcao de submenu")
+    return achados[0]
+
+
 def caminho_final(destino: Path | str, sugerido: str) -> Path:
     """O caminho onde o arquivo baixado realmente vai morar.
 

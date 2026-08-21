@@ -19,7 +19,8 @@ from flowpool.transporte.pw.diario import (
 from flowpool.transporte.pw.dom import seguro
 from flowpool.transporte.pw.analise import (
     agente_ligado, arquivos_do_pedido, caminho_final, confirmacao_fraca,
-    apareceu_na_lista, custo_do_texto, escolher_item_enviado, escolher_opcao,
+    achar_no_submenu, apareceu_na_lista, custo_do_texto, escolher_item_enviado,
+    escolher_opcao,
     etapas_ate_o_modo, exigir_agente_desligado, exigir_proporcao_do_modo,
     exigir_referencia_incluida, exigir_referencias_completas, exigir_selecao,
     exigir_unico, faltando_no_chip, id_da_midia, id_do_href, item_pronto,
@@ -1199,3 +1200,51 @@ def test_o_passo_carrega_a_conta_e_o_tempo(capsys):
     d.passo("configurando: imagem / nano-banana / 9:16 / x1")
     assert capsys.readouterr().out == (
         "[   2s] conta 6: configurando: imagem / nano-banana / 9:16 / x1\n")
+
+
+# --- o submenu de download: esperar o ESTADO, nao dormir 1,5 s ----------
+#
+# CUSTOU DOIS VIDEOS GERADOS E PAGOS (jobs 29 e 30, conta 6, tres tentativas cada):
+#   GeracaoFalhou: opcao de menu: esperava 1 candidato para "rotulo '720p'", achei 0
+# Os dois com `id_remoto` gravado e `arquivo = None` — gerados, cobrados, sem download.
+#
+# A causa: `baixar` dormia 1,5 s e depois pegava `MENU_CARD.last`. Quando o submenu de
+# resolucao demorava — e ele demora justamente quando a pagina acabou de renderizar um
+# video novo — o `.last` ainda era o menu DE CIMA, que nao tem "720p".
+
+MENU_PAI = ["motion_blur\nAnimar", "download\nBaixar", "share\nCompartilhar",
+            "delete\nMover para a lixeira"]
+
+
+def test_submenu_que_ainda_nao_veio_e_espere_mais_e_nao_achei_zero():
+    # ESTE E O TESTE QUE REPRODUZ O DEFEITO. So o menu PAI esta na tela; o submenu de
+    # resolucao ainda nao montou. "Achei 0" mandava o job morrer; o certo e esperar.
+    assert achar_no_submenu([MENU_PAI], sel.BAIXAR["720p"]) is None
+
+
+def test_acha_a_resolucao_no_submenu_certo_mesmo_com_dois_menus_abertos():
+    # identifica pelo CONTEUDO, e nao por ser o ultimo: `.last` com dois menus abertos
+    # e tao fragil quanto indice em lista que reordena
+    menus = [MENU_PAI, MENU_VIDEO]
+    assert achar_no_submenu(menus, sel.BAIXAR["720p"]) == (1, 1)
+
+
+def test_a_ordem_dos_menus_na_tela_nao_decide():
+    menus = [MENU_VIDEO, MENU_PAI]
+    assert achar_no_submenu(menus, sel.BAIXAR["1080p"]) == (0, 2)
+
+
+def test_menu_de_imagem_nao_tem_720p_e_isso_e_espere_mais():
+    # e quem estoura o teto e o transporte, com um erro que LISTA os rotulos achados
+    assert achar_no_submenu([MENU_IMAGEM], sel.BAIXAR["720p"]) is None
+
+
+def test_a_mesma_resolucao_em_dois_menus_e_erro_e_nao_escolha():
+    # a regra dura: quando o texto casa com mais de um candidato, ERRO. No menu do card
+    # o vizinho errado e "Mover para a lixeira".
+    with pytest.raises(GeracaoFalhou, match="esperava 1 candidato"):
+        achar_no_submenu([MENU_VIDEO, MENU_VIDEO], sel.BAIXAR["720p"])
+
+
+def test_sem_menu_nenhum_e_espere_mais():
+    assert achar_no_submenu([], sel.BAIXAR["720p"]) is None

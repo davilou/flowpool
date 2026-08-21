@@ -1138,19 +1138,16 @@ class TransportePlaywright:
         await self._logar_menu(pagina, menu)
 
         await self._clicar_unico(menu, sel.MENU_BAIXAR, "item Baixar")
-        await pagina.wait_for_timeout(1500)
 
         # assumir VIDEO quando o modo nao e conhecido e o default seguro: pedir "720p"
-        # num menu de imagem nao acha rotulo e `escolher_opcao` grita, enquanto pedir
-        # "Tamanho original" num menu de video baixaria em silencio o errado.
+        # num menu de imagem nao acha rotulo e a busca grita, enquanto pedir "Tamanho
+        # original" num menu de video baixaria em silencio o errado.
         chave = sel.BAIXAR[
             RESOLUCAO[self._modo_do_card.get((s.conta.id, id_remoto), Modo.T2V)]]
-        submenu = pagina.locator(sel.MENU_CARD).last
-        itens = submenu.locator(sel.MENU_ITEM)
         # os rotulos do submenu tem QUEBRA DE LINHA ("270p\nGIF animado"): passar o
         # rotulo inteiro para um seletor CSS estoura o parser. A escolha acontece sobre
-        # o texto ja lido, por `analise.escolher_opcao`, que recusa empate.
-        indice = analise.escolher_opcao(await itens.all_inner_texts(), chave)
+        # o texto ja lido, por `analise.achar_no_submenu`, que recusa empate.
+        itens, indice = await self._esperar_submenu_com(pagina, chave, d)
         async with pagina.expect_download(timeout=self.timeout_ms) as espera:
             await itens.nth(indice).click(timeout=15_000)
         download = await espera.value
@@ -1164,6 +1161,42 @@ class TransportePlaywright:
         await download.save_as(real)
         d.passo(f"baixado: {real}")
         return real
+
+    async def _esperar_submenu_com(self, pagina, chave: str, d: Diario,
+                                   teto_ms: int = 20_000):
+        """Espera o submenu que CONTEM `chave`. Devolve (itens, indice).
+
+        SUBSTITUI UM SONO FIXO, e ele custou dois videos gerados e pagos (jobs 29 e
+        30). A versao anterior dormia 1,5 s e pegava `MENU_CARD.last`; quando o submenu
+        de resolucao demorava — e ele demora justamente quando a pagina acabou de
+        renderizar um video novo — o `.last` ainda era o menu DE CIMA, que nao tem
+        "720p". As tres tentativas se esgotavam e o video ficava no Flow, cobrado, sem
+        ninguem baixar. Era a unica espera por TEMPO que restava no transporte.
+
+        Identifica o submenu pelo CONTEUDO, e nao por ser o ultimo: com dois menus
+        abertos, "o ultimo" e tao fragil quanto indice em lista que reordena — e o
+        vizinho errado no menu do card e "Mover para a lixeira".
+
+        O ERRO LISTA O QUE HAVIA NA TELA. Sem isso a falha chegou como "achei 0" sem
+        dizer o que existia, e meia hora se perdeu nisso.
+        """
+        gasto = 0
+        vistos: list[list[str]] = []
+        while gasto < teto_ms:
+            menus = pagina.locator(sel.MENU_CARD)
+            vistos = [await menus.nth(i).locator(sel.MENU_ITEM).all_inner_texts()
+                      for i in range(await menus.count())]
+            achado = analise.achar_no_submenu(vistos, chave)
+            if achado is not None:
+                qual, indice = achado
+                return menus.nth(qual).locator(sel.MENU_ITEM), indice
+            await pagina.wait_for_timeout(250)
+            gasto += 250
+            d.esperando(f"o submenu de download com {chave!r}")
+        raise GeracaoFalhou(
+            f"o submenu de download nao trouxe {chave!r} em {teto_ms // 1000}s. "
+            f"O que havia na tela: "
+            f"{[[dom.seguro(r).replace(chr(10), ' / ') for r in m] for m in vistos]}")
 
     async def _logar_menu(self, pagina, menu) -> None:
         """Imprime os candidatos ANTES de clicar. Barato, e ja teria evitado um
