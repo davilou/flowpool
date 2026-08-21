@@ -89,6 +89,86 @@ Documentação interativa em **http://127.0.0.1:8777/docs**.
 `GET|POST /jobs`, `POST /jobs/lote`, `GET|DELETE /jobs/{id}`, `GET /projetos`,
 `DELETE /projetos/{id}`.
 
+## Quando o Google muda a interface
+
+Os seletores do Flow moram todos em `flowpool/transporte/pw/seletores.py`. Quando um
+deles quebra, o diagnóstico é uma linha:
+
+```bash
+.venv/Scripts/python.exe -m flowpool.transporte.pw.conferir <perfil> <uuid-do-projeto>
+```
+
+Ele abre a interface, confere cada seletor do mapa e diz qual morreu. Não gasta crédito.
+
+### Auto-cura: o app tenta se consertar sozinho
+
+Quando um clique não acha **nenhum** candidato, o FlowPool tira um print da tela, monta
+um resumo do DOM e pergunta a um **modelo de visão local** qual é o seletor novo. Valida
+a resposta (tem que casar com **exatamente 1** elemento), grava em
+`flowpool/transporte/pw/curados.json` e **repete a ação**. O job segue em vez de falhar.
+
+**Para ligar, basta ter o Ollama rodando com um modelo de visão** — é o padrão, não
+precisa configurar nada:
+
+```bash
+ollama serve            # se ainda não estiver de pé
+ollama pull qwen3-vl:32b
+```
+
+Sem o Ollama respondendo, a cura **se desliga sozinha** e o comportamento é o de sempre:
+erro claro e print em `scratch/falhas/`. Nada estoura por falta de modelo.
+
+Dá para ajustar por variável de ambiente:
+
+| variável | padrão | para quê |
+|---|---|---|
+| `FLOWPOOL_CURA` | ligada | `0`, `off` ou `nao` desliga a cura por completo |
+| `FLOWPOOL_CURA_MODELO` | `qwen3-vl:32b` | trocar de modelo (precisa ter **visão**) |
+| `FLOWPOOL_OLLAMA_URL` | `http://localhost:11434` | Ollama em outra máquina |
+| `FLOWPOOL_CURA_CLIENTE` | `ollama` | `anthropic` usa a API da Anthropic (exige `pip install anthropic` e credencial — o SDK não é dependência do projeto) |
+
+**Sobre a GPU:** `qwen3-vl:32b` ocupa ~20 GB e a placa tem 24. Com o ComfyUI carregado
+os dois não cabem juntos, e a cura passa a rodar parte na CPU — fica lenta, não quebra
+(o prazo é de 5 minutos). Se isso incomodar, aponte `FLOWPOOL_CURA_MODELO` para um
+modelo de visão menor.
+
+### Como reverter uma cura
+
+Tudo o que a IA mudou está em `flowpool/transporte/pw/curados.json`, e cada entrada
+guarda o valor novo, **o valor antigo**, a data e a justificativa que o modelo deu:
+
+```json
+{
+  "DROPDOWN_MODELO": {
+    "valor": "button:has-text(\"expand_more\")",
+    "antigo": "button:has-text(\"arrow_drop_down\")",
+    "em": "2026-08-21T14:03:11+00:00",
+    "porque": "o botão que abre a lista de modelos agora usa a ligadura expand_more"
+  }
+}
+```
+
+- **Desfazer uma cura:** apague a entrada do JSON.
+- **Desfazer todas:** apague o arquivo. `seletores.py` nunca é reescrito — ele volta a
+  valer inteiro, com os comentários que explicam cada armadilha medida.
+- **Tornar a cura permanente:** copie o valor para dentro de `seletores.py`, à mão, e
+  apague a entrada. Aí ela vira autoria humana e entra no git com o resto.
+
+O arquivo aparece como não versionado no `git status` de propósito: é o lembrete de que
+alguma coisa mudou e vale uma olhada. Cada cura também vira um evento `seletor_curado`
+no banco.
+
+### O que a cura nunca toca
+
+**Item de menu do card, excluir projeto e lixeira não são curáveis.** O menu do card
+contém "Mover para a lixeira", e um seletor errado ali apaga trabalho seu — "casou 1
+elemento" não protege de nada quando o elemento errado também casa 1. Nesses casos
+falhar é o comportamento certo: erro, print salvo, e **você** decide. A lista está em
+`seletores.NAO_CURAVEIS`, com o motivo escrito ao lado.
+
+Também há um **teto de 3 curas por execução**: interface quebrada em dez lugares não é
+seletor obsoleto, é mudança grande — e aí alguém precisa olhar.
+
 ## Testes
 
 ```bash

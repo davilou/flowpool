@@ -620,6 +620,72 @@ O critério passa a ter duas metades, e cada uma já falhou sozinha: **o painel 
 
 Isso traz uma restrição que precisa estar escrita, porque não é óbvia: **fechar o painel não pode ser chamado com o seletor de mídia aberto.** O seletor de mídia é um `[role=dialog]`, que o localizador do painel também casa — a função gastaria os Escapes fechando justamente a peça que a sequência precisa que continue de pé. Quem dispensa o aviso de direitos, que aparece por cima do seletor de mídia, espera o **aviso** sumir, e não "o painel fechar".
 
+## Manutenção de seletores — o app se conserta, dentro de um cerco
+
+A interface do Google **muda**, e não devagar: num único dia de mapeamento apareceram Flow Music, Flow TV, o Gemini Omni Flash e o elenco de personagens. O custo disso, no desenho anterior, era todo do usuário — um seletor quebrado derrubava o job, gastava as três tentativas, trocava de conta, falhava de novo e morria com uma mensagem que não dizia qual seletor tinha morrido.
+
+Duas propriedades que a arquitetura já tinha, por outros motivos, são o que torna a cura possível: **todo clique passa por `_clicar_unico`** (a regra "nunca por posição") e **todo seletor mora num arquivo só** (`seletores.py`). Não foi preciso reorganizar nada para pendurar a cura ali.
+
+### O ciclo
+
+Quando `_clicar_unico` encontra **zero** candidatos:
+
+1. captura o contexto — o print da tela (`print_de_falha`, que já existia) e um resumo do DOM com os candidatos a clique: tag, `role`, `aria-label`, `data-*` e as primeiras linhas do `innerText`;
+2. pergunta a um modelo de **visão** qual elemento corresponde à descrição, mandando a imagem junto;
+3. **valida**: a proposta tem que casar com **exatamente 1** elemento, e no mesmo escopo em que se ia clicar;
+4. grava em `curados.json`, separado;
+5. **repete a ação** com o seletor curado.
+
+**Zero, e nunca dois.** Ambiguidade não se cura: dois candidatos é escolha, e escolha é do humano — foi um desempate automático (`.last`) que mandou um vídeo do usuário para a lixeira. Zero é outra coisa: é o Google ter mexido no botão, e aí perguntar tem sentido.
+
+### Ver a tela vale mais que ler o DOM
+
+A chamada é multimodal por medição, não por gosto. Dois diagnósticos desta interface se resolveram em segundos por causa de um print, depois de tentativas perdidas deduzindo pelo DOM — o `<div data-state=open aria-hidden>` que se supôs ser o painel do chip e era um modal de aviso é o exemplo. O modelo recebe a mesma coisa que resolveu o problema para uma pessoa.
+
+O resumo do DOM passa pelo `dom.py`, e não por uma varredura escrita à mão: o `__NEXT_DATA__` carrega o `access_token` OAuth em texto puro, e aqui o destino do texto é um modelo de IA — o pior lugar possível para um token vazar. Duas exclusões a mais, específicas deste caminho: **`class` não entra** (styled-component com hash — mostrar a classe faria o modelo propor seletor por classe, que casa hoje e morre no próximo deploy) e **`value` não entra** (o que o usuário digitou não tem por que sair da máquina).
+
+### O modelo é local, e trocável
+
+`Curador` é um `Protocol` de um método só — recebe descrição, print e resumo, devolve os seletores propostos e a justificativa. O padrão é **`CuradorOllama`**, falando com o Ollama da própria máquina: é grátis, é privado (o print da interface do usuário não sai do computador) e não depende de conta em lugar nenhum. `CuradorAnthropic` existe para quem tiver credencial, e o SDK **não** é dependência do projeto — o caminho principal não precisa dele.
+
+Três coisas que o hardware impõe, e que estão no código:
+
+- **Prazo generoso (5 min).** O modelo de visão ocupa ~20 GB e a placa tem 24, com o ComfyUI disputando a mesma memória. Carregar o modelo pode custar meia janela de tempo só em troca de residente. A cura é rara e nunca urgente; estourar o prazo significa **"não curei"**, jamais "quebrou".
+- **Modelo local erra mais que modelo de fronteira** — e a conclusão disso é que a validação importa *mais*, não menos. Ele propõe até **três** alternativas e a validação experimenta em ordem, ficando com a primeira que casar sozinha. Cobre exatamente o modo de erro de um modelo menor: acertar o elemento e errar a forma de escrevê-lo.
+- **Modelo e URL saem do ambiente** (`FLOWPOOL_CURA_MODELO`, `FLOWPOOL_OLLAMA_URL`). A máquina tem outros modelos instalados, e trocar não pode exigir editar código.
+
+Uma medição que já rendeu correção: emendar as linhas do `innerText` num separador (`"send | Enviar"`) fez o modelo propor `has-text("send | Enviar")` — ele tomou o separador por texto da página. As linhas passaram a sair como lista JSON.
+
+### A regra de segurança — não negociável
+
+**Nunca curar seletor cujo erro de resolução seja destrutivo.**
+
+O menu do card contém "Mover para a lixeira". Se o modelo propuser o seletor errado ali, o app apaga trabalho do usuário — e "casou exatamente 1 elemento" **não protege de nada**, porque o item errado também casa 1. A validação é boa contra o modelo confuso; é inútil contra o modelo confiante e errado.
+
+`seletores.NAO_CURAVEIS` lista os nomes proibidos: o menu do card inteiro, o menu do projeto (renomear é vizinho de excluir e de lixeira), excluir projeto, os dois botões que **aceitam termo em nome do usuário** (o aviso de direitos e o consentimento do onboarding — declarar que se tem direito sobre imagens não é coisa que um modelo escolhe) e o botão de parar geração, que joga fora crédito já gasto. Nesses casos **falhar é o comportamento certo**: erro claro, print salvo, e a pessoa decide.
+
+A lista vale nas **duas pontas**: o modelo não é consultado sobre esses nomes, e o `curados.json` também não consegue sobrepô-los na leitura. A segunda barreira existe porque o arquivo pode ser editado à mão, copiado de outra máquina ou ter sido gravado por uma versão antiga do código.
+
+E há um **teto de 3 curas por execução**. Interface que quebrou em dez lugares não é seletor obsoleto: é mudança grande, e aí a decisão é humana.
+
+### Os curados ficam num arquivo à parte
+
+`seletores.py` **nunca é reescrito**. O que a IA curou mora em `curados.json`, ao lado, e entra como sobreposição na importação. Três razões:
+
+- `seletores.py` continua sendo **autoria humana**, com os comentários que explicam cada armadilha medida — e é justamente isso que um `sed` de robô apagaria;
+- o que a IA mexeu fica **visível, auditável e reversível**: apagar o JSON volta ao original, sem git, sem merge, sem conflito;
+- cada entrada guarda valor novo, **valor antigo**, data e a justificativa do modelo, então dá para ler o que aconteceu meses depois.
+
+O arquivo fica **fora do `.gitignore` de propósito**: aparecer como não versionado no `git status` é o lembrete de que alguma coisa mudou. Tornar a cura permanente é copiar o valor para dentro de `seletores.py` à mão — aí ela vira autoria humana e entra no git com o resto. Cada cura também vira um evento `seletor_curado` no banco, na mesma linha do tempo dos outros.
+
+**Sem descrição não há cura.** O modelo não adivinha a intenção a partir de `button:has-text("add_2")`, então `seletores.DESCRICAO` mapeia nome → descrição em português. O que não tiver descrição simplesmente não é curável, e isso é aceitável: o comportamento vira o de hoje. A notação `NOME[chave]` alcança seletor que mora dentro de um mapa — não é luxo, porque o seletor que quebrou ao vivo em 20/08 foi `BOTAO_MODO["ingredients2v"]`.
+
+### Degradação, e o que a suíte prova
+
+Sem modelo respondendo — Ollama fora do ar, prazo estourado, modelo que não coube na GPU — a cura **se desliga sozinha** e o app volta a ser exatamente o que era: erro claro com print. `AutoCura.curar` nunca levanta, nem por erro de programação dentro dela: a cura é um extra, e um extra não pode virar um segundo modo de falha por cima do primeiro.
+
+A chamada ao modelo não entra na suíte, mas **tudo em volta dela entra**, com um curador falso que satisfaz o mesmo `Protocol`: proposta que casa 1 grava e repete; proposta que casa 0 ou 2 é recusada e o erro **original** sobe; seletor da lista de não curáveis **nem chega a chamar o modelo** (a asserção é sobre o dublê não ter sido chamado, não sobre o resultado); o teto é respeitado; sem curador nada é chamado; e os curados sobrepõem `seletores.py` na leitura, com o JSON apagado revertendo. A suíte roda com `FLOWPOOL_CURA=0` no `conftest.py`, para que nenhum teste consiga abrir conexão com o Ollama da máquina de quem a executa.
+
 ## Erro e observabilidade
 
 Todo job carrega a razão da última falha em texto legível. O painel mostra três coisas em destaque: contas com sessão caída (exigem ação humana), crédito total vivo no pool, e jobs parados esperando reset. Eventos ficam no banco; nada de log só em arquivo.
