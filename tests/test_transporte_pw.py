@@ -19,9 +19,11 @@ from flowpool.transporte.pw.diario import (
 from flowpool.transporte.pw.dom import seguro
 from flowpool.transporte.pw.analise import (
     agente_ligado, arquivos_do_pedido, caminho_final, confirmacao_fraca,
-    custo_do_texto, escolher_item_enviado, escolher_opcao, etapas_ate_o_modo,
-    exigir_agente_desligado, exigir_proporcao_do_modo, exigir_unico,
-    faltando_no_chip, id_do_href, item_pronto, nome_do_item, saldo_do_texto,
+    apareceu_na_lista, custo_do_texto, escolher_item_enviado, escolher_opcao,
+    etapas_ate_o_modo, exigir_agente_desligado, exigir_proporcao_do_modo,
+    exigir_referencia_incluida, exigir_referencias_completas, exigir_selecao,
+    exigir_unico, faltando_no_chip, id_da_midia, id_do_href, item_pronto,
+    nome_do_item, saldo_do_texto,
 )
 from flowpool.transporte.pw.transporte import (
     MAX_REPETICOES, TransportePlaywright,
@@ -567,53 +569,194 @@ def test_item_so_esta_pronto_quando_tem_miniatura():
     assert item_pronto({}) is False
 
 
-def _item(nome, selecionado=False, miniaturas=1, tipo="Imagem"):
+def _src(id_midia, video=False):
+    """O `src` da miniatura, como MEDIDO 2026-08-21.
+
+    Video traz um parametro colado no fim, e e por isso que o id se EXTRAI em vez de
+    comparar o src inteiro.
+    """
+    fim = "&mediaUrlType=MEDIA_URL_TYPE_THUMBNAIL" if video else ""
+    return f"/fx/api/trpc/media.getMediaUrlRedirect?name={id_midia}{fim}"
+
+
+def _item(nome, selecionado=False, miniaturas=1, tipo="Imagem", id_midia=None):
     return {"texto": f"{nome}\n{tipo}", "selecionado": selecionado,
-            "miniaturas": miniaturas}
+            "miniaturas": miniaturas,
+            "src": _src(id_midia or f"id-de-{nome}") if miniaturas else ""}
+
+
+# --- o ID DA MIDIA: o que o nome do arquivo nao identifica --------------
+
+
+def test_o_id_sai_do_parametro_name_do_src():
+    assert id_da_midia(_src("166c3d5d")) == "166c3d5d"
+
+
+def test_o_id_de_video_ignora_o_parametro_colado_no_fim():
+    # MEDIDO: item de video traz `&mediaUrlType=...`. Comparar o src INTEIRO faria um
+    # video nunca casar com a propria ficha na barra do prompt.
+    assert id_da_midia(_src("c474ed85", video=True)) == "c474ed85"
+
+
+def test_src_sem_id_nao_vira_id_vazio_util():
+    # id vazio nao pode ser tratado como identidade: dois itens sem miniatura
+    # "casariam" entre si, que e a classe de erro que o id existe para fechar
+    assert id_da_midia("") == ""
+    assert id_da_midia(None) == ""
+    assert id_da_midia("/fx/api/trpc/media.getMediaUrlRedirect") == ""
+
+
+# --- O DEFEITO DE 21/08: o homonimo velho do acervo ---------------------
+#
+# O acervo do projeto PERSISTE ENTRE JOBS, e os arquivos vem de `_coladas/` com nome
+# por hash — entao reusar a mesma personagem entre geracoes e o caso COMUM, nao o raro.
+# Quando o arquivo ja foi enviado antes, a lista tem um item de MESMO NOME que JA TEM
+# MINIATURA, e a busca por nome o aceitava como "meu upload terminou" no primeiro
+# instante, com o arquivo real ainda em voo.
+#
+# EVIDENCIA NO BANCO (conta 6, mesmo projeto): `8ced8effebecb2f9.jpg` entrou no acervo
+# no job 23 e, nos jobs 26 e 30, era a SEGUNDA referencia — e e onde travava. O job 27
+# saiu "pronto" com as fotos TROCADAS, e o 29 falhou nas tres tentativas. A propria
+# repeticao fabricava a condicao: a tentativa 0 subia A e morria na B, a tentativa 1
+# subia A de novo, e ja havia um homonimo pronto para a espera devolver na hora.
+
+
+def test_homonimo_velho_do_acervo_nao_passa_por_upload_terminado():
+    # ESTE E O TESTE QUE REPRODUZ O DEFEITO. Antes do conserto ele devolvia o item
+    # VELHO no primeiro instante — e dai saia a foto errada, sem erro, com credito
+    # gasto. O retrato de antes e o que separa os dois homonimos.
+    velho = _item("blusa.png", id_midia="ja-estava-no-acervo")
+    novo = _item("blusa.png", miniaturas=0, id_midia="acabou-de-subir")
+    assert escolher_item_enviado([novo, velho], "blusa.png",
+                                 {"ja-estava-no-acervo"}) is None
+
+
+def test_o_homonimo_novo_e_escolhido_quando_fica_pronto():
+    velho = _item("blusa.png", id_midia="ja-estava-no-acervo")
+    novo = _item("blusa.png", selecionado=True, id_midia="acabou-de-subir")
+    assert escolher_item_enviado([novo, velho], "blusa.png",
+                                 {"ja-estava-no-acervo"}) == "acabou-de-subir"
+
+
+def test_segunda_tentativa_do_mesmo_job_inclui_o_certo():
+    # a tentativa 0 subiu `blusa.png` e morreu depois; a tentativa 1 sobe de novo. Sao
+    # DOIS itens de mesmo nome, os dois com miniatura — e so o retrato distingue.
+    da_tentativa_0 = _item("blusa.png", id_midia="upload-da-tentativa-0")
+    da_tentativa_1 = _item("blusa.png", selecionado=True, id_midia="upload-agora")
+    assert escolher_item_enviado([da_tentativa_1, da_tentativa_0], "blusa.png",
+                                 {"upload-da-tentativa-0"}) == "upload-agora"
 
 
 def test_acha_o_item_recem_enviado_pelo_nome_do_arquivo():
     itens = [_item("blusa.png", selecionado=True), _item("Red ceramic mug on table")]
-    assert escolher_item_enviado(itens, "blusa.png") == 0
+    assert escolher_item_enviado(itens, "blusa.png", set()) == "id-de-blusa.png"
 
 
 def test_item_que_ainda_nao_apareceu_e_espere_mais_e_nao_erro():
     # `None` = "espere"; quem chama fica no laco ate o teto e so entao levanta
-    assert escolher_item_enviado([_item("outro.png")], "blusa.png") is None
+    assert escolher_item_enviado([_item("outro.png")], "blusa.png", set()) is None
 
 
 def test_item_que_apareceu_mas_ainda_sobe_e_espere_mais():
-    assert escolher_item_enviado([_item("blusa.png", miniaturas=0)], "blusa.png") is None
+    assert escolher_item_enviado(
+        [_item("blusa.png", miniaturas=0)], "blusa.png", set()) is None
 
 
-def test_dois_arquivos_de_mesmo_nome_desempatam_pelo_selecionado():
-    # MEDIDO: enviar o mesmo arquivo duas vezes deixa dois itens de mesmo nome, e o
-    # Flow ja deixa o RECEM-ENVIADO selecionado. Recusar a ambiguidade aqui — como
-    # `escolher_opcao` faz nos menus — travaria a segunda geracao de qualquer produto.
-    itens = [_item("blusa.png"), _item("blusa.png", selecionado=True)]
-    assert escolher_item_enviado(itens, "blusa.png") == 1
+def test_dois_uploads_na_mesma_espera_desempatam_pelo_selecionado():
+    # MEDIDO: o Flow deixa o RECEM-ENVIADO selecionado. Recusar a ambiguidade aqui —
+    # como `escolher_opcao` faz nos menus — travaria a geracao; e ela quase nao
+    # acontece, porque se sobe um arquivo por vez.
+    itens = [_item("blusa.png", id_midia="a"),
+             _item("blusa.png", selecionado=True, id_midia="b")]
+    assert escolher_item_enviado(itens, "blusa.png", set()) == "b"
 
 
 def test_sem_nenhum_selecionado_vale_o_primeiro_porque_a_lista_e_recentes():
-    itens = [_item("blusa.png"), _item("blusa.png")]
-    assert escolher_item_enviado(itens, "blusa.png") == 0
+    itens = [_item("blusa.png", id_midia="a"), _item("blusa.png", id_midia="b")]
+    assert escolher_item_enviado(itens, "blusa.png", set()) == "a"
 
 
 def test_o_selecionado_so_ganha_se_estiver_pronto():
     # um item selecionado mas ainda subindo nao pode passar na frente do que ja
     # terminou: incluir o de cima anexaria referencia vazia
-    itens = [_item("blusa.png", selecionado=True, miniaturas=0), _item("blusa.png")]
-    assert escolher_item_enviado(itens, "blusa.png") == 1
+    itens = [_item("blusa.png", selecionado=True, miniaturas=0, id_midia="a"),
+             _item("blusa.png", id_midia="b")]
+    assert escolher_item_enviado(itens, "blusa.png", set()) == "b"
 
 
 def test_nome_parecido_nao_casa():
     # `blusa.png` nao pode casar com `blusa-2.png`: o `in` solto anexaria o arquivo
     # errado sem nenhum sintoma
-    assert escolher_item_enviado([_item("blusa-2.png")], "blusa.png") is None
+    assert escolher_item_enviado([_item("blusa-2.png")], "blusa.png", set()) is None
 
 
 def test_lista_vazia_e_espere_mais():
-    assert escolher_item_enviado([], "blusa.png") is None
+    assert escolher_item_enviado([], "blusa.png", set()) is None
+
+
+def test_apareceu_na_lista_ignora_o_homonimo_velho():
+    # senao a mensagem de erro diria "apareceu e nao ficou pronto" sobre um item que
+    # nem e o meu, e mandaria investigar upload lento onde o envio nem pegou
+    velho = _item("blusa.png", id_midia="ja-estava-no-acervo")
+    assert apareceu_na_lista([velho], "blusa.png", {"ja-estava-no-acervo"}) is False
+    novo = _item("blusa.png", miniaturas=0, id_midia="novo")
+    assert apareceu_na_lista([velho, novo], "blusa.png",
+                             {"ja-estava-no-acervo"}) is True
+
+
+# --- conferir QUAL entrou, e nao so quantas -----------------------------
+
+
+def test_a_selecao_precisa_ser_exatamente_a_minha():
+    # "Incluir no comando" age sobre o que esta MARCADO, e nao sobre o item que o
+    # codigo julga ter escolhido. Enquanto ninguem conferia, os dois divergiam sem
+    # sintoma e o arquivo errado entrava na geracao.
+    exigir_selecao(["meu"], "meu", "blusa.png")
+    with pytest.raises(GeracaoFalhou, match="selecao errada"):
+        exigir_selecao(["outro"], "meu", "blusa.png")
+    with pytest.raises(GeracaoFalhou, match="selecao errada"):
+        exigir_selecao([], "meu", "blusa.png")
+    with pytest.raises(GeracaoFalhou, match="selecao errada"):
+        exigir_selecao(["meu", "outro"], "meu", "blusa.png")
+
+
+def test_a_barreira_aprova_a_ficha_certa():
+    exigir_referencia_incluida(["a"], ["a", "b"], "b", "blusa.png")
+
+
+def test_a_barreira_reprova_ficha_que_nao_chegou():
+    # erro no ponto certo, com o nome do arquivo que sumiu — e nao um "pedi 2 e vejo
+    # 1" no fim, que nao diz qual
+    with pytest.raises(GeracaoFalhou, match="nenhuma ficha nova"):
+        exigir_referencia_incluida(["a"], ["a"], "b", "blusa.png")
+
+
+def test_a_barreira_reprova_ficha_de_outro_arquivo():
+    with pytest.raises(GeracaoFalhou, match="nao e a do arquivo enviado"):
+        exigir_referencia_incluida(["a"], ["a", "z"], "b", "blusa.png")
+
+
+def test_duas_fichas_iguais_reprovam():
+    # O DEFEITO, EM UMA LINHA. A conferencia por contagem via duas e aprovava: a
+    # geracao saia com a mesma foto no lugar de duas, sem erro, com credito gasto, e
+    # o usuario so descobriu conferindo a conta.
+    with pytest.raises(GeracaoFalhou, match="anexo REPETIDO"):
+        exigir_referencias_completas(["b", "b"], ["a", "b"])
+
+
+def test_duas_referencias_distintas_passam():
+    exigir_referencias_completas(["a", "b"], ["a", "b"])
+    exigir_referencias_completas(["b", "a"], ["a", "b"])   # a ordem nao importa
+
+
+def test_referencia_faltando_reprova_por_quantidade():
+    with pytest.raises(GeracaoFalhou, match="pedi 2 referencia"):
+        exigir_referencias_completas(["a"], ["a", "b"])
+
+
+def test_ficha_de_arquivo_que_ninguem_enviou_reprova():
+    with pytest.raises(GeracaoFalhou, match="anexo TROCADO"):
+        exigir_referencias_completas(["a", "z"], ["a", "b"])
 
 
 # --- o custo que o painel anuncia --------------------------------------
@@ -748,12 +891,15 @@ class _PaginaComAviso:
         return _LocatorContado(self, seletor)
 
     async def evaluate(self, script, seletor):
-        # o item so fica PRONTO (com miniatura) depois de o aviso sair da tela
+        # o item so fica PRONTO (com miniatura) depois de o aviso sair da tela — e a
+        # miniatura e onde mora o id, entao sem ela o item nao tem id nenhum. E o que
+        # foi MEDIDO: o item entra na lista vazio e ganha a imagem no fim do upload.
         if self.aviso_aceito:
             self.voltas_com_aviso_aceito += 1
         pronto = self.aviso_aceito and self.voltas_com_aviso_aceito > self.pronto_apos
         return [{"texto": "gato.png", "selecionado": False,
-                 "miniaturas": 1 if pronto else 0}]
+                 "miniaturas": 1 if pronto else 0,
+                 "src": _src("id-do-gato") if pronto else ""}]
 
     async def wait_for_timeout(self, ms):
         self.voltas += 1
@@ -766,10 +912,10 @@ async def test_o_aviso_de_direitos_e_pego_quando_aparece_no_meio_do_upload():
     # inteira. Uma vez em CADA conta do pool — com cinco estreando em paralelo, cinco
     # jobs perdendo a estreia juntos.
     pagina = _PaginaComAviso()
-    indice = await TransportePlaywright()._esperar_item_pronto(
-        pagina, "gato.png", Diario(1), teto_ms=60_000)
+    id_midia = await TransportePlaywright()._esperar_item_pronto(
+        pagina, "gato.png", set(), Diario(1), teto_ms=60_000)
 
-    assert indice == 0
+    assert id_midia == "id-do-gato"
     assert pagina.aviso_aceito is True
     assert sel.BOTAO_CONCORDO in pagina.clicados
 
@@ -779,10 +925,10 @@ async def test_upload_sem_aviso_nao_clica_em_nada():
     # seguintes nao podem pagar preco nenhum por ele
     pagina = _PaginaComAviso(aparece_na_volta=10_000)
     pagina.aviso_aceito = True          # ja aceito ha muito tempo nesta conta
-    indice = await TransportePlaywright()._esperar_item_pronto(
-        pagina, "gato.png", Diario(1), teto_ms=60_000)
+    id_midia = await TransportePlaywright()._esperar_item_pronto(
+        pagina, "gato.png", set(), Diario(1), teto_ms=60_000)
 
-    assert indice == 0
+    assert id_midia == "id-do-gato"
     assert pagina.clicados == []
 
 
@@ -1019,12 +1165,29 @@ def test_espera_longa_avisa_uma_vez_a_cada_janela(capsys):
     # achando que travou — foi o que aconteceu em 21/08.
     relogio = _RelogioDeMentira()
     d = Diario(6, relogio=relogio)
-    for decimo in range(1, 301):        # 30 s, amostrados como o laco real amostra
+    for decimo in range(1, 451):        # 45 s, amostrados como o laco real amostra
         relogio.agora = decimo * 0.1
         d.esperando("a miniatura de blusa.png")
     saida = capsys.readouterr().out
-    assert saida.count("ainda esperando") == 2      # aos 15s e aos 30s, nao 300 vezes
+    assert saida.count("ainda esperando") == 2      # aos 15s e aos 30s, nao 450 vezes
     assert "a miniatura de blusa.png" in saida
+
+
+def test_a_janela_conta_do_inicio_DAQUELA_espera(capsys):
+    # a espera da referencia 2 comeca depois da 1 ter terminado. Se a janela contasse
+    # do inicio da SESSAO, ela avisaria "ainda esperando" na primeira volta — dizendo
+    # "ainda" sobre uma espera que acabou de comecar.
+    relogio = _RelogioDeMentira()
+    d = Diario(6, relogio=relogio)
+    relogio.agora = 40.0
+    d.esperando("a miniatura de blusa2.png")
+    assert capsys.readouterr().out == ""
+    relogio.agora = 46.0
+    d.esperando("a miniatura de blusa2.png")
+    assert capsys.readouterr().out == ""
+    relogio.agora = 56.0
+    d.esperando("a miniatura de blusa2.png")
+    assert "ainda esperando a miniatura de blusa2.png" in capsys.readouterr().out
 
 
 def test_o_passo_carrega_a_conta_e_o_tempo(capsys):

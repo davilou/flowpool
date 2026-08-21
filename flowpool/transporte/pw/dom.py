@@ -41,21 +41,51 @@ TEXTOS_CURTOS = r"""
 """
 
 
-# Os itens do seletor de midia: nome, se estao marcados e se ja tem miniatura.
+# Os itens do seletor de midia: nome, se estao marcados, se ja tem miniatura, e — o
+# campo que fecha o defeito de 21/08 — o `src` da miniatura, de onde sai o ID DA MIDIA.
+#
+# POR QUE O `src` ENTROU. MEDIDO 2026-08-21: o nome do arquivo NAO IDENTIFICA o item.
+# O acervo do projeto persiste entre jobs, e enviar de novo um arquivo ja enviado
+# deixa DOIS itens de mesmo nome na lista — e eles tem ids diferentes:
+#     e511c628ec3c92a4.png -> name=776d74d8-8dd9-470f-bf27-089b8a366eed
+#     e511c628ec3c92a4.png -> name=095679c9-0315-4317-b864-dff5c3a0d5e2
+# Escolher por nome pegava o VELHO (que ja tem miniatura, entao "esta pronto") no
+# primeiro instante, com o upload de verdade ainda em voo. Ver `analise`.
 #
 # Le atributo e texto de UM tipo de elemento, nunca a pagina inteira — nao ha por onde
 # o `__NEXT_DATA__` entrar. Mora aqui, e nao no transporte, porque a regra 2 vale para
 # todo caminho de leitura de DOM, inclusive os pequenos.
 #
-# Devolve o TEXTO CRU e a CONTAGEM de miniaturas, nao um veredito: quem decide o que e
-# "pronto" e qual item e o recem-enviado e `analise`, que tem teste. Interpretar aqui
-# dentro colocaria a decisao num lugar onde ela so se verifica com navegador aberto.
+# Devolve o TEXTO CRU, a CONTAGEM de miniaturas e o `src` CRU, nao um veredito: quem
+# decide o que e "pronto", o que e o id e qual item e o recem-enviado e `analise`, que
+# tem teste. Interpretar aqui dentro colocaria a decisao num lugar onde ela so se
+# verifica com navegador aberto.
 ITENS_DE_MIDIA = r"""
-(seletor) => [...document.querySelectorAll(seletor)].map(e => ({
-  texto: (e.innerText || '').trim(),
-  selecionado: e.getAttribute('aria-selected') === 'true',
-  miniaturas: e.querySelectorAll('img, video').length,
-}))
+(seletor) => [...document.querySelectorAll(seletor)].map(e => {
+  const m = e.querySelector('img, video');
+  return {
+    texto: (e.innerText || '').trim(),
+    selecionado: e.getAttribute('aria-selected') === 'true',
+    miniaturas: e.querySelectorAll('img, video').length,
+    src: m ? (m.getAttribute('src') || '') : '',
+  };
+})
+"""
+
+
+# O `src` de cada FICHA da barra do prompt — as miniaturas das referencias ja incluidas.
+#
+# MEDIDO 2026-08-21: a ficha (`button[data-card-open]`) carrega o MESMO identificador
+# que o item da lista:
+#     <img src="/fx/api/trpc/media.getMediaUrlRedirect?name=166c3d5d-...">
+# E isso que torna possivel conferir QUAL arquivo entrou no comando, e nao so quantos.
+# A conferencia por contagem aprovava duas fichas iguais — o defeito de 21/08, em que
+# as duas referencias viraram a mesma foto, sem erro, com o credito gasto.
+SRC_DAS_REFERENCIAS = r"""
+(seletor) => [...document.querySelectorAll(seletor)].map(e => {
+  const m = e.querySelector('img, video');
+  return m ? (m.getAttribute('src') || '') : '';
+})
 """
 
 

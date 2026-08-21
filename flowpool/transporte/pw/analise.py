@@ -302,31 +302,184 @@ def item_pronto(item: dict) -> bool:
     return item.get("miniaturas", 0) > 0
 
 
-def escolher_item_enviado(itens: list[dict], nome: str) -> int | None:
-    """Indice do item que e o arquivo recem-enviado. `None` = ainda nao esta pronto.
+def id_da_midia(src: str | None) -> str:
+    """O id da midia dentro do `src` da miniatura. `""` quando nao ha.
 
-    `None` e "espere mais", nao "falhou": quem chama fica no laco ate o teto e so
-    entao levanta, com uma mensagem que sabe dizer se o item nem apareceu ou se
-    apareceu e nao ficou pronto.
+    MEDIDO 2026-08-21:
+        /fx/api/trpc/media.getMediaUrlRedirect?name=166c3d5d-e7d7-45ad-8453-e9a9053dfd6a
+    e, em item de VIDEO, com um parametro colado no fim:
+        ...?name=c474ed85-...&mediaUrlType=MEDIA_URL_TYPE_THUMBNAIL
 
-    Ambiguidade AQUI nao pode ser erro, e essa e a diferenca em relacao a
-    `escolher_opcao`. Enviar o MESMO arquivo duas vezes deixa dois itens de mesmo nome
-    na lista — foi medido, com dois `blusa.png` —, e recusar isso travaria a segunda
-    geracao de qualquer produto. O desempate e medido, nao arbitrado:
+    E por isso que se EXTRAI o `name` em vez de comparar o `src` inteiro: o src cru de
+    um video nunca casaria com o src da ficha do mesmo video.
 
-      1. o item que o Flow ja deixou SELECIONADO e o que acabou de subir (ele
-         auto-seleciona o recem-enviado);
-      2. sem nenhum selecionado, vale o primeiro — a lista sai ordenada por
-         "Recentes", e o novo entra no topo.
+    `""` para o que nao tem id — item ainda sem miniatura, por exemplo. Quem chama
+    trata isso como "ainda nao da para identificar", nunca como um id valido; ids
+    vazios que se comparassem iguais fariam dois itens diferentes parecerem o mesmo,
+    que e exatamente a classe de erro que este id existe para fechar.
     """
-    candidatos = [i for i, x in enumerate(itens) if nome_do_item(x.get("texto", "")) == nome]
+    achado = re.search(sel.PADRAO_ID_MIDIA, src or "")
+    return achado.group(1) if achado else ""
+
+
+def ids_dos_itens(itens: list[dict]) -> set[str]:
+    """Os ids de uma lista de itens, sem os vazios. E o "retrato antes do envio"."""
+    return {i for i in (id_da_midia(x.get("src")) for x in itens) if i}
+
+
+def ids_selecionados(itens: list[dict]) -> list[str]:
+    """Os ids dos itens marcados agora. A selecao do seletor de midia e EXCLUSIVA,
+    entao o normal e zero ou um — mais que isso e a interface ter mudado."""
+    return [i for i in (id_da_midia(x.get("src")) for x in itens if x.get("selecionado")) if i]
+
+
+def escolher_item_enviado(itens: list[dict], nome: str,
+                          ids_antes: set[str] | None = None) -> str | None:
+    """O ID do item recem-enviado. `None` = ainda nao esta pronto, espere mais.
+
+    DEVOLVE ID, NAO POSICAO. Foi um indice calculado numa varredura e usado num clique
+    depois que deixou o transporte clicando no item errado: a lista se REORDENA (o
+    recem-enviado sobe ao topo) e ENCOLHE (o incluido sai dela), entao a posicao de
+    ontem e outro item hoje.
+
+    `ids_antes` E O RETRATO DA LISTA ANTES DO ENVIO, e e a peca que conserta o defeito
+    de 21/08. Sem ele esta funcao escolhia PELO NOME, e o nome nao identifica nada:
+
+      O acervo do projeto PERSISTE ENTRE JOBS. Quando o mesmo arquivo ja foi enviado
+      num job anterior — e ele quase sempre foi, porque os arquivos vem de `_coladas/`
+      com nome por hash e a personagem se reaproveita entre gerações — existe na lista
+      um HOMONIMO VELHO que JA TEM MINIATURA. Ele passava em `item_pronto` no primeiro
+      instante, e a espera pelo upload terminava sem ter esperado nada.
+
+      Dai vinha a cadeia inteira que se via em producao: "Incluir no comando" clicado
+      com o upload ainda em voo, a lista se reordenando no meio, a interface
+      engasgando, o botao `+` mudando de lugar, e a segunda referencia virando a foto
+      errada — ou nenhuma. Como a personagem reaproveitada e quase sempre a SEGUNDA
+      referencia, travava sempre na 2, e "as vezes" era so o acaso de o arquivo ja
+      estar no acervo ou nao.
+
+      Pior: a propria REPETICAO fabricava a condicao. A tentativa 0 subia o arquivo A
+      e morria na B; a tentativa 1 subia A de novo, e agora havia um homonimo pronto
+      para a espera devolver na hora. Foi assim que um job saiu "pronto" com as fotos
+      trocadas — resultado errado, em silencio, com credito gasto.
+
+    Com o retrato, so podem ser o recem-enviado os itens que APARECERAM depois dele.
+
+    `None` continua sendo "espere mais", nao "falhou": quem chama fica no laco ate o
+    teto e so entao levanta, com uma mensagem que sabe dizer se o item nem apareceu ou
+    se apareceu e nao ficou pronto.
+
+    Ambiguidade AQUI nao vira erro, ao contrario de `escolher_opcao`. Dois uploads do
+    mesmo nome DENTRO desta mesma espera nao acontecem — sobe-se um arquivo por vez —,
+    mas se acontecerem o desempate e o medido: o Flow deixa o recem-enviado
+    SELECIONADO, e sem nenhum selecionado vale o primeiro, porque a lista sai por
+    "Recentes" e o novo entra no topo.
+    """
+    ids_antes = set() if ids_antes is None else ids_antes
+    novos = [x for x in itens
+             if (id := id_da_midia(x.get("src"))) and id not in ids_antes]
+    candidatos = [x for x in novos if nome_do_item(x.get("texto", "")) == nome]
     if not candidatos:
         return None
-    prontos = [i for i in candidatos if item_pronto(itens[i])]
+    # `item_pronto` so vale sobre o item que EU criei. Aplicado a um homonimo velho ele
+    # nao prova nada sobre o meu upload — era essa a confusao.
+    prontos = [x for x in candidatos if item_pronto(x)]
     if not prontos:
         return None
-    selecionados = [i for i in prontos if itens[i].get("selecionado")]
-    return selecionados[0] if selecionados else prontos[0]
+    marcados = [x for x in prontos if x.get("selecionado")]
+    return id_da_midia((marcados[0] if marcados else prontos[0]).get("src"))
+
+
+def apareceu_na_lista(itens: list[dict], nome: str,
+                      ids_antes: set[str] | None = None) -> bool:
+    """Se um item NOVO com aquele nome ja esta na lista, pronto ou nao.
+
+    Separa as duas mensagens de erro que interessam quando a espera estoura: "o item
+    nem apareceu" (o envio nao pegou) e "apareceu e nao ficou pronto" (upload lento).
+    Olha so os NOVOS pelo mesmo motivo de `escolher_item_enviado`: um homonimo velho
+    no acervo faria o erro dizer "apareceu" sobre um item que nao e o meu.
+
+    ITEM SEM ID CONTA COMO NOVO, e essa e a diferenca em relacao a
+    `escolher_item_enviado`. MEDIDO 2026-08-21: o item entra na lista SEM miniatura —
+    e o id mora no `src` da miniatura, entao enquanto o upload corre o item nao tem
+    id nenhum. Exigir id aqui faria a mensagem de erro dizer "nao apareceu" em todo
+    upload lento, mandando investigar envio que nao pegou onde o arquivo estava
+    subindo. E um item sem id nao pode ser um dos velhos: os velhos foram retratados
+    justamente pelos ids que tinham.
+
+    `escolher_item_enviado` continua exigindo id, e deve: ali o valor de retorno E o
+    id, e sem miniatura o item nao esta pronto de qualquer forma.
+    """
+    ids_antes = set() if ids_antes is None else ids_antes
+    return any(nome_do_item(x.get("texto", "")) == nome
+               and id_da_midia(x.get("src")) not in ids_antes
+               for x in itens)
+
+
+def exigir_selecao(marcados: list[str], esperado: str, nome: str) -> None:
+    """Antes de "Incluir no comando": o item marcado tem que ser EXATAMENTE o meu.
+
+    "Incluir no comando" age sobre o que estiver SELECIONADO, e nao sobre o item que o
+    codigo julga ter escolhido. Enquanto ninguem conferia isso, os dois podiam divergir
+    e a divergencia entrava na geracao sem sintoma nenhum.
+    """
+    if marcados != [esperado]:
+        raise GeracaoFalhou(
+            f"{nome}: ia incluir com a selecao errada — marcado {marcados}, "
+            f"esperado [{esperado!r}]. 'Incluir no comando' age sobre o que esta "
+            f"marcado, entao isso anexaria o arquivo errado sem erro nenhum")
+
+
+def exigir_referencia_incluida(antes: list[str], depois: list[str], esperado: str,
+                               nome: str) -> None:
+    """A BARREIRA entre uma referencia e a proxima: entrou UMA, e foi a minha.
+
+    Conferida a cada referencia, e nao so no fim. Tres coisas de uma vez:
+      * fecha a corrida — a proxima so comeca depois desta ter chegado na barra;
+      * da tempo de o botao `+` reassentar, porque a barra do prompt CRESCE a cada
+        ficha e o `+` muda de lugar (ver `_abrir_seletor_midia`);
+      * transforma "sumiu em silencio" em erro no ponto certo, com o nome do arquivo
+        que sumiu, em vez de um "pedi 2 e vejo 1" no fim que nao diz qual.
+    """
+    novos = list(depois)
+    for id_ in antes:
+        if id_ in novos:
+            novos.remove(id_)
+    if novos == [esperado]:
+        return
+    if not novos:
+        raise GeracaoFalhou(
+            f"{nome}: cliquei em 'Incluir no comando' e nenhuma ficha nova apareceu "
+            f"na barra do prompt (continuam {len(depois)})")
+    raise GeracaoFalhou(
+        f"{nome}: a ficha que entrou na barra nao e a do arquivo enviado — entrou "
+        f"{novos}, esperado [{esperado!r}]")
+
+
+def exigir_referencias_completas(ids: list[str], esperados: list[str]) -> None:
+    """A conferencia final: QUAIS entraram, nao quantas.
+
+    A versao por contagem aprovava DUAS FICHAS IGUAIS — foi assim que um job real saiu
+    com a mesma foto duas vezes, sem erro, com o credito gasto e um resultado que
+    parecia plausivel. O usuario so descobriu conferindo a conta.
+
+    As tres condicoes sao independentes e cada uma pega um defeito diferente:
+      * quantidade — alguma referencia nao entrou
+      * repetida   — a MESMA midia entrou duas vezes (o defeito de 21/08)
+      * trocada    — entrou midia que nao e de nenhum dos arquivos enviados
+    """
+    if len(ids) != len(esperados):
+        raise GeracaoFalhou(
+            f"anexo nao confirma: pedi {len(esperados)} referencia(s) e a barra do "
+            f"prompt mostra {len(ids)}")
+    if len(set(ids)) != len(ids):
+        raise GeracaoFalhou(
+            f"anexo REPETIDO: a barra do prompt mostra a mesma midia mais de uma vez "
+            f"({ids}). A geracao sairia com o mesmo arquivo no lugar de dois")
+    if set(ids) != set(esperados):
+        raise GeracaoFalhou(
+            f"anexo TROCADO: a barra do prompt mostra {sorted(ids)}, e os arquivos "
+            f"enviados foram {sorted(esperados)}")
 
 
 def arquivos_do_pedido(p) -> list[str]:

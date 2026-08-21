@@ -712,26 +712,25 @@ class TransportePlaywright:
             raise GeracaoFalhou(f"modo {p.modo.value} sem arquivo para anexar")
 
         await self._limpar_referencias(pagina)
+        esperados: list[str] = []
         for n, arquivo in enumerate(arquivos, 1):
             # o numero DENTRO do total e o que fecha o caso das duas referencias: com
             # ele, "parou na 2 de 2" e "nem chegou na 2" deixam de ser a mesma linha
             d.passo(f"anexando referencia {n} de {len(arquivos)}: {Path(arquivo).name}")
             quanto = d.cronometro()
-            await self._incluir_referencia(pagina, arquivo, d)
+            esperados.append(await self._incluir_referencia(pagina, arquivo, d))
             # o tempo POR REFERENCIA e a medicao que hoje falta: a lentidao com duas e
             # real e irregular ("as vezes demora, as vezes envia rapidamente") e
             # ninguem sabe por que. Com dezenas de jobs por dia, esta linha vira a
             # distribuicao real em vez de impressao — e sem custo nenhum.
             d.passo(f"referencia {n} incluida no comando em {quanto():.1f}s")
 
-        # CONFERE, nao confia. Este e o passo que faltava: sem ele, uma referencia que
-        # nao entrou some em silencio e a geracao sai por texto puro — que foi
-        # exatamente o defeito. Divergencia e ERRO, com a reserva ainda estornavel.
-        incluidas = await pagina.locator(sel.REFERENCIA_ANEXADA).count()
-        if incluidas != len(arquivos):
-            raise GeracaoFalhou(
-                f"anexo nao confirma: pedi {len(arquivos)} referencia(s) e a barra do "
-                f"prompt mostra {incluidas}")
+        # CONFERE QUAIS, nao quantas. A versao por contagem aprovava DUAS FICHAS
+        # IGUAIS — foi assim que um job real saiu com a mesma foto duas vezes, sem
+        # erro, com credito gasto e um resultado plausivel que o usuario so pegou
+        # conferindo a conta. Cada ficha carrega o id da midia (MEDIDO 21/08), entao
+        # da para comparar identidade em vez de numero.
+        analise.exigir_referencias_completas(await self._ids_anexados(pagina), esperados)
 
     async def _limpar_referencias(self, pagina) -> None:
         """Zera o rascunho antes de anexar. Referencia herdada e geracao errada.
@@ -750,7 +749,7 @@ class TransportePlaywright:
         raise GeracaoFalhou(
             "as referencias de uma tentativa anterior nao sairam da barra do prompt")
 
-    async def _abrir_seletor_midia(self, pagina, tentativas: int = 3):
+    async def _abrir_seletor_midia(self, pagina, d: Diario, tentativas: int = 3):
         """Abre o seletor de midia pelo `+`, tentando de novo se ele nao vier.
 
         Um clique que nao abre nada acontece: o botao muda de posicao quando ja ha
@@ -758,46 +757,205 @@ class TransportePlaywright:
         erro — so nao abre. Insistir e barato; desistir custa a geracao inteira e as
         tres tentativas do job.
 
-        Nao esconde problema de verdade: se as tres voltas falharem, o erro sobe com o
-        print salvo. O que ele evita e o job morrer por um clique que caiu no vazio.
+        O RETRY ERA UMA ARMADILHA, e o usuario viu isso na tela: "as vezes ele fecha
+        ali o mais onde voce coloca as fotos. Parece que ele fecha isso e nao consegue
+        mais enviar a segunda foto." A versao anterior apertava Escape ASSUMINDO que o
+        painel nao tinha aberto. Mas quando ele ABRIU e so demorou a casar — que e
+        exatamente o que acontece com a interface engasgada por um upload correndo por
+        baixo — o Escape FECHAVA o painel recem-aberto, e o clique seguinte pegava a
+        animacao e alternava de novo. O socorro virava a causa.
+
+        A correcao e nao chutar: so se aperta Escape quando NAO HA nada aberto para
+        fechar. Painel visivel que ainda nao casou o seletor e "esperar mais".
+
+        A espera tambem subiu de 8 para 20 s pelo mesmo motivo: 8 s e curto para uma
+        interface sob upload. Isso e paliativo — a causa de verdade era a espera que
+        terminava cedo demais (`_esperar_item_pronto`), e ela ja foi consertada. Os
+        dois consertos sao necessarios: um tira a causa, o outro tira a armadilha.
         """
         for volta in range(tentativas):
-            await pagina.locator(sel.BOTAO_ANEXAR).first.click(timeout=15_000)
-            seletor = pagina.locator(sel.SELETOR_MIDIA).first
-            try:
-                await seletor.wait_for(timeout=8_000)
-                return seletor
-            except Exception:
-                if volta + 1 < tentativas:
-                    print(f"o seletor de midia nao abriu (volta {volta + 1}); repetindo")
-                    await pagina.keyboard.press("Escape")
-                    await pagina.wait_for_timeout(1200)
+            # SO CLICA COM O BOTAO DECLARANDO FECHADO. Com ele em `open` — o que
+            # acontece enquanto a animacao de fechamento da referencia anterior corre —
+            # um clique FECHA em vez de abrir, e era essa a armadilha.
+            if await self._esperar_anexar_fechado(pagina):
+                await pagina.locator(sel.BOTAO_ANEXAR).first.click(timeout=15_000)
+            else:
+                d.passo("o `+` ainda declara ABERTO; nao clico (o clique fecharia) - "
+                        "esperando o painel se firmar")
+            if await self._esperar_seletor_midia(pagina):
+                return pagina.locator(sel.SELETOR_MIDIA).first
+            if volta + 1 >= tentativas:
+                break
+            # Escape SO com o botao declarando fechado e nada na tela: senao seria o
+            # proprio codigo fechando o painel que acabou de abrir
+            estado = await pagina.locator(sel.BOTAO_ANEXAR).first.get_attribute(
+                sel.ATRIBUTO_ANEXAR)
+            d.passo(f"o seletor de midia nao ficou pronto (volta {volta + 1} de "
+                    f"{tentativas}); o `+` diz {estado!r}")
+            if estado == sel.ANEXAR_FECHADO:
+                await pagina.keyboard.press("Escape")
+                await pagina.wait_for_timeout(1200)
         raise GeracaoFalhou(
             f"o seletor de midia nao abriu depois de {tentativas} cliques no anexar")
 
-    async def _incluir_referencia(self, pagina, arquivo: str, d: Diario) -> None:
-        """Uma volta completa do seletor de midia: abrir, enviar, esperar, incluir."""
-        seletor = await self._abrir_seletor_midia(pagina)
+    async def _esperar_anexar_fechado(self, pagina, teto_ms: int = 10_000) -> bool:
+        """Espera o `+` DECLARAR fechado. Devolve se chegou la.
+
+        E a barreira que faltava entre uma referencia e a proxima: o painel se fecha
+        com animacao, e enquanto ela corre o botao continua dizendo `open`. Clicar
+        nessa janela fecha em vez de abrir.
+        """
+        gasto = 0
+        while gasto < teto_ms:
+            if await pagina.locator(sel.BOTAO_ANEXAR).first.get_attribute(
+                    sel.ATRIBUTO_ANEXAR) == sel.ANEXAR_FECHADO:
+                return True
+            await pagina.wait_for_timeout(250)
+            gasto += 250
+        return False
+
+    async def _esperar_seletor_midia(self, pagina, teto_ms: int = 20_000) -> bool:
+        """Aberto = o `+` DECLARA aberto, o dialogo esta visivel E a lista tem itens.
+
+        As tres partes, e cada uma cobre um engano medido:
+
+        * so `wait_for(visible)` no dialogo — o que a versao anterior fazia — casa o
+          painel que esta SAINDO de cena pela animacao. Ele volta "abriu" e um instante
+          depois a tela nao tem lista nenhuma. Medido: 180 s de espera com
+          `[role=option]` em zero.
+        * so o `aria-expanded` do botao — declara antes de a lista montar.
+        * a LISTA e o que a sequencia realmente usa, e conferir o que se vai usar e
+          melhor do que conferir um sinal que a representa.
+        """
+        gasto = 0
+        while gasto < teto_ms:
+            if (await pagina.locator(sel.BOTAO_ANEXAR).first.get_attribute(
+                    sel.ATRIBUTO_ANEXAR) == sel.ANEXAR_ABERTO
+                    and await pagina.locator(sel.SELETOR_MIDIA).count() > 0
+                    and await pagina.locator(sel.SELETOR_MIDIA).first.is_visible()
+                    and await pagina.locator(sel.ITEM_MIDIA).count() > 0):
+                return True
+            await pagina.wait_for_timeout(250)
+            gasto += 250
+        return False
+
+    async def _ids_anexados(self, pagina) -> list[str]:
+        """Os ids das midias que ja estao na barra do prompt como referencia.
+
+        MEDIDO 2026-08-21: a ficha da barra carrega o mesmo `?name=<id>` do item da
+        lista. E o que permite conferir QUAL entrou, e nao so quantas — a diferenca
+        entre pegar duas fichas iguais e aprova-las.
+        """
+        srcs = await pagina.evaluate(dom.SRC_DAS_REFERENCIAS, sel.REFERENCIA_ANEXADA)
+        return [analise.id_da_midia(s) for s in srcs]
+
+    async def _itens_da_lista(self, pagina) -> list[dict]:
+        return await pagina.evaluate(dom.ITENS_DE_MIDIA, sel.ITEM_MIDIA)
+
+    async def _incluir_referencia(self, pagina, arquivo: str, d: Diario) -> str:
+        """Uma volta completa do seletor de midia. Devolve o ID da midia incluida.
+
+        Devolve o ID, e nao None, porque quem chama precisa conferir QUAL entrou. Ver
+        `analise.exigir_referencias_completas`.
+        """
+        nome = Path(arquivo).name
+        fichas_antes = await self._ids_anexados(pagina)
+        seletor = await self._abrir_seletor_midia(pagina, d)
+
+        # O RETRATO ANTES DO ENVIO. Sem ele, um homonimo VELHO do acervo — que ja tem
+        # miniatura desde um job anterior — passava por "meu upload terminou" no
+        # primeiro instante, e todo o resto acontecia com o arquivo ainda em voo. Ver
+        # `analise.escolher_item_enviado`.
+        ids_antes = analise.ids_dos_itens(await self._itens_da_lista(pagina))
 
         # o `input[type=file]` vive DENTRO do seletor; nao se clica em "Enviar midia"
         await pagina.locator(sel.UPLOAD).first.set_input_files([arquivo])
         # o aviso de direitos e vigiado DENTRO da espera, nao antes dela — ver
         # `_esperar_item_pronto`
-        indice = await self._esperar_item_pronto(pagina, Path(arquivo).name, d)
-        itens = pagina.locator(sel.ITEM_MIDIA)
-        # CONFERIR antes de clicar. MEDIDO: clicar num item JA selecionado o DESmarca,
-        # e sem selecao o botao "Incluir no comando" some da tela — o clique cego
-        # derrubaria a geracao com "esperava 1 candidato, achei 0".
-        if await itens.nth(indice).get_attribute("aria-selected") != "true":
-            await itens.nth(indice).click(timeout=15_000)
+        id_midia = await self._esperar_item_pronto(pagina, nome, ids_antes, d)
+
+        await self._marcar_item(pagina, id_midia, nome)
         await self._clicar_unico(pagina, sel.BOTAO_INCLUIR_NO_COMANDO,
                                  "Incluir no comando")
-        # o seletor fecha sozinho ao incluir; espera-se o ESTADO, nunca um sono
-        await seletor.wait_for(state="hidden", timeout=15_000)
+        # O seletor fecha sozinho ao incluir; espera-se o ESTADO, nunca um sono. E o
+        # estado que vale e o do PROPRIO BOTAO `+`, nao a visibilidade do dialogo: o
+        # painel sai de cena com animacao, e enquanto ela corre ele continua visivel
+        # e o botao continua dizendo `open`. Quem seguia pela visibilidade passava
+        # para a referencia seguinte no meio da animacao, e o clique no `+` daquela
+        # fechava o painel em vez de abrir.
+        if not await self._esperar_anexar_fechado(pagina):
+            raise GeracaoFalhou(
+                f"{nome}: o seletor de midia nao terminou de fechar depois de incluir "
+                f"({sel.ATRIBUTO_ANEXAR} do `+` continua {sel.ANEXAR_ABERTO!r})")
 
-    async def _esperar_item_pronto(self, pagina, nome: str, d: Diario,
-                                   teto_ms: int = 180_000) -> int:
-        """Espera o upload TERMINAR e devolve o indice do item na lista.
+        # A BARREIRA. So se passa para a proxima referencia depois que ESTA chegou na
+        # barra — e depois de conferir que a ficha nova e a do arquivo que subiu.
+        await self._esperar_ficha_nova(pagina, len(fichas_antes))
+        analise.exigir_referencia_incluida(
+            fichas_antes, await self._ids_anexados(pagina), id_midia, nome)
+        return id_midia
+
+    async def _marcar_item(self, pagina, id_midia: str, nome: str) -> None:
+        """Deixa EXATAMENTE `id_midia` selecionado no seletor de midia.
+
+        Duas coisas que a versao anterior errava, e as duas custaram caro:
+
+        * ela clicava por POSICAO (`itens.nth(indice)`), com um indice calculado numa
+          varredura anterior. A lista se reordena e encolhe, entao a posicao vira outro
+          item. Aqui o alvo carrega o ID no proprio seletor e e resolvido no instante do
+          clique, por `_clicar_unico` — zero candidatos e erro, dois tambem.
+        * ela conferia `aria-selected` do item que JULGAVA ter escolhido e seguia. Mas
+          "Incluir no comando" age sobre o que estiver SELECIONADO na lista, e os dois
+          podiam divergir sem sintoma. Agora se confere a SELECAO, que e o que manda.
+
+        MEDIDO: clicar num item JA selecionado o DESmarca, e sem selecao o botao
+        "Incluir no comando" some da tela. Por isso so se clica quando preciso.
+        """
+        alvo = sel.ITEM_MIDIA_POR_ID.format(id=id_midia)
+        for _ in range(20):
+            marcados = analise.ids_selecionados(await self._itens_da_lista(pagina))
+            if marcados == [id_midia]:
+                return
+            if id_midia in marcados:
+                # marcado junto com outro: a selecao devia ser exclusiva. Nao se
+                # desempata no escuro — quem decide e o exigir logo abaixo.
+                break
+            await self._clicar_unico(pagina, alvo, f"item {nome} no seletor de midia")
+            # espera o ESTADO, nunca um sono: o item redesenha ao ser marcado
+            for _ in range(12):
+                await pagina.wait_for_timeout(250)
+                if analise.ids_selecionados(
+                        await self._itens_da_lista(pagina)) == [id_midia]:
+                    return
+        analise.exigir_selecao(
+            analise.ids_selecionados(await self._itens_da_lista(pagina)), id_midia, nome)
+
+    async def _esperar_ficha_nova(self, pagina, antes: int,
+                                  teto_ms: int = 20_000) -> None:
+        """Espera a barra do prompt ir de `antes` para `antes + 1` fichas.
+
+        Espera o ESTADO. A ficha nao aparece no mesmo quadro em que o seletor fecha, e
+        conferir na hora daria "nao entrou" para uma referencia que entrou 300 ms
+        depois. Estourar aqui e erro de verdade, e o erro vem de quem chama, que sabe
+        o nome do arquivo.
+        """
+        gasto = 0
+        while gasto < teto_ms:
+            if len(await self._ids_anexados(pagina)) > antes:
+                return
+            await pagina.wait_for_timeout(250)
+            gasto += 250
+
+    async def _esperar_item_pronto(self, pagina, nome: str, ids_antes: set[str],
+                                   d: Diario, teto_ms: int = 180_000) -> str:
+        """Espera o upload TERMINAR e devolve o ID DA MIDIA recem-enviada.
+
+        DEVOLVE ID, NAO POSICAO — e `ids_antes` (o retrato da lista antes do envio) e
+        o que faz esta espera esperar de verdade. O defeito de 21/08 morava aqui: com
+        a busca feita PELO NOME, um homonimo velho do acervo — que ja tem miniatura
+        desde um job anterior — satisfazia "pronto" no primeiro instante, e a funcao
+        voltava sem ter esperado nada, com o upload real ainda em voo. Ver a cadeia
+        inteira em `analise.escolher_item_enviado`.
 
         Espera pelo ITEM PRONTO, nao por tempo. MEDIDO 2026-08-20: 2,9 MB levaram
         17,25 s, e o item entra na lista no primeiro segundo — sem miniatura — com uma
@@ -824,16 +982,16 @@ class TransportePlaywright:
         while gasto < teto_ms:
             if vigiar_aviso and await self._dispensar_aviso_de_direitos(pagina):
                 vigiar_aviso = False
-            itens = await pagina.evaluate(dom.ITENS_DE_MIDIA, sel.ITEM_MIDIA)
-            indice = analise.escolher_item_enviado(itens, nome)
-            if indice is not None:
-                return indice
-            visto = visto or any(
-                analise.nome_do_item(i.get("texto", "")) == nome for i in itens)
+            itens = await self._itens_da_lista(pagina)
+            id_midia = analise.escolher_item_enviado(itens, nome, ids_antes)
+            if id_midia:
+                return id_midia
+            visto = visto or analise.apareceu_na_lista(itens, nome, ids_antes)
             await pagina.wait_for_timeout(500)
             gasto += 500
             # A LINHA QUE FALTAVA. Meia hora ja foi gasta investigando um job que
-            # estava apenas subindo um arquivo grande. Diz tambem se o item ja
+            # estava apenas subindo um arquivo grande — e foi o silencio que fez o
+            # usuario fechar a janela achando que travou. Diz tambem se o item ja
             # APARECEU, que e o que separa "upload lento" de "o arquivo nem chegou".
             d.esperando(f"a miniatura de {nome}"
                         f"{'' if visto else ' (o item nem apareceu na lista)'}")

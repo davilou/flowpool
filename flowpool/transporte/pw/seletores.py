@@ -87,6 +87,23 @@ GUIA_PROMPT = "O que você quer criar?"   # texto-guia, confirma que e o campo c
 
 # Barra abaixo do prompt. Dois botoes contem a palavra "Criar" — o de anexar midia e o
 # de enviar. So a ligadura do icone os separa, e ela vem no innerText.
+# O `+` E UM INTERRUPTOR, e nao um "abrir". MEDIDO 2026-08-21:
+#     fechado: aria-expanded="false" data-state="closed"  -> clicar ABRE
+#     aberto : aria-expanded="true"  data-state="open"    -> clicar FECHA
+#
+# E disso que vinha "as vezes ele fecha ali o mais onde voce coloca as fotos. Parece
+# que ele fecha isso e nao consegue mais enviar a segunda foto". Depois de incluir uma
+# referencia o painel se fecha com ANIMACAO, e enquanto ela corre o botao ainda declara
+# `open`. O clique da referencia seguinte chegava nessa janela e FECHAVA — e como o
+# painel ainda estava visivel saindo de cena, um `wait_for(visible)` dizia "abriu" e a
+# sequencia seguia contra uma tela que ja nao tinha lista nenhuma. Medido ao vivo: a
+# espera pela segunda referencia rodou 180 s com `[role=option]` em ZERO.
+#
+# Por isso se pergunta ao botao o estado dele antes de clicar, como se faz com o
+# interruptor do Agente. Interruptor nao tem clique inofensivo.
+ATRIBUTO_ANEXAR = "aria-expanded"
+ANEXAR_ABERTO = "true"
+ANEXAR_FECHADO = "false"
 BOTAO_ANEXAR = 'button:has-text("add_2")'
 BOTAO_ENVIAR = 'button:has-text("arrow_forward")'
 BOTAO_INSTRUCOES_AGENTE = 'button:has-text("article_spark")'
@@ -196,6 +213,49 @@ UPLOAD = 'input[type=file]'
 #    que o ciclo pode repetir sem ambiguidade de nome.
 SELETOR_MIDIA = '[role=dialog]'
 ITEM_MIDIA = "[role=option]"
+
+# --- O ID DA MIDIA: o que o nome do arquivo nao consegue identificar ----
+# MEDIDO 2026-08-21, e e o fato que fecha o pior defeito ja visto neste app.
+#
+# O nome do arquivo NAO IDENTIFICA um item. O acervo do projeto PERSISTE ENTRE JOBS, e
+# reenviar um arquivo ja enviado deixa dois itens de MESMO NOME na lista, com ids
+# diferentes — medido, com dois `e511c628ec3c92a4.png`:
+#     name=776d74d8-8dd9-470f-bf27-089b8a366eed
+#     name=095679c9-0315-4317-b864-dff5c3a0d5e2
+#
+# O QUE ISSO CAUSAVA: a espera pelo upload procurava o item PELO NOME e aceitava o
+# primeiro que tivesse miniatura. O homonimo VELHO ja tem miniatura desde o job
+# anterior, entao a espera terminava NO PRIMEIRO INSTANTE, com o upload de verdade
+# ainda correndo por baixo. Dai saia tudo o que se via em producao: "Incluir no
+# comando" clicado cedo, a lista se reordenando no meio, a interface engasgando, o
+# botao `+` mudando de lugar, e a segunda referencia virando a foto errada — ou
+# nenhuma. Os arquivos vem de `_coladas/` com nome por hash, e a personagem
+# reaproveitada e quase sempre a SEGUNDA referencia: por isso travava sempre na 2.
+#
+# O id sai do `src` da miniatura, e ele vale nos DOIS lugares — no item da lista e na
+# FICHA da barra do prompt. E por isso que da para conferir QUAL arquivo entrou no
+# comando, e nao so quantos.
+#
+# `mediaUrlType` aparece colado no fim em item de VIDEO
+# (`...?name=<uuid>&mediaUrlType=MEDIA_URL_TYPE_THUMBNAIL`), entao NAO se compara o src
+# inteiro: extrai-se o `name`. Comparar src cru faria video nunca casar com ele mesmo.
+# Casa ate o proximo `&`, sem exigir formato de UUID. A ancora que importa e o
+# `name=`, que e especifico; presumir "36 caracteres hexadecimais" seria apostar num
+# formato de id que o Google nao prometeu, e o dia em que ele mudasse o id deixaria de
+# ser lido — de volta ao mundo em que a conferencia so sabe CONTAR referencias.
+PADRAO_ID_MIDIA = r"[?&]name=([^&#]+)"
+
+# Clicar no item POR IDENTIDADE, nunca por posicao. `{id}` e substituido pelo id lido.
+#
+# A regra dura deste arquivo diz "NUNCA escolher item de menu por posicao", e ela vale
+# aqui pelo mesmo motivo: a lista do seletor de midia se REORDENA (o recem-enviado sobe
+# para o topo) e ENCOLHE (o item incluido sai dela). Um indice calculado numa varredura
+# e usado num clique depois aponta para outro item — foi um `.last` desse tipo que
+# mandou um video do usuario para a lixeira.
+#
+# Com o id no proprio seletor, o alvo e resolvido NO INSTANTE DO CLIQUE, e passa por
+# `_clicar_unico`: zero candidatos e erro, dois tambem.
+ITEM_MIDIA_POR_ID = '[role=option]:has([src*="{id}"])'
 
 # O SINAL DE UPLOAD TERMINADO. MEDIDO com um arquivo de 2,9 MB, amostrando de 250 em
 # 250 ms: o item entra na lista NA HORA, sem miniatura, enquanto uma porcentagem

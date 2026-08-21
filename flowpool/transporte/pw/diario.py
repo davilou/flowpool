@@ -150,8 +150,14 @@ class Diario:
         comeca a interessar.
         """
         agora = self._relogio()
-        desde = self._ultimo.get(o_que, self._inicio)
-        if agora - desde < cada_s:
+        if o_que not in self._ultimo:
+            # PRIMEIRA VEZ que se espera por isto: marca a partida e nao imprime. Sem
+            # esta linha o relogio de referencia seria o inicio da SESSAO, e uma espera
+            # que comecasse aos 40 s avisaria "ainda esperando" na primeira volta —
+            # dizendo "ainda" sobre algo que acabou de comecar.
+            self._ultimo[o_que] = agora
+            return
+        if agora - self._ultimo[o_que] < cada_s:
             return
         self._ultimo[o_que] = agora
         self.passo(f"ainda esperando {o_que}")
