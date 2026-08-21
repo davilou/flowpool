@@ -27,7 +27,8 @@ from flowpool.nucleo.erros import ProxyInvalido
 from flowpool.nucleo.proxy import mascarar
 from flowpool.nucleo.tipos import Conta, EstadoJob, Job, SaudeSessao
 from flowpool.transporte.base import FlowTransport, SessaoMorta
-from flowpool.transporte.pw.sessao import ChromeAusente, PerfilOcupado, cadastrar
+from flowpool.transporte.pw.sessao import (ChromeAusente, PerfilOcupado,
+                                           abrir_para_conferir, cadastrar)
 
 
 # Os tres arquivos do painel moram AO LADO deste modulo, dentro do pacote. Servi-los um
@@ -466,6 +467,40 @@ def criar_app(repo: Repo, transporte: FlowTransport, raiz: Path | str,
         # dias, e o saldo guardado envelheceu junto — conta gratuita reseta todo dia.
         await orq.semear_saldo(c)
         return _resposta_conta(c)
+
+    @app.post("/contas/{id_}/abrir", status_code=202)
+    async def abrir_conta(id_: int) -> dict:
+        """Abre o Chrome logado nessa conta, para o usuario conferir com os olhos.
+
+        Nasceu de uma necessidade concreta e recorrente: o app deu tres jobs por
+        falhos com o video GERADO na conta, e a unica forma de conferir era achar a
+        conta certa entre oito, abrir o Chrome na mao e navegar. Um botao resolve.
+
+        202 e nao 200: o pedido termina quando o Chrome SOBE, nao quando o usuario
+        acaba de olhar. Prender a rota pelos minutos que ele levar congelaria o event
+        loop — que e o mesmo do motor.
+
+        Recusa com a conta GERANDO, e por um motivo diferente do de `revalidar`: ali a
+        janela extra atrapalha um login; aqui ela derruba a geracao em curso, porque o
+        perfil esta nas maos do Playwright. `orq.ocupada` e o unico sinal que separa
+        "o app esta usando" de "o usuario deixou uma janela aberta" — olhar a linha de
+        comando do Chrome, como `perfil_em_uso` faz, nao distingue os dois.
+        """
+        c = repo.conta(id_)
+        if c is None:
+            raise HTTPException(404, "conta nao existe")
+        if orq.ocupada(c.id):
+            raise HTTPException(
+                409, f"{c.email} esta gerando agora; abrir o Chrome no mesmo perfil "
+                     "derrubaria a geracao. Espere ela terminar")
+        try:
+            # `to_thread` porque `checar_chrome` toca o disco e `Popen` pode bloquear
+            # alguns milissegundos: fora do event loop, que e compartilhado com o motor
+            await asyncio.to_thread(abrir_para_conferir, Path(c.perfil), c.proxy)
+        except (ChromeAusente, PerfilOcupado, ProxyInvalido) as e:
+            raise HTTPException(409, str(e))
+        repo.registrar_evento(None, c.id, "conta_aberta_para_conferir", "{}")
+        return {"email": c.email}
 
     @app.post("/contas/{id_}/saldo", response_model=RespostaConta)
     async def reler_saldo(id_: int) -> RespostaConta:

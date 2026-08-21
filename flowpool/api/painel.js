@@ -677,6 +677,8 @@ function blocoConta(c) {
         <input type="checkbox" class="acao-ativa" data-id="${c.id}" ${c.ativa ? "checked" : ""}>
         <span class="trilho"></span>${c.ativa ? "ativa" : "inativa"}
       </label>
+      <button class="mini acao-abrir" data-id="${c.id}" data-email="${esc(c.email)}"
+              title="abre o Chrome já logado nesta conta, para você conferir na mão">Abrir</button>
       <button class="mini acao-saldo" data-id="${c.id}" data-email="${esc(c.email)}"
               title="lê o saldo agora no Flow — abre uma janela e não gasta crédito">Ler saldo</button>
       <button class="mini ${precisa ? "alerta" : ""} acao-revalidar" data-id="${c.id}"
@@ -807,6 +809,27 @@ async function lerSaldo(id, email, botao) {
     botao.textContent = antes;
   }
   await atualizar();
+}
+
+async function abrirConta(id, email, botao) {
+  botao.disabled = true;
+  const antes = botao.textContent;
+  botao.textContent = "Abrindo…";
+  esconder($("erro-cadastro"));
+  try {
+    await api(`/contas/${id}/abrir`, { metodo: "POST" });
+    // O aviso de fechar a janela NAO e frescura: enquanto ela estiver aberta o perfil
+    // fica ocupado, e um job que caia nessa conta morre em PerfilOcupado. Dizer isso
+    // aqui e mais barato que o usuario descobrir por um job falho meia hora depois.
+    mostrar($("ok-cadastro"),
+      `Abri o Chrome em ${email}. Feche a janela quando terminar — enquanto ela ` +
+      `estiver aberta, essa conta não consegue gerar.`);
+  } catch (e) {
+    mostrar($("erro-cadastro"), `Não deu para abrir ${email}: ${e.message}`);
+  } finally {
+    botao.disabled = false;
+    botao.textContent = antes;
+  }
 }
 
 async function revalidar(id, email) {
@@ -1258,6 +1281,7 @@ document.addEventListener("click", (ev) => {
   if (!alvo) return;
   const id = Number(alvo.dataset.id);
   if (alvo.classList.contains("acao-revalidar")) revalidar(id, alvo.dataset.email);
+  else if (alvo.classList.contains("acao-abrir")) abrirConta(id, alvo.dataset.email, alvo);
   else if (alvo.classList.contains("acao-saldo")) lerSaldo(id, alvo.dataset.email, alvo);
   else if (alvo.classList.contains("acao-proxy")) {
     // O proxy da conta chega MASCARADO da API (`http://usuario:***@host:porta`). Por

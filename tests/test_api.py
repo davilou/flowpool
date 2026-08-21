@@ -10,6 +10,7 @@ from flowpool.nucleo.escolha import escolher
 from flowpool.nucleo.tipos import EstadoJob, Modelo, SaudeSessao, Tier
 from flowpool.transporte.base import ErroTransporte
 from flowpool.transporte.falso import TransporteFalso
+from flowpool.transporte.pw.sessao import ChromeAusente
 
 
 @pytest.fixture
@@ -886,3 +887,67 @@ def test_a_lista_de_jobs_diz_em_qual_conta_cada_um_roda(cliente):
 
     achado = next(x for x in c.get("/jobs").json() if x["id"] == jid)
     assert achado["conta_id"] == cid
+
+
+# ---------------------------------------------------------- abrir para conferir
+
+def test_abrir_conta_sobe_o_chrome_no_perfil_dela(cliente, monkeypatch):
+    # o botao nasceu de uma necessidade real: tres jobs marcados como falhos com o
+    # video GERADO na conta, e nenhuma forma de conferir sem achar a conta na mao
+    c, repo = cliente
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    con = repo.conta(cid); con.proxy = "socks5h://h:1"; repo.salvar_conta(con)
+    chamadas = []
+    monkeypatch.setattr("flowpool.api.app.abrir_para_conferir",
+                        lambda perfil, proxy=None: chamadas.append((str(perfil), proxy)))
+
+    r = c.post(f"/contas/{cid}/abrir")
+
+    assert r.status_code == 202
+    assert r.json()["email"] == "a@b.com"
+    # o PERFIL da conta e o PROXY dela: conferir por outro IP mostra ao Google
+    # exatamente a mudanca que o proxy existe para evitar.
+    # Comparado por `Path` e nao por texto: a barra e diferente por sistema, e um teste
+    # que so passa no Windows nao serve de rede.
+    assert len(chamadas) == 1
+    caminho, proxy = chamadas[0]
+    assert Path(caminho) == Path("p/1")
+    assert proxy == "socks5h://h:1"
+    assert "conta_aberta_para_conferir" in [e["tipo"] for e in repo.eventos()]
+
+
+def test_abrir_conta_ocupada_e_409_e_diz_o_motivo_certo(cliente, monkeypatch):
+    # com a conta gerando, o perfil esta nas maos do Playwright: um Chrome comum no
+    # mesmo --user-data-dir derruba o job. E a mensagem NAO pode mandar revalidar
+    c, repo = cliente
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c.app.state.orq._ocupadas.add(cid)
+    monkeypatch.setattr("flowpool.api.app.abrir_para_conferir",
+                        lambda *a, **k: pytest.fail("nao podia ter aberto"))
+
+    r = c.post(f"/contas/{cid}/abrir")
+
+    assert r.status_code == 409
+    assert "gerando" in r.json()["detail"]
+    assert "revalide" not in r.json()["detail"].lower()
+
+
+def test_abrir_conta_inexistente_da_404(cliente):
+    c, _ = cliente
+    assert c.post("/contas/999/abrir").status_code == 404
+
+
+def test_abrir_conta_sem_chrome_vira_409_em_vez_de_500(cliente, monkeypatch):
+    # ChromeAusente e condicao do ambiente, nao defeito do servidor: o painel mostra a
+    # mensagem, e um 500 viraria "Erro interno" sem dizer o que fazer
+    c, repo = cliente
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+
+    def sem_chrome(*a, **k):
+        raise ChromeAusente("nao achei o chrome.exe")
+    monkeypatch.setattr("flowpool.api.app.abrir_para_conferir", sem_chrome)
+
+    r = c.post(f"/contas/{cid}/abrir")
+
+    assert r.status_code == 409
+    assert "chrome" in r.json()["detail"].lower()

@@ -248,3 +248,33 @@ async def cadastrar(raiz_perfis: Path, email: str,
             "outro Chrome pegou a janela. Feche tudo e repita.")
     await asyncio.to_thread(esperar_perfil_livre, perfil)
     return perfil, await validar_perfil(perfil, proxy)
+
+
+def abrir_para_conferir(perfil: Path, proxy: str | None = None,
+                        url: str | None = None) -> None:
+    """Sobe o Chrome comum no perfil da conta e SAI. Nao espera, nao valida.
+
+    Existe para o botao "Abrir" do painel: o usuario quer olhar a conta com os proprios
+    olhos — conferir se um video que o app deu por falho esta la, ver o saldo real, ver
+    o que o Flow mostrou. Ate agora a unica forma de fazer isso pelo app era "Revalidar",
+    que exige passar por um login inteiro sem necessidade nenhuma.
+
+    NAO CHECA `perfil_em_uso`, e isso e deliberado. Chrome com o mesmo `--user-data-dir`
+    ja aberto nao abre uma segunda instancia: ele entrega a URL a janela existente e
+    sai. Ou seja, clicar "Abrir" duas vezes traz a janela para a frente, que e
+    exatamente o que se espera de um botao chamado Abrir. Recusar aqui transformaria o
+    comportamento certo do Chrome em erro na cara do usuario.
+
+    Quem PRECISA recusar e a rota, e por outro motivo: se a conta estiver GERANDO, o
+    perfil esta nas maos do Playwright, e um Chrome comum no mesmo perfil derruba o job.
+    Essa checagem e `orq.ocupada`, que sabe distinguir "o app esta usando" de "o usuario
+    deixou uma janela aberta" — coisa que olhar a linha de comando nao sabe.
+
+    O proxy vai junto pelo mesmo motivo do login: conferir a conta por um IP diferente
+    do de trabalho mostra ao Google a mudanca que o proxy existe para evitar.
+
+    `Popen` sem `wait`: quem chama nao pode ficar preso enquanto a pessoa olha a tela.
+    """
+    exe = checar_chrome()
+    args = argumentos_chrome(exe, perfil, url or sel.URL_FLOW, proxy)
+    subprocess.Popen(args)
