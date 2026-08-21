@@ -19,7 +19,9 @@ from flowpool.transporte.pw.analise import (
     exigir_proporcao_do_modo, exigir_unico, faltando_no_chip, id_do_href,
     item_pronto, nome_do_item, saldo_do_texto,
 )
-from flowpool.transporte.pw.transporte import TransportePlaywright
+from flowpool.transporte.pw.transporte import (
+    MAX_REPETICOES, TransportePlaywright,
+)
 
 # --- saldo: o texto do menu do avatar -----------------------------------
 
@@ -696,3 +698,12 @@ def test_desligar_o_audio_continua_por_medir():
     # desligar audio nas configuracoes faria a classe inteira de falha deixar de
     # existir. Mexer em configuracao da conta dele precisa da autorizacao dele.
     assert sel.CONFIG_SEM_AUDIO == sel.PENDENTE
+
+
+def test_o_teto_de_repeticoes_tem_margem_sobre_o_caso_medido():
+    # MEDIDO 2026-08-21: um caso real (falha ao gerar audio) precisou de 2 repeticoes.
+    # Com teto 2 o app batia exatamente no limite e uma falha um pouco mais teimosa
+    # seria descartada sem motivo. Repetir pelo card NAO cobra; desistir cedo custa o
+    # job inteiro — nova tentativa, novo navegador, chip reconfigurado, referencias
+    # re-anexadas. A assimetria manda no numero.
+    assert MAX_REPETICOES > 2

@@ -42,7 +42,9 @@ do primeiro e o cadastro falha. Os cinco passos, resumidos:
 1. Faça o login na conta Google na janela que abriu.
 2. Consentimento: deixe as duas caixas desmarcadas e clique em "Avançar".
 3. Aviso de privacidade: **role até o fim do texto** — o botão "Continuar" só habilita
-   quando o fim entra na tela de verdade; janela minimizada ou coberta não conta.
+   quando o fim entra na tela de verdade; janela minimizada não conta. (Coberta por
+   outra janela conta, sim: medido em 21/08, a janela do Playwright continua `visible`
+   mesmo tapada.)
 4. Confirme que a lista de projetos do Flow carregou.
 5. **Feche a janela do Chrome.** O resto é com o serviço.
 

@@ -30,7 +30,24 @@ RESOLUCAO = {
     Modo.INGREDIENTS2V: "720p",
 }
 # Quantas vezes repetir um card falho pelo proprio botao `redo`, que NAO cobra de novo.
-MAX_REPETICOES = 2
+#
+# MEDIDO 2026-08-21: um caso real (falha ao gerar audio no Omni Flash) precisou de 2
+# repeticoes — saiu na terceira. O teto de 2 batia EXATAMENTE nesse caso e nao tinha
+# margem nenhuma: uma falha que precisasse de tres faria o app desistir de algo que
+# teria funcionado.
+#
+# A conta e assimetrica, e e ela que manda no numero:
+#   * repetir pelo card custa SO TEMPO. O proprio Flow escreve "Nao houve cobranca por
+#     esta geracao" na mensagem de falha.
+#   * desistir cedo custa o job inteiro: o orquestrador gasta uma tentativa, reabre
+#     navegador, reconfigura o chip, re-anexa as referencias e regenera — muito mais
+#     caro do que clicar de novo num botao gratuito.
+#   * e esta classe de falha e transitoria por natureza, o tipo de coisa que some
+#     sozinha na volta seguinte.
+#
+# O teto continua existindo porque falha que persiste quatro vezes nao e transitoria:
+# e problema de verdade, e ai o job tem que falhar de vez e aparecer para a pessoa.
+MAX_REPETICOES = 4
 
 
 def _medido(nome: str, seletor: str) -> str:

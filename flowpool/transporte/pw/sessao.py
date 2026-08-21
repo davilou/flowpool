@@ -44,8 +44,8 @@ Uma janela do Chrome abriu no perfil desta conta.
   1. Faca o login na conta Google.
   2. Tela de consentimento: DEIXE AS DUAS CAIXAS DESMARCADAS e clique em "Avancar".
   3. Aviso de privacidade: ROLE ATE O FIM DO TEXTO — o botao "Continuar" so habilita
-     depois que o fim do texto entra na tela de verdade. Janela minimizada ou coberta
-     por outra nao conta: o portao e IntersectionObserver.
+     depois que o fim do texto entra na tela de verdade. Janela minimizada nao conta:
+     o portao e IntersectionObserver.
   4. Confirme que a lista de projetos do Flow carregou.
   5. FECHE A JANELA DO CHROME. O cadastro continua sozinho a partir dai.
 
@@ -86,6 +86,12 @@ def argumentos_chrome(exe: Path, perfil: Path, url: str,
     Nenhuma flag de automacao entra aqui. `--remote-debugging-port` e o que faz o
     Google recusar; `--headless` mata o IntersectionObserver que libera o aviso de
     privacidade. As tres que ficam sao so para o perfil novo nao abrir assistente.
+
+    ESTE Chrome e o unico do app que pode ser afetado por oclusao. O Chrome de trabalho
+    sobe pelo Playwright, que passa `--disable-backgrounding-occluded-windows` — medido
+    em 2026-08-21, aquela janela fica `visible` mesmo coberta por outra. Aqui nao ha
+    essa flag, entao a instrucao ao usuario continua sendo nao minimizar a janela de
+    login. E uma janela so, uma vez por conta, com a pessoa na frente.
 
     O proxy entra porque o LOGIN tem que sair do mesmo IP do trabalho: conta que nasce
     no IP de casa e depois passa a operar por proxy mostra ao Google exatamente a
