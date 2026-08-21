@@ -323,6 +323,34 @@ class TransportePlaywright:
             return False
         return await pagina.locator(sel.VEU_ABERTO).count() == 0
 
+    async def _escrever_prompt(self, pagina, prompt: str) -> None:
+        """Escreve o prompt SEM que a quebra de linha vire envio.
+
+        `type()` simula tecla por tecla, e num `\\n` ele pressiona Enter — que naquele
+        campo ENVIA. Um prompt de quatro paragrafos virava quatro geracoes, cada uma
+        com um pedaco do texto, sem erro nenhum: cada envio parcial gera normalmente,
+        so que a partir de um prompt que o usuario nunca escreveu.
+
+        `insert_text` insere o texto direto, disparando so o evento `input` — nao ha
+        keydown de Enter para o campo interpretar. O texto inteiro entra de uma vez.
+
+        A quebra de linha em si e preservada pelo proprio `insert_text` quando o campo
+        aceita; quando nao aceita, o pior caso e um paragrafo colado no outro — infinitamente
+        melhor do que quatro geracoes truncadas.
+        """
+        await pagina.keyboard.insert_text(prompt)
+        await pagina.wait_for_timeout(500)
+
+        # CONFERE. O campo e contenteditable e nem todo caminho de insercao pega; se o
+        # texto nao entrou inteiro, gerar seria pagar credito por um prompt errado — que
+        # foi exatamente o que o defeito original fazia em silencio.
+        escrito = (await pagina.locator(sel.CAMPO_PROMPT).first.inner_text()).strip()
+        faltou = len(prompt.strip()) - len(escrito)
+        if faltou > 5:   # folga para normalizacao de espaco e quebra de linha
+            raise GeracaoFalhou(
+                f"o prompt nao entrou inteiro no campo: pedi {len(prompt.strip())} "
+                f"caracteres, o campo ficou com {len(escrito)}")
+
     async def _fechar_painel(self, pagina, tentativas: int = 4) -> None:
         """Aperta Escape ate o painel do chip estar fechado de verdade.
 
@@ -465,7 +493,7 @@ class TransportePlaywright:
         campo = pagina.locator(sel.CAMPO_PROMPT).first
         await campo.click(timeout=15_000)
         await campo.fill("")
-        await campo.type(p.prompt, delay=8)
+        await self._escrever_prompt(pagina, p.prompt)
 
         # dois botoes contem a palavra "Criar": anexar e enviar. So a ligadura separa.
         await pagina.locator(sel.BOTAO_ENVIAR).first.click(timeout=15_000)
