@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from flowpool.nucleo.tipos import (
     DURACAO_PADRAO, DURACOES, PROPORCOES, Conta, EstadoJob, Job, Modelo, Modo, Projeto,
     SaudeSessao, Tier, aceita_referencia, duracao_valida, exige_arquivo,
-    max_referencias, quantidade_maxima,
+    max_referencias, modelo_valido, quantidade_maxima,
 )
 
 
@@ -143,11 +143,48 @@ def test_imagem_nao_aceita_duracao():
 
 
 def test_video_aceita_so_as_quatro_duracoes():
-    for modo in (Modo.T2V, Modo.FRAMES2V, Modo.INGREDIENTS2V):
+    # frames2v ficou de fora: ver o teste logo abaixo
+    for modo in (Modo.T2V, Modo.INGREDIENTS2V):
         for d in DURACOES:
             assert duracao_valida(modo, d) is True
         assert duracao_valida(modo, "5s") is False
         assert duracao_valida(modo, None) is False
+
+
+def test_frames2v_nao_tem_duracao_apesar_de_ser_video():
+    # MEDIDO 2026-08-21 por print do painel aberto em Frames: ele tem `Imagem|Video`,
+    # `Frames|Elementos`, proporcao, dropdown de modelo e quantidade — e NENHUM grupo
+    # de duracao. O chip confirma, escrevendo "Video . 720p . x1" onde os outros modos
+    # de video escrevem "Video . 720p . 4s . 9:16 x1".
+    #
+    # Enquanto isto valia como os outros videos, `_configurar` procurava o botao "4s"
+    # num painel que nao o tem, a auto-cura era acionada, e o first/last frame do
+    # usuario nunca passava da configuracao.
+    assert duracao_valida(Modo.FRAMES2V, None) is True
+    for d in DURACOES:
+        assert duracao_valida(Modo.FRAMES2V, d) is False
+
+
+def test_frames2v_so_aceita_veo_lite():
+    # RELATADO pelo usuario depois de tentar: "para fazer esse video de first last
+    # frame, a gente so pode fazer no Veo Lite. A gente nao consegue fazer no Omni
+    # Flash." O painel DEIXA escolher outro — o print de 2026-08-21 mostra "Veo 3.1 -
+    # Fast" selecionado em Frames, anunciando 20 creditos — e e por isso que a recusa
+    # precisa vir do dominio: quem so olha a tela nao ve impedimento, ve o dobro do
+    # custo e um video que ignora o frame final.
+    assert modelo_valido(Modo.FRAMES2V, Modelo.VEO_LITE) is True
+    for m in (Modelo.OMNI_FLASH, Modelo.VEO_FAST, Modelo.VEO_QUALITY,
+              Modelo.NANO_BANANA):
+        assert modelo_valido(Modo.FRAMES2V, m) is False
+
+
+def test_os_outros_modos_de_video_aceitam_os_quatro_modelos():
+    # a restricao e do frames2v; apertar os outros junto tiraria escolha sem motivo
+    for modo in (Modo.T2V, Modo.INGREDIENTS2V):
+        for m in (Modelo.OMNI_FLASH, Modelo.VEO_LITE, Modelo.VEO_FAST,
+                  Modelo.VEO_QUALITY):
+            assert modelo_valido(modo, m) is True
+        assert modelo_valido(modo, Modelo.NANO_BANANA) is False
 
 
 # --- referencia por modo: imagem aceita, e sempre aceitou ---------------

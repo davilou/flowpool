@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from flowpool.nucleo.custos import CUSTO_DURACAO_BASE
 from flowpool.nucleo.erros import ProxyInvalido
 from flowpool.nucleo.proxy import analisar
 from flowpool.nucleo.tipos import (
-    DURACAO_PADRAO, DURACOES, PROPORCAO_PADRAO, PROPORCOES, EstadoJob, Modelo, Modo,
-    SaudeSessao, Tier, duracao_valida, max_referencias, quantidade_maxima,
+    DURACAO_PADRAO, DURACOES, PROPORCAO_PADRAO, PROPORCOES, SEM_DURACAO, EstadoJob,
+    Modelo, Modo, SaudeSessao, Tier, duracao_valida, max_referencias, modelo_valido,
+    modelos_do_modo, quantidade_maxima,
 )
 
 
@@ -34,7 +36,9 @@ def _proxy_usavel(v: str | None) -> str | None:
 # um modelo que custa diferente e sai diferente.
 _MODELO_PADRAO = {
     Modo.T2V: Modelo.OMNI_FLASH,
-    Modo.FRAMES2V: Modelo.OMNI_FLASH,
+    # frames2v NAO herda Omni Flash: o modo so funciona em Veo Lite, e o padrao tem que
+    # ser o unico modelo que o modo aceita. Ver `MODELOS_DO_MODO` no nucleo.
+    Modo.FRAMES2V: Modelo.VEO_LITE,
     Modo.INGREDIENTS2V: Modelo.OMNI_FLASH,
     Modo.IMAGEM: Modelo.NANO_BANANA,
 }
@@ -112,16 +116,48 @@ class PedidoJob(BaseModel):
         em modo imagem, entao a configuracao nunca seria aplicada e o usuario receberia
         o arquivo achando que foi.
         """
-        if self.modo is Modo.IMAGEM:
+        if self.modo in SEM_DURACAO:
             pedida = self.duracao if "duracao" in self.model_fields_set else None
             if not duracao_valida(self.modo, pedida):
                 raise ValueError(
-                    f"modo imagem nao tem duracao: o painel do Flow nao oferece o "
-                    f"grupo em imagem, e {pedida!r} nao teria onde ser clicado")
+                    f"modo {self.modo.value} nao tem duracao: o painel do Flow nao "
+                    f"oferece o grupo nele, e {pedida!r} nao teria onde ser clicado")
+            # O CAMPO NAO PODE FICAR NO PADRAO "4s" NUM MODO SEM DURACAO, e o motivo e
+            # o CUSTO. `custo_de` escala o preco por duracao, e "4s" vale ~58% da
+            # tabela: em `frames2v` isso reservaria 6 creditos onde o Flow cobra 10, e
+            # reserva curta demais aprova uma conta que nao paga o job — o Flow recusa,
+            # o job volta pra fila e a conta e marcada seca por erro de conta.
+            #
+            # Vale a duracao BASE da tabela de custo. MEDIDO indiretamente: o painel em
+            # Frames com Veo 3.1 Fast anunciou "A geracao vai usar 20 creditos", que e
+            # exatamente o valor de base do Fast — ou seja, o modo cobra o preco cheio,
+            # nao um preco escalado. Para Veo Lite isso da 10.
+            #
+            # `None` seria mais honesto, mas a coluna `job.duracao` e NOT NULL e mudar
+            # isso pede reconstruir a tabela. Fica registrado como divida: o painel vai
+            # mostrar "8s" num modo que nao tem duracao.
+            self.duracao = CUSTO_DURACAO_BASE
             return self
         if not duracao_valida(self.modo, self.duracao):
             raise ValueError(
                 f"duracao {self.duracao!r} nao existe; use uma de {list(DURACOES)}")
+        return self
+
+    @model_validator(mode="after")
+    def modelo_coerente_com_o_modo(self) -> PedidoJob:
+        """Recusa modelo que aquele modo nao aceita, em vez de gastar credito para
+        descobrir.
+
+        O caso que motivou: `frames2v` so funciona em Veo Lite. O painel do Flow DEIXA
+        escolher Veo Fast em modo Frames — o print de 2026-08-21 mostra exatamente
+        isso, anunciando 20 creditos —, entao quem so olha a tela nao ve impedimento
+        nenhum. Ve o custo dobrado e um video que ignora o frame final.
+        """
+        if not modelo_valido(self.modo, self.modelo):
+            aceitos = [m.value for m in modelos_do_modo(self.modo)]
+            raise ValueError(
+                f"modo {self.modo.value} nao aceita o modelo {self.modelo.value}; "
+                f"use um de {aceitos}")
         return self
 
     @model_validator(mode="after")

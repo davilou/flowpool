@@ -561,11 +561,19 @@ class TransportePlaywright:
                                 f"esperado {esperado!r}")
 
         await self._clicar_unico(painel, sel.PROPORCAO[p.proporcao], "proporcao")
-        # `None` em imagem: o painel nao tem grupo de duracao naquele modo, e procurar
-        # o botao ali derrubaria toda geracao de imagem. Nos tres modos de video vale a
-        # duracao DO PEDIDO — ate a Task 15 era uma constante de 8s aqui, e todo video
-        # saia 70% mais caro do que o de 4s sem ninguem ver.
-        duracao = None if p.modo is Modo.IMAGEM else p.duracao
+        # `None` nos modos SEM grupo de duracao no painel, onde procurar o botao
+        # derrubaria a geracao inteira. Eram so imagem; FRAMES2V entrou em 2026-08-21.
+        #
+        # MEDIDO por print do painel aberto em Frames: ele tem `Imagem|Video`,
+        # `Frames|Elementos`, proporcao, dropdown de modelo e quantidade — e mais nada.
+        # O chip confirma, escrevendo "Video . 720p . x1" onde os outros modos escrevem
+        # "Video . 720p . 4s . 9:16 x1". Sem isto, `_clicar_unico` procurava "4s" num
+        # painel que nao o tem, a auto-cura era acionada, e o first/last frame do
+        # usuario nunca passava da configuracao.
+        #
+        # Nos demais modos de video vale a duracao DO PEDIDO — ate a Task 15 era uma
+        # constante de 8s aqui, e todo video saia 70% mais caro do que o de 4s.
+        duracao = None if p.modo in tipos.SEM_DURACAO else p.duracao
         if duracao:
             await self._clicar_unico(painel, sel.DURACAO[duracao], "duracao")
         await self._clicar_unico(painel, sel.QUANTIDADE[p.quantidade], "quantidade")

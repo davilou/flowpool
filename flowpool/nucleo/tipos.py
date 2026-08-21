@@ -105,16 +105,55 @@ DURACOES = ("4s", "6s", "8s", "10s")
 DURACAO_PADRAO = "4s"
 
 
+# Modos cujo painel do Flow NAO tem grupo de duracao.
+#
+# `IMAGEM` sempre foi um deles. `FRAMES2V` entrou em 2026-08-21, MEDIDO por print do
+# painel aberto em Frames: ele tem `Imagem|Video`, `Frames|Elementos`, proporcao,
+# dropdown de modelo e quantidade — e mais nada. O chip confirma, escrevendo
+# "Video . 720p . x1" onde os outros modos escrevem "Video . 720p . 4s . 9:16 x1".
+#
+# Sem esta lista o transporte procurava o botao "4s" num painel que nao o tem, a
+# auto-cura era acionada, e a geracao de first/last frame nunca saia do lugar.
+SEM_DURACAO = (Modo.IMAGEM, Modo.FRAMES2V)
+
+
 def duracao_valida(modo: Modo, duracao: str | None) -> bool:
     """Se aquele modo aceita aquela duracao.
 
-    `None` significa "sem duracao", e e o UNICO valor coerente em imagem: o painel do
-    Flow nao oferece o grupo de duracao em modo imagem, entao "4s" ali nao teria onde
-    ser clicado. Nos tres modos de video valem so os quatro valores de `DURACOES`.
+    `None` significa "sem duracao", e e o unico valor coerente nos modos de
+    `SEM_DURACAO`: o painel do Flow nao oferece o grupo neles, entao "4s" ali nao teria
+    onde ser clicado. Nos demais modos de video valem so os quatro valores de
+    `DURACOES`.
     """
-    if modo is Modo.IMAGEM:
+    if modo in SEM_DURACAO:
         return duracao is None
     return duracao in DURACOES
+
+
+# Que modelos cada modo aceita. Nao e preferencia: e o que o dropdown do painel oferece
+# naquele modo, e pedir fora da lista gera coisa errada com credito gasto.
+#
+# `FRAMES2V` so em VEO_LITE — RELATADO pelo usuario em 2026-08-21, depois de tentar:
+# "para fazer esse video de first last frame, a gente so pode fazer no Veo Lite. A
+# gente nao consegue fazer no Omni Flash." O painel DEIXA escolher outro (o print de
+# 2026-08-21 mostra "Veo 3.1 - Fast" selecionado em Frames, anunciando 20 creditos),
+# e e justamente por isso que a recusa tem que vir daqui: quem so olha a tela nao ve
+# impedimento, ve o custo dobrado e um resultado que ignora o frame final.
+MODELOS_DO_MODO: dict[Modo, tuple[Modelo, ...]] = {
+    Modo.T2V: (Modelo.OMNI_FLASH, Modelo.VEO_LITE, Modelo.VEO_FAST, Modelo.VEO_QUALITY),
+    Modo.INGREDIENTS2V: (Modelo.OMNI_FLASH, Modelo.VEO_LITE, Modelo.VEO_FAST,
+                         Modelo.VEO_QUALITY),
+    Modo.FRAMES2V: (Modelo.VEO_LITE,),
+    Modo.IMAGEM: (Modelo.NANO_BANANA,),
+}
+
+
+def modelos_do_modo(modo: Modo) -> tuple[Modelo, ...]:
+    return MODELOS_DO_MODO[modo]
+
+
+def modelo_valido(modo: Modo, modelo: Modelo) -> bool:
+    return modelo in MODELOS_DO_MODO[modo]
 
 
 class EstadoJob(str, Enum):

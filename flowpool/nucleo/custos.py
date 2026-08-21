@@ -19,6 +19,12 @@ TETO_DIARIO_FREE = 50
 # saldo. Todas as outras saem daqui reescaladas por `_ESCALA_DURACAO`.
 _DURACAO_BASE = "8s"
 
+# Publico sob outro nome: modos SEM grupo de duracao no painel (frames2v) precisam
+# reservar o preco CHEIO da tabela, e nao um preco escalado por uma duracao que a
+# tela nao oferece. MEDIDO indiretamente: o painel em Frames com Veo 3.1 Fast
+# anunciou 20 creditos, que e exatamente a base do Fast.
+CUSTO_DURACAO_BASE = _DURACAO_BASE
+
 # Custo de UM clipe de 8s, por (modelo, tier).
 _CUSTO_VIDEO: dict[tuple[Modelo, Tier], int] = {
     # MEDIDO 2026-08-20, conta FREE, 720p / 8s / 9:16 / x1: saldo 50 -> 38.
