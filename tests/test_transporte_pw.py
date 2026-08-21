@@ -1248,3 +1248,106 @@ def test_a_mesma_resolucao_em_dois_menus_e_erro_e_nao_escolha():
 
 def test_sem_menu_nenhum_e_espere_mais():
     assert achar_no_submenu([], sel.BAIXAR["720p"]) is None
+
+
+# --- o painel montou? A REGRESSAO do acervo vazio -----------------------
+#
+# REGRESSAO EM PRODUCAO (21/08): `_esperar_seletor_midia` exigia `[role=option]` > 0
+# como prova de que o painel montou. Num projeto NOVO o acervo esta VAZIO — zero itens,
+# LEGITIMAMENTE — entao o criterio nunca se satisfazia: o painel abria, o codigo dizia
+# "nao abriu", apertava Escape, repetia tres vezes e levantava
+#     GeracaoFalhou: o seletor de midia nao abriu depois de 3 cliques no anexar
+# Projeto novo NUNCA anexava a primeira referencia. Como o usuario trabalha com um
+# projeto por produto, todo produto novo nascia travado — bloqueio total, nao
+# intermitente. Projetos #8 e #9 e o job #38 morreram assim.
+#
+# O engano foi conceitual: "a lista tem itens" foi tomado como prova de que o painel
+# montou. Acervo vazio nao e painel quebrado, e o codigo nunca ve esse estado de novo
+# depois do primeiro upload — por isso a verificacao ao vivo, feita num projeto com
+# acervo cheio, passou batido.
+#
+# MEDIDO 2026-08-21 no projeto vazio: as ABAS existem nos dois acervos (7 abertas, 0
+# fechado), e o `input[type=file]` NAO serve — nem esta dentro do dialogo, nem
+# distingue aberto de fechado.
+
+
+class _PainelFalso:
+    """Uma tela com o seletor de midia em algum estado. So conta e le atributo."""
+
+    def __init__(self, expandido, dialogos, visivel, opcoes, abas):
+        self.estado = {
+            sel.BOTAO_ANEXAR: expandido,
+            sel.SELETOR_MIDIA: (dialogos, visivel),
+            sel.ITEM_MIDIA: opcoes,
+            sel.ABAS_SELETOR_MIDIA: abas,
+        }
+        self.voltas = 0
+
+    def locator(self, seletor):
+        return _LocPainel(self, seletor)
+
+    async def wait_for_timeout(self, ms):
+        self.voltas += 1
+
+
+class _LocPainel:
+    def __init__(self, painel, seletor):
+        self.painel = painel
+        self.seletor = seletor
+
+    @property
+    def first(self):
+        return self
+
+    async def count(self):
+        valor = self.painel.estado[self.seletor]
+        return valor[0] if isinstance(valor, tuple) else valor
+
+    async def is_visible(self):
+        return self.painel.estado[sel.SELETOR_MIDIA][1]
+
+    async def get_attribute(self, nome):
+        assert nome == sel.ATRIBUTO_ANEXAR
+        return self.painel.estado[sel.BOTAO_ANEXAR]
+
+
+async def test_painel_aberto_com_acervo_VAZIO_esta_pronto():
+    # ESTE E O TESTE QUE REPRODUZ A REGRESSAO. Projeto novo: nenhuma midia no acervo,
+    # e o painel montado e perfeitamente utilizavel — e onde o upload vai entrar.
+    painel = _PainelFalso(expandido=sel.ANEXAR_ABERTO, dialogos=1, visivel=True,
+                          opcoes=0, abas=7)
+    assert await TransportePlaywright()._esperar_seletor_midia(
+        painel, teto_ms=2000) is True
+
+
+async def test_painel_aberto_com_acervo_cheio_continua_pronto():
+    painel = _PainelFalso(expandido=sel.ANEXAR_ABERTO, dialogos=1, visivel=True,
+                          opcoes=13, abas=7)
+    assert await TransportePlaywright()._esperar_seletor_midia(
+        painel, teto_ms=2000) is True
+
+
+async def test_painel_saindo_de_cena_NAO_esta_pronto():
+    # o conserto original nao pode regredir: o painel que sai pela animacao continua
+    # VISIVEL, e foi ele que fez uma espera rodar 180 s com a lista em zero. O `+` ja
+    # declara fechado nesse instante, e e isso que o exclui.
+    painel = _PainelFalso(expandido=sel.ANEXAR_FECHADO, dialogos=1, visivel=True,
+                          opcoes=13, abas=7)
+    assert await TransportePlaywright()._esperar_seletor_midia(
+        painel, teto_ms=750) is False
+
+
+async def test_dialogo_declarado_aberto_mas_ainda_sem_conteudo_nao_esta_pronto():
+    # o `aria-expanded` troca antes de o painel montar; sem a terceira condicao a
+    # sequencia seguiria contra um dialogo vazio
+    painel = _PainelFalso(expandido=sel.ANEXAR_ABERTO, dialogos=1, visivel=True,
+                          opcoes=0, abas=0)
+    assert await TransportePlaywright()._esperar_seletor_midia(
+        painel, teto_ms=750) is False
+
+
+async def test_sem_dialogo_nenhum_nao_esta_pronto():
+    painel = _PainelFalso(expandido=sel.ANEXAR_FECHADO, dialogos=0, visivel=False,
+                          opcoes=0, abas=0)
+    assert await TransportePlaywright()._esperar_seletor_midia(
+        painel, teto_ms=750) is False

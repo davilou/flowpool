@@ -214,6 +214,31 @@ UPLOAD = 'input[type=file]'
 SELETOR_MIDIA = '[role=dialog]'
 ITEM_MIDIA = "[role=option]"
 
+# As ABAS do painel: o marcador de que ele MONTOU. MEDIDO 2026-08-21, num projeto
+# recem-criado, e a medicao nasceu de uma REGRESSAO em producao.
+#
+# A armadilha: `[role=option]` parece o sinal natural de "o painel esta pronto", e nao
+# e. Num projeto NOVO o acervo esta VAZIO — zero itens, legitimamente —, e um criterio
+# que exija item nunca se satisfaz. O painel esta aberto, montado e pronto para receber
+# o upload, e o codigo respondia "nao abriu", apertava Escape e desistia depois de tres
+# voltas. Resultado: projeto novo NUNCA anexava a primeira referencia, e como o usuario
+# trabalha com um projeto por produto, todo produto novo nascia travado.
+#
+# O `input[type=file]` TAMBEM NAO SERVE, e isso so se soube medindo: ele NAO e
+# descendente do `[role=dialog]` (medido: zero dentro do dialogo, com o painel aberto),
+# e na pagina inteira ele conta 1 tanto com o painel aberto quanto FECHADO — um sinal
+# que vale 1 sempre nao distingue estado nenhum.
+#
+# As abas servem porque existem nos dois acervos e so enquanto o painel esta montado:
+#     aberto (acervo cheio ou vazio): 7
+#     fechado:                        0
+# Medidas: dashboard/Tudo, image/Imagens, videocam/Videos, voice_selection/Vozes,
+# accessibility_new/Personagens, face/Avatar, drive_folder_upload/Uploads.
+#
+# Escopado no dialogo de proposito: `[role=tab]` solto poderia casar aba de outra parte
+# da tela num deploy futuro, e ai o criterio voltaria a aprovar painel que nao existe.
+ABAS_SELETOR_MIDIA = f"{SELETOR_MIDIA} >> [role=tab]"
+
 # --- O ID DA MIDIA: o que o nome do arquivo nao consegue identificar ----
 # MEDIDO 2026-08-21, e e o fato que fecha o pior defeito ja visto neste app.
 #

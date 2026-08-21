@@ -819,13 +819,43 @@ class TransportePlaywright:
 
         As tres partes, e cada uma cobre um engano medido:
 
-        * so `wait_for(visible)` no dialogo — o que a versao anterior fazia — casa o
+        * so `wait_for(visible)` no dialogo — o que uma versao anterior fazia — casa o
           painel que esta SAINDO de cena pela animacao. Ele volta "abriu" e um instante
           depois a tela nao tem lista nenhuma. Medido: 180 s de espera com
-          `[role=option]` em zero.
-        * so o `aria-expanded` do botao — declara antes de a lista montar.
-        * a LISTA e o que a sequencia realmente usa, e conferir o que se vai usar e
-          melhor do que conferir um sinal que a representa.
+          `[role=option]` em zero. Quem exclui esse caso e o `aria-expanded`, que ja
+          diz "fechado" enquanto a animacao corre.
+        * so o `aria-expanded` do botao — ele declara ANTES de o painel montar.
+        * as ABAS provam que o painel montou o proprio conteudo.
+
+        A TERCEIRA CONDICAO JA FOI `[role=option] > 0`, E ISSO FOI UMA REGRESSAO EM
+        PRODUCAO. "A lista tem itens" parece prova de que o painel montou e nao e: num
+        projeto NOVO o acervo esta VAZIO, legitimamente, e o criterio nunca se
+        satisfazia — projeto novo jamais anexava a primeira referencia, e como o
+        usuario tem um projeto por produto, todo produto novo nascia travado. O estado
+        so aparece uma vez por projeto e some no primeiro upload, e foi por isso que a
+        verificacao ao vivo, feita num projeto de acervo cheio, nao o viu.
+
+        O `input[type=file]` seria o candidato natural — e o proximo passo da
+        sequencia —, mas MEDIDO ele nao serve: nao e descendente do `[role=dialog]`
+        (zero dentro dele com o painel aberto) e conta 1 na pagina inteira tanto com o
+        painel aberto quanto fechado. Sinal que vale 1 sempre nao distingue estado.
+
+        As abas valem porque existem com acervo cheio E vazio (7 em ambos) e somem com
+        o painel fechado (0).
+
+        O TETO DE 20 s NAO E FOLGA OCIOSA, E JA FOI TESTADO CONTRA. Quando o clique
+        pega, o painel monta com as 7 abas em ~100 ms — o que faz os 20 s parecerem
+        desperdicio, porque a segunda referencia quase sempre perde o primeiro clique
+        (a barra do prompt cresce com a ficha da primeira e o `+` muda de lugar) e
+        cada repeticao custa o teto inteiro de relogio.
+
+        BAIXAR PARA 8 s QUEBROU AO VIVO: a segunda referencia voltou a morrer com "o
+        item nao apareceu no seletor de midia em 180s". Os ~100 ms sao o caminho
+        RAPIDO, e generalizar deles para o caminho lento e o mesmo engano que criou a
+        regressao do acervo vazio — medir uma condicao e concluir sobre outra. Nos 20 s
+        mora o caminho lento, que e o que essa espera existe para cobrir. Se um dia
+        alguem quiser esse tempo de volta, o caminho e medir o LENTO, nao encurtar o
+        teto e torcer.
         """
         gasto = 0
         while gasto < teto_ms:
@@ -833,7 +863,7 @@ class TransportePlaywright:
                     sel.ATRIBUTO_ANEXAR) == sel.ANEXAR_ABERTO
                     and await pagina.locator(sel.SELETOR_MIDIA).count() > 0
                     and await pagina.locator(sel.SELETOR_MIDIA).first.is_visible()
-                    and await pagina.locator(sel.ITEM_MIDIA).count() > 0):
+                    and await pagina.locator(sel.ABAS_SELETOR_MIDIA).count() > 0):
                 return True
             await pagina.wait_for_timeout(250)
             gasto += 250
