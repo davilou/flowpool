@@ -5,10 +5,15 @@ de um deploy do Google e um job que falha tres vezes, troca de conta, falha de n
 morre com "TimeoutError" — que nao diz qual seletor morreu. Com ele, o diagnostico e
 uma linha.
 
-Nao gera nada e nao gasta credito: so navega, abre paineis, TROCA DE MODO e conta.
-Trocar de modo entrou no roteiro porque a lista de modos do painel depende do modo
-atual (`seletores.MODO_PAI`), e porque e a unica forma de medir o que o chip escreve em
-`frames2v` e `ingredients2v` sem mandar uma geracao — ver `_medir_modos`.
+Nao gera nada e nao gasta credito: so navega, abre paineis, TROCA DE MODO, ANEXA uma
+referencia e desfaz. Trocar de modo entrou no roteiro porque a lista de modos do painel
+depende do modo atual (`seletores.MODO_PAI`), e porque e a unica forma de medir o que o
+chip escreve em `frames2v` e `ingredients2v` sem mandar uma geracao — ver `_medir_modos`.
+
+Anexar entrou porque contar seletor nao bastava. O defeito de 2026-08-20 — a referencia
+subindo para o acervo e nunca entrando no comando — passava por TODOS os `count()`: o
+`input[type=file]` existia, o botao de anexar existia, e mesmo assim a geracao saia por
+texto puro. So percorrer o caminho pega isso. Ver `_medir_anexo`.
 
 Uso:
     python -m flowpool.transporte.pw.conferir <perfil> [<uuid-do-projeto>]
@@ -25,7 +30,7 @@ from pathlib import Path
 
 from playwright.async_api import async_playwright
 
-from flowpool.transporte.pw import dom
+from flowpool.transporte.pw import analise, dom
 from flowpool.transporte.pw import seletores as sel
 
 PENDENTE = sel.PENDENTE   # marcador dos seletores que ainda nao foram medidos
@@ -199,6 +204,81 @@ def _veredito_do_rotulo(modo: str, chip: str) -> None:
               f"{pai!r} — o modo pode nao ter trocado")
 
 
+async def _medir_custo(pagina, p: Placar) -> None:
+    """Le o "A geração vai usar N créditos" do painel do chip. Nao gasta nada.
+
+    O painel precisa estar ABERTO — e onde a frase vive. Vale a pena conferir aqui
+    porque este numero e o custo exato na interface, e a alternativa (a tabela de
+    custos) envelhece calada quando o Google muda de preco.
+    """
+    await pagina.locator(sel.CHIP_CONFIG).first.click()
+    await pagina.wait_for_timeout(2000)
+    try:
+        bruto = await pagina.locator(sel.CUSTO_DA_GERACAO).first.inner_text(timeout=5_000)
+        custo = analise.custo_do_texto(dom.seguro(bruto))
+    except Exception as e:
+        p.faltando.append("chip.CUSTO_DA_GERACAO")
+        print(f"[{'chip':9}] {'CUSTO_DA_GERACAO':24} FALTA ({type(e).__name__})")
+    else:
+        p.ok += 1
+        print(f"[{'chip':9}] {'CUSTO_DA_GERACAO':24} OK (anuncia {custo} creditos)")
+    await pagina.keyboard.press("Escape")
+    await pagina.wait_for_timeout(1000)
+
+
+async def _medir_anexo(pagina, p: Placar) -> None:
+    """Percorre o seletor de midia INTEIRO — abrir, incluir, desfazer. Custo zero.
+
+    E o unico jeito de saber que anexar referencia ainda funciona sem mandar uma
+    geracao. E o caminho precisa ser percorrido, nao so contado: o defeito que criou
+    este bloco passava por todos os `count()` do mundo — o `input[type=file]` existia,
+    o botao existia — e mesmo assim a referencia nunca entrava no comando.
+
+    Nao deixa rastro: o que for incluido sai por "Apagar comando" no fim.
+    """
+    await pagina.locator(sel.BOTAO_ANEXAR).first.click()
+    await pagina.wait_for_timeout(2500)
+    await p.checar(pagina, "anexo", "SELETOR_MIDIA", sel.SELETOR_MIDIA)
+    await p.checar(pagina, "anexo", "ITEM_MIDIA", sel.ITEM_MIDIA)
+
+    itens = await pagina.evaluate(dom.ITENS_DE_MIDIA, sel.ITEM_MIDIA)
+    print(f"    itens no seletor: {len(itens)}"
+          + "".join(f"\n      {'*' if i['selecionado'] else '-'} "
+                    f"{dom.seguro(analise.nome_do_item(i['texto']))}"
+                    f"{'' if analise.item_pronto(i) else '  (ainda subindo)'}"
+                    for i in itens))
+    if not itens:
+        print("    projeto vazio: nao da para exercitar o anexo — gere alguma coisa "
+              "antes, ou rode a fumaca de imagem, que e gratuita")
+        await pagina.keyboard.press("Escape")
+        return
+
+    await p.checar(pagina, "anexo", "BOTAO_INCLUIR_NO_COMANDO",
+                   sel.BOTAO_INCLUIR_NO_COMANDO)
+    # MEDIDO: clicar num item JA selecionado o desmarca, e sem selecao o botao some
+    if not itens[0]["selecionado"]:
+        await pagina.locator(sel.ITEM_MIDIA).first.click()
+        await pagina.wait_for_timeout(1000)
+    await pagina.locator(sel.BOTAO_INCLUIR_NO_COMANDO).first.click()
+    await pagina.wait_for_timeout(2500)
+
+    quantas = await pagina.locator(sel.REFERENCIA_ANEXADA).count()
+    if quantas == 1:
+        p.ok += 1
+        print(f"[{'anexo':9}] {'REFERENCIA_ANEXADA':24} OK (1 na barra do prompt)")
+    else:
+        p.faltando.append("anexo.REFERENCIA_ANEXADA")
+        print(f"[{'anexo':9}] {'REFERENCIA_ANEXADA':24} FALTA (achei {quantas} — a "
+              f"midia foi para o acervo mas NAO entrou no comando)")
+
+    await p.checar(pagina, "anexo", "BOTAO_APAGAR_COMANDO", sel.BOTAO_APAGAR_COMANDO)
+    if await pagina.locator(sel.BOTAO_APAGAR_COMANDO).count() == 1:
+        await pagina.locator(sel.BOTAO_APAGAR_COMANDO).first.click()
+        await pagina.wait_for_timeout(1500)
+        print(f"    referencias depois de apagar o comando: "
+              f"{await pagina.locator(sel.REFERENCIA_ANEXADA).count()}")
+
+
 async def main(perfil: str, uuid: str | None = None) -> int:
     p = Placar()
     async with async_playwright() as pw:
@@ -270,6 +350,9 @@ async def main(perfil: str, uuid: str | None = None) -> int:
             # o chip nao mostra o modelo; a verificacao le o dropdown com o painel
             # aberto. Imprimir aqui e o que confirma de onde esse texto sai.
             print("\ntexto do chip:", await _texto_do_chip(pagina))
+
+            await _medir_custo(pagina, p)
+            await _medir_anexo(pagina, p)
 
         await p.checar(pagina, "pendente", "AVISO_SEM_CREDITO", sel.AVISO_SEM_CREDITO)
 

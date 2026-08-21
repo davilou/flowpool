@@ -30,7 +30,18 @@ REGRAS APRENDIDAS NO MAPEAMENTO — leia antes de mexer:
    uma vez autenticado, o Playwright dirige a sessao sem reclamacao.
 
 6. Existe reCAPTCHA na pagina (`textarea.g-recaptcha-response`).
+
+7. Este arquivo continua sendo AUTORIA HUMANA. O que um modelo de visao curou sozinho
+   mora em `curados.json`, ao lado, e entra como SOBREPOSICAO no fim deste modulo —
+   visivel, auditavel e reversivel apagando o arquivo. Ver `DESCRICAO`, `NAO_CURAVEIS`
+   e `cura.py`.
 """
+
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
 
 # Marcador do que ainda nao foi medido ao vivo. `conferir.py` reporta como PENDENTE, e
 # o transporte recusa usar em vez de mandar uma string invalida para o Playwright — que
@@ -90,7 +101,69 @@ BOTAO_NOVA_SESSAO = 'button:has-text("edit_square")'   # limpa a conversa do age
 # MEDIDO 2026-08-20: o input existe TAMBEM em modo imagem — um `input[type=file]` e um
 # botao de anexar, com o chip em imagem. O Flow aceita imagem com referencia (e o Nano
 # Banana gerando a partir de uma foto), e por isso `_anexar` anexa em imagem tambem.
+#
+# ATENCAO: `set_input_files` NESTE INPUT NAO ANEXA NADA. Ver o bloco do seletor de
+# midia logo abaixo — sozinho, ele so manda o arquivo para o ACERVO do projeto.
 UPLOAD = 'input[type=file]'
+
+# --- seletor de midia: o caminho REAL de anexar referencia --------------
+# MEDIDO 2026-08-20 POR PRINT, depois de duas correcoes erradas deduzidas do DOM.
+#
+# O DEFEITO que este bloco fecha: `set_input_files` no `input[type=file]` escondido
+# envia o arquivo para o ACERVO do projeto — ele aparece em "Uploads" na barra lateral
+# — e PARA POR AI. A imagem nunca vira referencia da geracao, e o Flow gera como se
+# nao houvesse anexo nenhum: sem erro, sem aviso, com o credito gasto.
+#
+# O caminho certo passa pelo botao `+` (BOTAO_ANEXAR, ligadura `add_2`), que abre um
+# SELETOR DE MIDIA — `[role=dialog]`, com:
+#   * abas a esquerda, `button[role=tab]`: Tudo | Imagens | Videos | Vozes |
+#     Personagens | Avatar | Uploads
+#   * a lista ao centro, `[role=option]`, cada item com nome na 1a linha e tipo na 2a
+#   * previa a direita e o botao branco "Incluir no comando" embaixo dela
+#   * "Enviar midia" (ligadura `upload`) no rodape — mas nao se clica nele: o
+#     `input[type=file]` que ele aciona vive dentro deste seletor e recebe
+#     `set_input_files` direto.
+#
+# TRES FATOS MEDIDOS que mudam o desenho da sequencia:
+#
+# 1. A SELECAO E EXCLUSIVA, nao multipla. Clicar num segundo item DESMARCA o primeiro
+#    (`aria-selected` volta para false). Nao ha como escolher tres e incluir de uma
+#    vez: e um ciclo por referencia. Medido clicando — nao deduzido.
+# 2. CLICAR NO ITEM JA SELECIONADO O DESMARCA, e sem selecao o botao "Incluir no
+#    comando" SOME DA TELA. Por isso se confere `aria-selected` antes de clicar; o
+#    clique cego derruba a geracao com "esperava 1 candidato, achei 0".
+# 3. AS REFERENCIAS SOMAM, e o item incluido SAI DA LISTA. Medido: 1 -> 2 -> 3
+#    miniaturas na barra do prompt, com a lista encolhendo de 5 para 2. E por isso
+#    que o ciclo pode repetir sem ambiguidade de nome.
+SELETOR_MIDIA = '[role=dialog]'
+ITEM_MIDIA = "[role=option]"
+
+# O SINAL DE UPLOAD TERMINADO. MEDIDO com um arquivo de 2,9 MB, amostrando de 250 em
+# 250 ms: o item entra na lista NA HORA, sem miniatura, enquanto uma porcentagem
+# ("7%... 27%... 99%") corre no card do acervo. Aos 17,25 s a porcentagem some e o
+# item GANHA A MINIATURA. Ou seja: a miniatura dentro do item e o unico marco de
+# "pronto" que mora no proprio item.
+#
+# Nao se espera por TEMPO. Os 3 s fixos da versao anterior cobriam 500 KB e nao
+# cobrem 2,9 MB — e o sintoma de estourar o prazo nao e erro, e referencia vazia.
+#
+# A porcentagem NAO serve de sinal: ela aparece no card da GRADE, fora do seletor, e
+# some antes de a miniatura chegar. Quem esperasse ela sumir incluiria item sem imagem.
+ITEM_PRONTO = "img, video"
+
+BOTAO_INCLUIR_NO_COMANDO = 'button:has-text("Incluir no comando")'   # i18n: add_menu_add_to_prompt
+
+# A prova de que a referencia entrou no COMANDO (e nao so no acervo): uma miniatura
+# aparece DENTRO da barra do prompt, com um botao proprio de remover. Conta-se este
+# botao — uma vez por referencia anexada — e e assim que `_anexar` verifica em vez de
+# confiar. `img[alt]` da o mesmo numero, mas o alt e frase de i18n e quebra mais facil.
+REFERENCIA_ANEXADA = "button[data-card-open]"
+
+# Zera o rascunho inteiro: texto E referencias. Serve para nao herdar a referencia de
+# uma tentativa anterior que morreu no meio — ela entraria calada na proxima geracao.
+# NAO se casa pela ligadura `close`: ela e substring de `left_panel_close` (o "Fechar"
+# da barra lateral), e o seletor pegaria dois.
+BOTAO_APAGAR_COMANDO = 'button:has-text("Apagar comando")'
 
 # --- criar projeto: sao DUAS etapas -------------------------------------
 # "Novo projeto" cria e ENTRA direto, sem pedir nome. O nome sai padrao e a renomeacao
@@ -134,7 +207,13 @@ CHIP_CONFIG = 'button:has-text("crop_")'
 # Container do painel aberto. TUDO que se clica no painel e escopado por ele: sem
 # escopo, `crop_9_16` casa tambem o proprio CHIP_CONFIG (o texto do chip contem a
 # ligadura), e o clique fecharia o painel em vez de escolher a proporcao.
-PAINEL_CHIP = '[role=dialog], [role=menu]'   # CONFIRMAR ao vivo
+#
+# MEDIDO 2026-08-20: o painel do chip e um `[role=menu]` com `data-state="open"`, e
+# com ele aberto ele e o UNICO dialogo/menu da pagina. O `[role=dialog]` continua na
+# lista porque a mesma peca pode voltar como dialogo num deploy futuro — mas ele e
+# tambem o SELETOR_MIDIA, e por isso `_fechar_painel` nunca roda com o seletor de
+# midia aberto: la o criterio de fechado seria satisfeito na hora errada.
+PAINEL_CHIP = '[role=dialog], [role=menu]'
 
 # MEDIDO 2026-08-20: o painel do chip e um componente Radix, e ele monta um VEU sobre a
 # tela enquanto esta aberto — `<div data-state="open" aria-hidden="true">`. O veu nao
@@ -144,7 +223,30 @@ PAINEL_CHIP = '[role=dialog], [role=menu]'   # CONFIRMAR ao vivo
 #
 # O sintoma e enganoso: o erro fala do elemento que se queria clicar ("Timeout ao clicar
 # no campo de prompt"), nunca do veu que o cobria.
+#
+# MAS O VEU NAO E O CRITERIO DE FECHADO. MEDIDO 2026-08-20, por print e por contagem:
+# com o painel do chip aberto ha ZERO veus na pagina — o painel fica por cima do campo
+# de prompt SEM veu nenhum. Quem esperava o veu sumir para dizer "fechei" retornava na
+# hora, sem nem apertar Escape, e o painel continuava na tela bloqueando o clique.
+# O criterio certo esta em `_fechar_painel`: painel invisivel E sem veu.
 VEU_ABERTO = 'div[data-state="open"][aria-hidden="true"]'
+
+# --- o custo, na propria interface --------------------------------------
+# MEDIDO 2026-08-20: com o painel do chip aberto, o rodape dele anuncia
+#     "A geração vai usar 0 créditos"
+# Isso derruba uma conclusao anterior — a de que so o agente conversacional informava o
+# preco. O numero esta na tela, exato, antes de gerar, sem gastar nada para perguntar.
+#
+# O no que carrega a frase inteira NAO e folha (o "0 créditos" e um filho proprio),
+# entao `dom.TEXTOS_CURTOS` sozinho so devolve "0 créditos", sem o "vai usar" que da o
+# sentido. Le-se pelo seletor abaixo e interpreta-se com `analise.custo_do_texto`.
+#
+# Hoje isto e MAPA e LOG: `_configurar` imprime o numero. Ligar na reserva do
+# orquestrador e passo proprio — a reserva de hoje sai da tabela de custos, e trocar a
+# fonte sem medir as quatro familias de modelo trocaria um erro conhecido por um
+# desconhecido.
+CUSTO_DA_GERACAO = "text=/vai usar/i"
+PADRAO_CUSTO = r"(?i)vai usar\s+(\d[\d.,]*)\s+cr[ée]dito"
 
 # --- aviso de direitos sobre o que se envia -----------------------------
 # MEDIDO 2026-08-20 (por PRINT, depois de duas tentativas perdidas deduzindo pelo DOM).
@@ -379,3 +481,246 @@ AVISO_ALTA_DEMANDA = 'text=/high demand|alta demanda/i'
 # caractere, que aceita as duas formas sem depender de como o arquivo foi salvo.
 AVISO_SEM_CREDITO = 'text=/Seus cr[eé]ditos do Google Flow acabaram/'
 BOTAO_PARAR = 'button:has-text("stop Parar")'
+
+
+# ========================================================================
+# AUTO-CURA — o que a IA pode consertar sozinha, e o que ela nunca toca
+# ========================================================================
+#
+# A interface do Google MUDA. Num unico dia de trabalho apareceram Flow Music, Flow TV,
+# Gemini Omni Flash e elenco de personagens. Quando um seletor quebra, o job falha, gasta
+# as tres tentativas e para — e o conserto e uma pessoa lendo um print.
+#
+# `cura.py` fecha esse ciclo: com 0 candidatos, manda print e resumo do DOM para um
+# modelo de visao (Ollama local, por padrao), valida a proposta contra a pagina, grava
+# em `curados.json` e repete a acao. As duas metades da seguranca moram AQUI, porque
+# sao fato da interface e nao detalhe do cliente de IA.
+
+
+# --- metade 1: o que se procurava --------------------------------------
+# A IA nao adivinha a intencao a partir de `button:has-text("add_2")`. Sem descricao,
+# o seletor simplesmente NAO E CURAVEL — e isso e aceitavel: falhar com print e o
+# comportamento de hoje, que ninguem piora.
+#
+# A notacao `NOME[chave]` alcanca seletor que mora dentro de um mapa. Nao e luxo: o
+# seletor que quebrou ao vivo em 20/08 foi `BOTAO_MODO["ingredients2v"]`, e um esquema
+# que so curasse nome solto deixaria justamente o caso medido de fora.
+#
+# So o que passa por `_clicar_unico` chega na cura hoje; os demais estao descritos
+# porque descrever e barato e porque e por eles que a cobertura cresce.
+DESCRICAO = {
+    # barra do prompt
+    "CAMPO_PROMPT": "o campo onde se escreve o comando da geracao, na barra de baixo; "
+                    "e o unico campo editavel grande da tela, com o texto-guia "
+                    "'O que voce quer criar?'. NAO e o nome do projeto, no topo",
+    "BOTAO_ENVIAR": "o botao que ENVIA o comando escrito, no canto direito da barra do "
+                    "prompt; costuma ser uma seta para a direita",
+    "BOTAO_ANEXAR": "o botao de ANEXAR imagem na barra do prompt, ao lado do campo de "
+                    "texto; costuma ser um sinal de mais",
+    "BOTAO_APAGAR_COMANDO": "o botao que limpa o comando ja escrito na barra do prompt",
+
+    # chip de configuracao e o painel que ele abre
+    "CHIP_CONFIG": "o botao da barra do prompt que MOSTRA a configuracao atual da "
+                   "geracao em texto, algo como 'Video 720p 8s 9:16 x1'. Clicar nele "
+                   "abre o painel de configuracao",
+    "DROPDOWN_MODELO": "dentro do painel de configuracao aberto, o botao que abre a "
+                       "lista de MODELOS (Veo, Nano Banana, Omni Flash); costuma ser "
+                       "uma setinha para baixo ao lado do nome do modelo atual",
+    "BOTAO_MODO[imagem]": "no painel de configuracao, o botao do modo IMAGEM",
+    "BOTAO_MODO[t2v]": "no painel de configuracao, o botao do modo VIDEO",
+    "BOTAO_MODO[frames2v]": "no painel de configuracao ja em video, o botao do submodo "
+                            "FRAMES (primeiro e ultimo quadro)",
+    "BOTAO_MODO[ingredients2v]": "no painel de configuracao ja em video, o botao do "
+                                 "submodo ELEMENTOS (referencias de personagem ou "
+                                 "produto)",
+    "PROPORCAO[16:9]": "no painel de configuracao, o botao da proporcao 16:9 (deitado)",
+    "PROPORCAO[4:3]": "no painel de configuracao, o botao da proporcao 4:3",
+    "PROPORCAO[1:1]": "no painel de configuracao, o botao da proporcao 1:1 (quadrado)",
+    "PROPORCAO[3:4]": "no painel de configuracao, o botao da proporcao 3:4",
+    "PROPORCAO[9:16]": "no painel de configuracao, o botao da proporcao 9:16 (em pe)",
+    "DURACAO[4s]": "no painel de configuracao em modo video, o botao da duracao 4s",
+    "DURACAO[6s]": "no painel de configuracao em modo video, o botao da duracao 6s",
+    "DURACAO[8s]": "no painel de configuracao em modo video, o botao da duracao 8s",
+    "DURACAO[10s]": "no painel de configuracao em modo video, o botao da duracao 10s",
+    "QUANTIDADE[1]": "no painel de configuracao, o botao que pede 1 resultado",
+    "QUANTIDADE[2]": "no painel de configuracao, o botao que pede 2 resultados",
+    "QUANTIDADE[3]": "no painel de configuracao, o botao que pede 3 resultados",
+    "QUANTIDADE[4]": "no painel de configuracao, o botao que pede 4 resultados",
+
+    # seletor de midia (anexar referencia)
+    "BOTAO_INCLUIR_NO_COMANDO": "no seletor de midia aberto, o botao que confirma a "
+                                "imagem escolhida e a inclui no comando",
+    "ITEM_MIDIA": "cada item da lista do seletor de midia aberto (uma imagem ou video "
+                  "do acervo), com nome e miniatura",
+
+    # grade de resultados
+    "CARD_GRADE": "o container de UM item da grade de resultados — o quadrado clicavel "
+                  "que envolve a miniatura, e nao a miniatura em si",
+    "CARD_MIDIA": "a miniatura (imagem ou video) ja pronta dentro de um item da grade",
+    "BOTAO_REPETIR_CARD": "no item da grade que falhou, o botao que REPETE a geracao "
+                          "sem cobrar de novo",
+
+    # projeto e conta
+    "BOTAO_NOVO_PROJETO": "na lista de projetos, o botao que cria um projeto novo",
+    "BOTAO_MAIS_OPCOES": "dentro do projeto, o botao que abre o menu de opcoes do "
+                         "projeto (renomear, lixeira)",
+    "BOTAO_CONCLUIR_NOME": "no dialogo de renomear projeto, o botao que confirma",
+    "AVATAR_CONTA": "a foto redonda da conta Google, no canto superior; clicar nela "
+                    "abre o menu com o saldo de creditos",
+}
+
+
+# --- metade 2: A REGRA DE SEGURANCA. Nao negociavel ---------------------
+#
+# NUNCA curar seletor cujo erro de resolucao seja DESTRUTIVO.
+#
+# O menu do card do Flow contem "Mover para a lixeira". Um `.last` nesse menu ja mandou
+# um video do usuario para a lixeira — o defeito que fez nascer o `_clicar_unico`. Se um
+# modelo propuser o seletor errado ali, o app apaga trabalho de quem o usa, e "casou
+# exatamente 1 elemento" nao protege de nada: o item errado tambem casa 1.
+#
+# Nestes casos FALHAR E O COMPORTAMENTO CERTO: erro claro, print salvo, e a pessoa
+# decide. A cura serve para destravar o que so custa tempo, nunca o que custa arquivo.
+#
+# NAO "MELHORE" ISTO DEPOIS. A lista parece conservadora demais ate o dia em que um
+# clique errado esvazia a pasta de alguem, e ai ja e tarde. Se um item de menu quebrar
+# de verdade, o conserto e humano e leva dois minutos — `conferir.py` diz qual morreu.
+#
+# A lista vale nas DUAS pontas: a IA nao e consultada sobre estes nomes, e o
+# `curados.json` tambem nao consegue sobrepo-los (ver `aplicar_curados`). Duas barreiras
+# porque a segunda cobre o arquivo editado a mao, copiado de outra maquina ou gravado
+# por uma versao antiga do codigo.
+NAO_CURAVEIS = frozenset({
+    # o menu do card, inteiro — e nele que mora "Mover para a lixeira"
+    "MENU_CARD", "MENU_ITEM", "MENU_ANIMAR", "MENU_BAIXAR", "MENU_REUTILIZAR",
+    "MENU_LIXEIRA_CARD",
+    # o menu do projeto: renomear e vizinho de excluir e de lixeira
+    "MENU_RENOMEAR", "MENU_LIXEIRA", "MENU_EXCLUIR",
+    "BOTAO_EXCLUIR_PROJETO",
+    # aceitar termo em nome do usuario nao e conserto de interface. O aviso de direitos
+    # declara que quem envia tem os direitos sobre as imagens, e o consentimento do
+    # onboarding tem que ficar DESMARCADO — nenhum dos dois e coisa que um modelo
+    # escolhe
+    "BOTAO_CONCORDO", "CAIXA_CONSENTIMENTO",
+    # parar uma geracao em curso joga fora credito ja gasto
+    "BOTAO_PARAR",
+})
+
+
+# --- os curados: arquivo a parte, sobreposto na leitura -----------------
+# O que a IA curou NAO volta para dentro deste arquivo. Motivos:
+#   * `seletores.py` continua sendo autoria humana, com os comentarios que explicam
+#     cada armadilha medida — e um `sed` de robo apagaria justamente isso
+#   * o que a IA mexeu fica visivel, auditavel e REVERSIVEL: apagar o JSON volta ao
+#     original, sem git, sem merge, sem conflito
+#
+# Cada entrada guarda valor novo, valor antigo, data e a justificativa que o modelo deu.
+CURADOS = Path(__file__).with_name("curados.json")
+
+# `NOME` ou `NOME[chave]` — nada mais entra. Um nome fora desta forma e ignorado em vez
+# de virar `setattr` de coisa nenhuma.
+_ALVO = re.compile(r"^([A-Z][A-Z0-9_]*)(?:\[([^\]]+)\])?$")
+
+# Valor original de cada nome sobreposto, para `restaurar_originais` poder desfazer sem
+# reimportar o modulo — e o que faz "apagar o JSON reverte" valer tambem em processo
+# que ja esta de pe.
+_ORIGINAIS: dict[str, str] = {}
+
+
+def _chave_de(mapa: dict, chave: str):
+    """A chave REAL do mapa a partir do texto do nome, ou None.
+
+    `QUANTIDADE` tem chaves inteiras (1..4) e o nome do curado e texto
+    ("QUANTIDADE[1]"). Comparar por `str()` cobre os dois tipos sem obrigar o arquivo
+    de curados — que uma pessoa pode editar — a saber o tipo de cada mapa daqui.
+    """
+    for real in mapa:
+        if str(real) == chave:
+            return real
+    return None
+
+
+def _ler_curados() -> dict:
+    """O JSON, ou vazio. NUNCA levanta: isto roda na importacao do modulo.
+
+    Um arquivo corrompido nao pode derrubar o app inteiro — o comportamento correto e
+    seguir com `seletores.py` puro, que e exatamente o estado anterior a cura.
+    """
+    try:
+        dados = json.loads(CURADOS.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except Exception as e:                      # JSON quebrado, permissao, encoding
+        print(f"curados.json ilegivel ({type(e).__name__}) - "
+              f"seguindo com os seletores originais")
+        return {}
+    return dados if isinstance(dados, dict) else {}
+
+
+def aplicar_curados(dados: dict | None = None) -> list[str]:
+    """Sobrepoe os curados sobre este modulo. Devolve os nomes que valeram.
+
+    Recusa em silencio o que nao devia estar la: nome destrutivo (segunda barreira da
+    regra de seguranca), nome que nao existe no modulo, e valor que nao e texto. O
+    arquivo e escrito por codigo mas pode ser editado a mao, e a leitura tem que
+    tratar isso como entrada nao confiavel.
+    """
+    dados = _ler_curados() if dados is None else dados
+    aqui = globals()
+    aplicados: list[str] = []
+    for nome, entrada in dados.items():
+        valor = entrada.get("valor") if isinstance(entrada, dict) else entrada
+        if not isinstance(valor, str) or not valor:
+            continue
+        casado = _ALVO.match(nome)
+        if not casado:
+            continue
+        base, chave = casado.group(1), casado.group(2)
+        if base in NAO_CURAVEIS or nome in NAO_CURAVEIS:
+            print(f"curados.json: {nome} e destrutivo e NAO foi aplicado")
+            continue
+        atual = aqui.get(base)
+        if chave is None:
+            if not isinstance(atual, str):
+                continue                        # nome inexistente ou nao e seletor
+            _ORIGINAIS.setdefault(nome, atual)
+            aqui[base] = valor
+        else:
+            if not isinstance(atual, dict):
+                continue
+            real = _chave_de(atual, chave)
+            if real is None or not isinstance(atual[real], str):
+                continue
+            _ORIGINAIS.setdefault(nome, atual[real])
+            atual[real] = valor
+        aplicados.append(nome)
+    return aplicados
+
+
+def restaurar_originais() -> None:
+    """Desfaz toda sobreposicao, em memoria. E o "apagar o JSON" sem reiniciar."""
+    aqui = globals()
+    for nome, valor in _ORIGINAIS.items():
+        casado = _ALVO.match(nome)
+        if not casado:
+            continue
+        base, chave = casado.group(1), casado.group(2)
+        if chave is None:
+            aqui[base] = valor
+        elif isinstance(aqui.get(base), dict):
+            real = _chave_de(aqui[base], chave)
+            if real is not None:
+                aqui[base][real] = valor
+    _ORIGINAIS.clear()
+
+
+def recarregar_curados(dados: dict | None = None) -> list[str]:
+    """Volta ao original e aplica de novo. E o que a cura chama depois de gravar."""
+    restaurar_originais()
+    return aplicar_curados(dados)
+
+
+_APLICADOS = aplicar_curados()
+if _APLICADOS:
+    print(f"seletores curados em uso ({len(_APLICADOS)}): {', '.join(_APLICADOS)} "
+          f"- apague {CURADOS.name} para voltar ao original")

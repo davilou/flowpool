@@ -7129,6 +7129,106 @@ Quatro commits separados: domínio/API, transporte+testes, painel, docs.
 
 ---
 
+### Task 18: A referência subia para o acervo e nunca entrava no comando
+
+> **Correção da Task 17.** O Step 7 dela ("o transporte anexa em imagem") passou nos testes, passou na fumaça e **não funcionava**. A imagem saía sem nenhuma semelhança com a referência, e o sinal disso não estava em lugar nenhum do DOM: estava no arquivo gerado. Os dois defeitos abaixo foram medidos **por print**, depois de duas tentativas perdidas deduzindo pelo DOM — a mesma lição da Task 17, cobrada de novo.
+
+#### Defeito 1 — `set_input_files` não anexa; ele envia para o acervo
+
+`_anexar` escrevia no `input[type=file]` escondido e parava. Medido: isso **envia o arquivo para o acervo do projeto** (ele aparece em "Uploads", na barra lateral) e nada mais. A referência nunca entra no comando, e o Flow gera como se não houvesse anexo — **sem erro, sem aviso, com o crédito gasto**.
+
+O caminho real é o que uma pessoa faz: o botão `+` abre um **seletor de mídia**, e é dele que sai o "Incluir no comando". A anatomia medida está no spec, em *Modos suportados*.
+
+- [x] **Step 1: o seletor de mídia vira mapa, em `seletores.py`**
+
+`SELETOR_MIDIA`, `ITEM_MIDIA`, `ITEM_PRONTO`, `BOTAO_INCLUIR_NO_COMANDO`, `REFERENCIA_ANEXADA`, `BOTAO_APAGAR_COMANDO`. Fora do mapa de propósito: as abas e o "Enviar mídia" — o transporte não clica neles (o `input[type=file]` vive dentro do seletor e recebe `set_input_files` direto), e seletor que ninguém usa é seletor que ninguém conserta.
+
+`BOTAO_APAGAR_COMANDO` casa por **"Apagar comando"**, não pela ligadura `close`: ela é substring de `left_panel_close`, e o seletor pegaria dois.
+
+- [x] **Step 2: três fatos medidos que mudam o desenho, não a implementação**
+
+Nenhum foi deduzido; cada um custou um clique:
+
+1. **A seleção é exclusiva** — clicar num segundo item desmarca o primeiro. Não dá para marcar três e incluir de uma vez: é **um ciclo por referência**. O pedido pedia explicitamente para preferir o contrário *se a medição permitisse*; ela não permitiu.
+2. **Clicar no item já selecionado o desmarca**, e sem seleção o "Incluir no comando" **some**. Descoberto do jeito ruim: o script de medição clicou cego e morreu com `Timeout` no botão que tinha acabado de existir. Por isso o transporte confere `aria-selected` antes de clicar.
+3. **As referências somam e o item incluído sai da lista** (1 → 2 → 3 miniaturas, lista de 5 → 2).
+
+- [x] **Step 3: esperar o upload TERMINAR, e o sinal é a miniatura**
+
+Medido com 2,9 MB, de 250 em 250 ms: o item entra na lista **no primeiro segundo, sem miniatura**, e a imagem só chega aos **17,25 s**. Os 3 s fixos de antes cobriam 500 KB. A porcentagem que corre na tela **não serve** de sinal — ela mora no card do acervo, fora do seletor, e some antes da miniatura. Quem esperasse ela sumir incluiria item vazio.
+
+`analise.item_pronto` e `analise.escolher_item_enviado` são puras e têm teste. O segundo tem uma regra que **contraria** a regra da casa, e de propósito: ambiguidade de nome aqui **não é erro**. Enviar o mesmo arquivo duas vezes deixa dois itens de mesmo nome — foi medido, com dois `blusa.png` — e recusar isso travaria a segunda geração de qualquer produto. O desempate é medido: ganha o que o Flow **já deixou selecionado** (ele auto-seleciona o recém-enviado); sem nenhum, o primeiro, porque a lista sai por "Recentes".
+
+- [x] **Step 4: `_anexar` confere em vez de confiar**
+
+Conta `REFERENCIA_ANEXADA` na barra do prompt e compara com o número de arquivos. Divergência é **erro**. Era isto que faltava: sem a contagem, uma referência que não entrou some em silêncio — que é o defeito inteiro, e o motivo de ele ter sobrevivido a uma fumaça verde.
+
+E **limpa antes**: como as referências somam, uma tentativa morta no meio deixaria a miniatura na barra e a próxima geração sairia com o dobro.
+
+#### Defeito 2 — `_fechar_painel` esperava o véu, e não há véu
+
+```python
+if await pagina.locator(sel.VEU_ABERTO).count() == 0:
+    return                      # <- retornava aqui, sem nunca apertar Escape
+```
+
+Medido: **o painel do chip fica aberto SEM véu**. A função retornava na hora, o painel continuava por cima do campo de prompt, e o erro seguinte falava do campo — nunca do que o cobria. O comentário do `VEU_ABERTO` estava certo sobre o véu do *dropdown de modelo* e virou critério para o painel inteiro.
+
+- [x] **Step 5: o critério passa a ser o estado, e são duas metades**
+
+`_painel_fechado` = o painel **não está visível** E não há véu. Só o véu era o defeito; só o painel deixaria passar o véu do dropdown, que intercepta clique mesmo sendo `aria-hidden`. Continua esperando estado, nunca dormindo.
+
+Com isso vem uma restrição que precisa estar escrita: **`_fechar_painel` não pode rodar com o seletor de mídia aberto** — ele é um `[role=dialog]`, que `PAINEL_CHIP` também casa, e a função gastaria os Escapes fechando a peça errada. Por isso `_dispensar_aviso_de_direitos` deixou de chamá-la e passa a esperar o **aviso** sumir.
+
+#### O que os prints deram de brinde
+
+- [x] **Step 6: o painel anuncia o custo exato — `CUSTO_DA_GERACAO`**
+
+"A geração vai usar **N** créditos", no rodapé do painel. Isso **derruba a conclusão anterior** de que só o agente conversacional sabia o preço. Medido nos dois lados: `0` em imagem, `7` no vídeo de 4s — que é exatamente o número da tabela de custos para o Omni Flash, então a tabela e a interface concordam hoje.
+
+Fica como **mapa e log**: `_configurar` lê e imprime, `conferir.py` reporta. Ligar na reserva do orquestrador é passo próprio — trocar a fonte da reserva sem medir as quatro famílias de modelo trocaria um erro conhecido por um desconhecido.
+
+- [x] **Step 7: `dom.seguro` cumpria metade do contrato**
+
+Ele tira acento e **deixava emoji**, e o rótulo do modelo de imagem tem um. Imprimir emoji num console cp1252 não troca a letra por `?`: levanta `UnicodeEncodeError` e derruba a ferramenta. Foi assim que o `conferir.py` morreu no meio do roteiro de modos, **com todos os seletores corretos** — o diagnóstico perdido por uma banana. `sem_emoji` corta em Latin-1, que é o que cp1252 e UTF-8 imprimem os dois; o critério não olha o console de quem roda, senão o teste passaria aqui e falharia na máquina do lado.
+
+- [x] **Step 8: `conferir.py` percorre o caminho em vez de contar seletores**
+
+Este defeito passava por **todos** os `count()`: o `input[type=file]` existia, o botão de anexar existia. Só percorrer pega. `_medir_anexo` abre o seletor, lista os itens, inclui uma referência, confere que ela apareceu na barra do prompt e **desfaz** — custo zero, sem rastro. `_medir_custo` lê o preço anunciado.
+
+- [x] **Step 9: Rodar a suíte**
+
+Run: `.venv/Scripts/python.exe -m pytest -q`
+Expected: `483 passed` (461 → 483; +22 líquidos).
+
+Os que provam a mudança:
+
+- `test_item_so_esta_pronto_quando_tem_miniatura` — **o teste do defeito 1**, na parte que o relógio escondia.
+- `test_item_que_apareceu_mas_ainda_sobe_e_espere_mais` — o item existir não é o item estar pronto.
+- `test_dois_arquivos_de_mesmo_nome_desempatam_pelo_selecionado` e `test_o_selecionado_so_ganha_se_estiver_pronto` — o par que define a exceção à regra da ambiguidade, e o limite dela.
+- `test_nome_parecido_nao_casa` — `blusa.png` não pode casar com `blusa-2.png`; o `in` solto anexaria o arquivo errado sem nenhum sintoma.
+- `test_emoji_do_rotulo_de_modelo_nao_derruba_a_impressao` — o `encode("cp1252")` dentro do teste é o que estourava.
+- `test_o_que_importa_no_chip_sobrevive_ao_corte` — o contrapeso: tirar o emoji não pode levar junto a ligadura da proporção.
+- `test_frase_ausente_e_erro_e_nao_zero` — zero é o preço da imagem; confundi-lo com "não achei" faria a leitura parecer quebrada onde ela está certa.
+
+Os sete testes de `_anexar` da Task 17 **mudaram de alvo**: eram sobre a corrotina inteira, com uma página falsa de um `input` só, e essa página deixou de descrever a realidade. Viraram testes de `analise.arquivos_do_pedido`, que é a decisão que sobrou de testável. O que se perdeu em cobertura de sequência, o `conferir.py` cobre percorrendo de verdade.
+
+- [x] **Step 10: Fumaça — e desta vez ABRIR O ARQUIVO**
+
+```
+.venv/Scripts/python.exe -m flowpool.transporte.pw.fumaca flowpool/perfis/conta1 \
+  imagem nano-banana "a modelo vestindo a blusa preta da referencia, corpo inteiro" \
+  "_Personagens/blusa-preta/blusa.png"
+```
+
+Resultado: `custo anunciado pelo painel: 0 creditos`, `custo real: 0`, `scratch/fumaca.jpeg`.
+
+**E o arquivo foi aberto.** É este o passo que a Task 17 não tinha, e é o único que distingue "rodou" de "funcionou": a imagem gerada traz a mesma blusa preta de gola drapeada, o mesmo colar de pingente, os mesmos brincos de argola, a mesma pulseira, o mesmo cinto e a mesma calça bege da referência — e o mesmo cenário. Antes da correção saía uma imagem sem relação nenhuma, com a mesma saída verde no terminal.
+
+`conferir.py` também foi rodado (`42 ok`), com o ciclo de anexo percorrido e desfeito.
+
+---
+
 ## Depois deste plano
 
 O painel web é o **plano 2**: uma página servida pelo próprio FastAPI, consumindo `/contas`, `/jobs` e `/saude`, com botão de cadastrar conta e um formulário de lote. Não começa antes deste plano estar rodando ponta a ponta — tela para API que nunca gerou clipe é trabalho jogado fora.

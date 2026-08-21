@@ -452,6 +452,36 @@ Continua valendo que a UI tem **um único** `input[type=file]` (`multiple=True`,
 
 **Imagem aceita referência** — medido em 20/08: com o chip em modo imagem a página tem um `input[type=file]` e um botão de anexar. É o Nano Banana gerando a partir de uma foto. Isso não é um canto raro do app: o pipeline do Davi **começa** em "foto da roupa → imagem da modelo vestida", que é exatamente imagem com referência. Enquanto o transporte retornava cedo em imagem, a referência anexada era descartada **sem aviso** — a pessoa colava a imagem, trocava para modo imagem e a imagem sumia. A primeira etapa do trabalho não estava contemplada.
 
+#### Anexar é um seletor de mídia, não um `set_input_files` — medido em 20/08
+
+O parágrafo acima estava certo sobre **quem dá significado ao arquivo** e errado sobre **como o arquivo entra**. A correção veio de print, depois de duas tentativas perdidas deduzindo pelo DOM.
+
+**Escrever no `input[type=file]` escondido NÃO anexa nada.** Ele envia o arquivo para o **acervo do projeto** — a imagem aparece em "Uploads", na barra lateral — e para por aí. A referência nunca entra no comando, e o Flow gera como se não houvesse anexo: sem erro, sem aviso, com o crédito debitado e uma imagem que não se parece com a referência. É o pior modo de falha deste app pela terceira vez, e o único jeito de vê-lo é **abrir o arquivo gerado**.
+
+O caminho real é o que uma pessoa faz na tela. O botão `+` (`add_2`) abre um **seletor de mídia** — um `[role=dialog]` com:
+
+| parte | o que é |
+|---|---|
+| filtros à esquerda | `button[role=tab]`: Tudo, Imagens, Vídeos, Vozes, Personagens, Avatar, Uploads |
+| lista ao centro | `[role=option]`, cada item com nome na 1ª linha e tipo na 2ª |
+| prévia à direita | com o botão branco **"Incluir no comando"** (i18n `add_menu_add_to_prompt`) embaixo |
+| rodapé à esquerda | **"Enviar mídia"** — mas não se clica nele: o `input[type=file]` que ele aciona vive dentro do seletor e recebe `set_input_files` direto |
+
+Três medições mudam o desenho da sequência, e nenhuma foi deduzida:
+
+1. **A seleção é exclusiva.** Clicar num segundo item **desmarca** o primeiro. Não há como marcar três e incluir de uma vez — é **um ciclo por referência**. A esperança contrária estava explícita no pedido, e a medição a desfez.
+2. **Clicar no item já selecionado o desmarca**, e sem seleção o botão "Incluir no comando" **some da tela**. Por isso se confere `aria-selected` antes de clicar; o clique cego derruba a geração com "esperava 1 candidato, achei 0" — e foi exatamente assim que a medição descobriu isso.
+3. **As referências somam, e o item incluído sai da lista.** Medido: 1 → 2 → 3 miniaturas na barra do prompt, com a lista encolhendo de 5 para 2. Somar é o que permite o ciclo repetir; sair da lista é o que impede o mesmo arquivo de ser incluído duas vezes.
+
+**Esperar o upload terminar é parte do fluxo, não detalhe.** Medido com 2,9 MB, amostrando de 250 em 250 ms: o item entra na lista **no primeiro segundo, sem miniatura**, enquanto uma porcentagem corre no card do acervo — e a miniatura só chega aos **17,25 s**. Os 3 s fixos que a versão anterior dormia cobriam 500 KB e não cobrem isso. O sinal de pronto é **a miniatura dentro do item**: a porcentagem não serve, porque mora fora do seletor e some antes.
+
+E há **verificação**, que era o que faltava: depois de incluir tudo, conta-se a miniatura na barra do prompt e compara-se com o número de arquivos pedidos. Divergência é **erro**, com a reserva ainda estornável — sem isso, uma referência que não entrou volta a sumir em silêncio, que é o defeito inteiro.
+
+Duas consequências que não são óbvias:
+
+- **Limpar antes de anexar.** Como as referências somam, uma tentativa que morreu no meio deixa a miniatura na barra, e a próxima geração do mesmo job sairia com o dobro. `_anexar` zera o rascunho ("Apagar comando") antes de começar.
+- **`conferir.py` percorre o caminho, não conta seletores.** Este defeito passava por todos os `count()`: o `input[type=file]` existia, o botão existia. Só percorrer pega. O diagnóstico agora anexa uma referência e desfaz, com custo zero.
+
 O teto é o mesmo dos outros: **três**. A diferença entre imagem e `chrome_extension` é a **exigência**, não o teto — `ingredients2v` sem referência não tem o que gerar, imagem sem referência é geração por texto puro, que é o caso comum. Quantidade e referência continuam independentes: imagem aceita `x1..x4` com ou sem referência. `frame_inicial`/`frame_final` continuam **exclusivos de `frames2v`**, e a API passou a recusar explicitamente quem os manda em outro modo, em vez de deixar o transporte descartá-los lá na frente.
 
 Observação de campo (19/08, confirmada em 20/08): o Flow passou a expor um modelo **Gemini Omni** — vídeo a partir de qualquer referência, com edição conversacional. **`Omni Flash` é o padrão do dropdown de vídeo**. Entrou no escopo como `Modelo.OMNI_FLASH` e como padrão de vídeo da API. A previsão de deixar o campo `modelo` aberto se pagou — acomodou o modelo novo sem migração nenhuma.
@@ -567,6 +597,28 @@ O resto é **extrapolado**, e o código diz isso linha a linha. A reta que passa
 O arredondamento é sempre **para cima**, e a direção é escolhida: reserva curta demais aprova uma conta que não paga o job, o Flow recusa, o job volta pra fila e a conta é marcada seca por erro de cálculo. Reserva folgada só custa um pouco de saldo até a reconciliação.
 
 Nada disso torna a tabela "certa", e ela nunca precisou ser: continua sendo **reserva** anterior ao despacho, e **a reconciliação corrige**. O que mudou é que ela deixou de estar sistematicamente errada na direção cara. E o que a decisão vale, em números do usuário: com 4s a 7 créditos, uma conta grátis de 50 rende **7 vídeos por dia** em vez de 4.
+
+#### O painel anuncia o custo exato — medido em 20/08
+
+A afirmação acima de que só o **agente conversacional** informava o preço está errada, e a correção veio de olhar um print com atenção. O rodapé do painel do chip diz, antes de gerar:
+
+> A geração vai usar **N** créditos
+
+É o custo exato, na interface, sem passar pelo agente e sem gastar nada para perguntar. Medido nos dois lados: **0** em imagem e **7** no vídeo de 4s — e esse 7 é justamente o número que a tabela extrapola para o Omni Flash em 4s, então tabela e interface concordam hoje.
+
+Por que isso **ainda não** é a reserva, embora resolvesse o problema que a tabela existe para contornar: a reserva acontece **antes** de abrir o navegador, e ler este número exige o projeto aberto e o painel configurado — o que já é metade do despacho. Trocar a fonte da reserva é uma mudança de ordem no orquestrador, não uma troca de leitura, e fazê-la sem medir as quatro famílias de modelo trocaria um erro conhecido por um desconhecido.
+
+O que ele já vale, hoje, sem nenhuma mudança de ordem: é **verificação** e é **log**. `_configurar` lê e imprime o número junto da configuração conferida, e `conferir.py` o reporta. No dia em que o Google mudar de preço, a divergência entre a tabela e este número aparece na primeira geração — em vez de aparecer como conta seca três dias depois.
+
+### Fechar o painel: o critério é o painel, não o véu
+
+Corrige o que este spec e o código diziam desde 20/08. O véu Radix (`div[data-state="open"][aria-hidden="true"]`) existe, intercepta clique e é real — mas ele acompanha o **dropdown de modelo**, não o painel do chip. **Medido por print: o painel do chip fica aberto sem véu nenhum.**
+
+A consequência era pior do que uma espera errada. O código retornava assim que não achava véu — ou seja, **retornava na primeira linha, sem nunca apertar Escape** —, o painel continuava por cima do campo de prompt, e o erro seguinte falava do campo. Pela terceira vez neste app, a mensagem acusava o elemento coberto e nunca o que o cobria.
+
+O critério passa a ter duas metades, e cada uma já falhou sozinha: **o painel não está visível** *e* **não há véu**. Continua esperando o estado, nunca dormindo — foi por dormir 1200 ms fixos aqui que o defeito só aparecia às vezes.
+
+Isso traz uma restrição que precisa estar escrita, porque não é óbvia: **fechar o painel não pode ser chamado com o seletor de mídia aberto.** O seletor de mídia é um `[role=dialog]`, que o localizador do painel também casa — a função gastaria os Escapes fechando justamente a peça que a sequência precisa que continue de pé. Quem dispensa o aviso de direitos, que aparece por cima do seletor de mídia, espera o **aviso** sumir, e não "o painel fechar".
 
 ## Erro e observabilidade
 

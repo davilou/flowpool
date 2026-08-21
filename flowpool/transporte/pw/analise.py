@@ -20,6 +20,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from flowpool.nucleo import tipos
+from flowpool.nucleo.tipos import Modo
 from flowpool.transporte.base import GeracaoFalhou
 from flowpool.transporte.pw import dom
 from flowpool.transporte.pw import seletores as sel
@@ -208,6 +210,97 @@ def etapas_ate_o_modo(modo: str, visivel: bool) -> list[str]:
             f"modo {modo} nao esta no painel e nao e submodo de nenhum outro — se o "
             f"botao sumiu de vez, o conserto e em seletores.MODO_ICONE")
     return [pai, modo]
+
+
+def custo_do_texto(texto: str) -> int:
+    """"A geração vai usar 12 créditos" -> 12.
+
+    MEDIDO 2026-08-20: o painel do chip anuncia o custo EXATO antes de gerar. Isso
+    derruba a conclusao anterior de que so o agente conversacional sabia o preco.
+
+    Aceita acentuado e sem acento pelo mesmo motivo de `saldo_do_texto`: o texto passa
+    por `dom.seguro` antes de ser impresso, e um caminho que le o valor ja normalizado
+    nao pode deixar de casar.
+
+    Zero e resposta valida — e justamente o caso da imagem, que e gratuita. Confundir
+    zero com "nao achei" faria a leitura parecer quebrada exatamente onde ela esta
+    certa, e e por isso que a ausencia levanta em vez de devolver 0.
+    """
+    achado = re.search(sel.PADRAO_CUSTO, texto)
+    if not achado:
+        raise GeracaoFalhou(f"nao achei o custo anunciado em {texto!r}")
+    return int(re.sub(r"[.,]", "", achado.group(1)))
+
+
+def nome_do_item(texto: str) -> str:
+    """O nome do item da lista de midia: a PRIMEIRA linha do rotulo.
+
+    MEDIDO: cada `[role=option]` do seletor de midia rende duas linhas — o nome na
+    primeira e o tipo na segunda ("folha-frames.png" / "Imagem"). Item enviado leva o
+    nome do arquivo; item gerado leva o inicio do proprio comando.
+    """
+    linhas = (texto or "").strip().splitlines()
+    return linhas[0].strip() if linhas else ""
+
+
+def item_pronto(item: dict) -> bool:
+    """O upload terminou quando o item GANHA MINIATURA.
+
+    MEDIDO 2026-08-20 com um arquivo de 2,9 MB, amostrado de 250 em 250 ms: o item
+    entra na lista imediatamente, sem miniatura, e so aos 17,25 s a imagem aparece.
+    Os 3 s fixos da versao anterior cobriam 500 KB e nao cobrem isso — e estourar o
+    prazo aqui nao dava erro, dava referencia vazia com credito gasto.
+
+    A porcentagem que corre na tela nao serve: ela mora no card do ACERVO, fora do
+    seletor, e some ANTES de a miniatura chegar.
+    """
+    return item.get("miniaturas", 0) > 0
+
+
+def escolher_item_enviado(itens: list[dict], nome: str) -> int | None:
+    """Indice do item que e o arquivo recem-enviado. `None` = ainda nao esta pronto.
+
+    `None` e "espere mais", nao "falhou": quem chama fica no laco ate o teto e so
+    entao levanta, com uma mensagem que sabe dizer se o item nem apareceu ou se
+    apareceu e nao ficou pronto.
+
+    Ambiguidade AQUI nao pode ser erro, e essa e a diferenca em relacao a
+    `escolher_opcao`. Enviar o MESMO arquivo duas vezes deixa dois itens de mesmo nome
+    na lista — foi medido, com dois `blusa.png` —, e recusar isso travaria a segunda
+    geracao de qualquer produto. O desempate e medido, nao arbitrado:
+
+      1. o item que o Flow ja deixou SELECIONADO e o que acabou de subir (ele
+         auto-seleciona o recem-enviado);
+      2. sem nenhum selecionado, vale o primeiro — a lista sai ordenada por
+         "Recentes", e o novo entra no topo.
+    """
+    candidatos = [i for i, x in enumerate(itens) if nome_do_item(x.get("texto", "")) == nome]
+    if not candidatos:
+        return None
+    prontos = [i for i in candidatos if item_pronto(itens[i])]
+    if not prontos:
+        return None
+    selecionados = [i for i in prontos if itens[i].get("selecionado")]
+    return selecionados[0] if selecionados else prontos[0]
+
+
+def arquivos_do_pedido(p) -> list[str]:
+    """Quais arquivos este pedido anexa, na ordem, ja com o teto do modo aplicado.
+
+    Vive aqui, e nao dentro da corrotina que clica, porque e a decisao que ja errou
+    duas vezes: uma descartando a referencia da IMAGEM sem avisar (o pipeline do
+    usuario COMECA por ela — foto da roupa -> modelo vestida), outra deixando frame
+    inicial e final vazarem para modos que nao os aceitam.
+
+    Quem decide o que cada arquivo SIGNIFICA e o modo ja escolhido no chip, nao o
+    seletor: em `crop_free` viram frame inicial e final; em `chrome_extension` e em
+    imagem viram referencias. Por isso `_configurar` roda antes de `_anexar`.
+    """
+    if p.modo is Modo.FRAMES2V:
+        return [str(Path(x)) for x in (p.frame_inicial, p.frame_final) if x]
+    if not tipos.aceita_referencia(p.modo):
+        return []
+    return [str(Path(r)) for r in p.referencias[:tipos.max_referencias(p.modo)]]
 
 
 def indice_por_sufixo(rotulos, alvo: str) -> int:

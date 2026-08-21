@@ -274,32 +274,48 @@ class TransportePlaywright:
         except Exception:
             return None
 
-    async def _fechar_painel(self, pagina, tentativas: int = 4) -> None:
-        """Fecha o painel do chip e ESPERA o veu sumir.
+    async def _painel_fechado(self, pagina) -> bool:
+        """Fechado = o PAINEL sumiu da tela E nao sobrou veu.
 
-        Um `Escape` so nao basta, e a razao e que ha DOIS niveis: o dropdown de modelo
-        abre por cima do painel. O primeiro Escape fecha o de cima e o painel continua
-        aberto — com um `<div data-state="open" aria-hidden="true">` cobrindo a tela.
-        Esse veu nao e visivel, mas intercepta clique: o passo seguinte (clicar no campo
-        de prompt) ficava 15s tentando e estourava, com a mensagem falando do campo e
-        nao do veu que o cobria.
+        As duas metades, e nesta ordem, porque cada uma ja falhou sozinha:
+
+        * so o VEU: MEDIDO 2026-08-20 por print — o painel do chip fica aberto SEM veu
+          nenhum. Quem so olhava o veu declarava "fechei" sem nem apertar Escape, e o
+          painel continuava por cima do campo de prompt. Era este o defeito.
+        * so o PAINEL: o dropdown de modelo abre por cima do painel e leva um veu
+          junto; o painel pode sumir com o veu ainda de pe, e veu intercepta clique
+          mesmo sendo `aria-hidden`.
+        """
+        painel = pagina.locator(sel.PAINEL_CHIP)
+        if await painel.count() > 0 and await painel.first.is_visible():
+            return False
+        return await pagina.locator(sel.VEU_ABERTO).count() == 0
+
+    async def _fechar_painel(self, pagina, tentativas: int = 4) -> None:
+        """Aperta Escape ate o painel do chip estar fechado de verdade.
+
+        Um `Escape` so nao basta porque ha DOIS niveis: o dropdown de modelo abre por
+        cima do painel, e o primeiro Escape fecha so o de cima.
 
         Espera-se o ESTADO, nao o tempo. Foi por dormir 1200ms fixos aqui que o defeito
         so aparecia as vezes.
+
+        NAO CHAMAR COM O SELETOR DE MIDIA ABERTO: ele e um `[role=dialog]`, que
+        `PAINEL_CHIP` tambem casa — o criterio veria o seletor de midia como "painel
+        que nao fechou" e gastaria os Escapes fechando a peca errada.
         """
         for _ in range(tentativas):
-            if await pagina.locator(sel.VEU_ABERTO).count() == 0:
+            if await self._painel_fechado(pagina):
                 return
             await pagina.keyboard.press("Escape")
-            try:
-                await pagina.locator(sel.VEU_ABERTO).first.wait_for(
-                    state="detached", timeout=2500)
-            except Exception:
-                continue
-        if await pagina.locator(sel.VEU_ABERTO).count() > 0:
-            raise GeracaoFalhou(
-                "o painel do chip nao fechou: o veu continua cobrindo a tela e nenhum "
-                "clique fora dele passaria")
+            # espera o ESTADO, com teto curto: quem dorme aqui volta a intermitencia
+            for _ in range(10):
+                await pagina.wait_for_timeout(250)
+                if await self._painel_fechado(pagina):
+                    return
+        raise GeracaoFalhou(
+            "o painel do chip nao fechou: ele continua na tela (ou sobrou veu) e "
+            "nenhum clique no campo de prompt passaria")
 
     async def _configurar(self, pagina, p: Pedido) -> str:
         """Abre o chip, ajusta tudo e CONFERE. Devolve o texto final do chip.
@@ -350,6 +366,11 @@ class TransportePlaywright:
             await self._clicar_unico(painel, sel.DURACAO[duracao], "duracao")
         await self._clicar_unico(painel, sel.QUANTIDADE[p.quantidade], "quantidade")
 
+        # O CUSTO ESTA NA TELA. Le-se aqui porque o painel ja esta aberto e a leitura
+        # nao custa clique nenhum — ao contrario do saldo, que paga dois. Hoje isto e
+        # log; ligar na reserva do orquestrador e passo proprio (ver seletores.py).
+        await self._custo_anunciado(pagina)
+
         await self._fechar_painel(pagina)
 
         chip = await self._texto_do_chip(pagina)
@@ -363,6 +384,23 @@ class TransportePlaywright:
         if aviso:
             print("chip:", aviso)
         return chip
+
+    async def _custo_anunciado(self, pagina) -> int | None:
+        """O que o painel do chip diz que a geracao vai custar. `None` se nao achou.
+
+        NAO BLOQUEIA A GERACAO. E leitura de instrumento, nao verificacao: enquanto o
+        numero nao alimentar a reserva, um deploy que mude a frase nao pode derrubar um
+        job que estava correto. O que se perde e a linha no log, e ela avisa sozinha.
+        """
+        try:
+            texto = await pagina.locator(sel.CUSTO_DA_GERACAO).first.inner_text(
+                timeout=3000)
+            custo = analise.custo_do_texto(dom.seguro(texto))
+        except Exception:
+            print("custo: o painel nao anunciou o preco (seletores.CUSTO_DA_GERACAO)")
+            return None
+        print(f"custo anunciado pelo painel: {custo} creditos")
+        return custo
 
     # ------------------------------------------------------------------- gerar
     async def gerar(self, s: Sessao, p: Pedido) -> str:
@@ -433,38 +471,107 @@ class TransportePlaywright:
         raise GeracaoFalhou("o Flow nao criou card novo depois do envio")
 
     async def _anexar(self, pagina, p: Pedido) -> None:
-        """Um unico `input[type=file]` (multiple, accept=image/*) serve a tudo.
+        """Faz cada arquivo virar REFERENCIA DA GERACAO, pelo seletor de midia.
 
-        Quem decide o que cada arquivo significa e o MODO ja escolhido no chip, nao o
-        seletor: em `crop_free` os arquivos viram frame inicial e final, em
-        `chrome_extension` e em imagem viram referencias. Por isso `_configurar` roda
-        ANTES daqui.
+        O DEFEITO QUE ISTO CONSERTA: a versao anterior fazia `set_input_files` no
+        `input[type=file]` escondido e parava por ai. MEDIDO 2026-08-20 por print —
+        isso envia o arquivo para o ACERVO do projeto (ele aparece em "Uploads" na
+        barra lateral) e NADA MAIS. A imagem nunca entrava no comando, e o Flow gerava
+        como se nao houvesse anexo: sem erro, sem aviso, com o credito gasto e uma
+        imagem que nao parece com a referencia.
 
-        IMAGEM TAMBEM ANEXA. MEDIDO 2026-08-20: com o chip em imagem a pagina tem um
-        `input[type=file]` e um botao de anexar — o Flow gera imagem A PARTIR de uma
-        foto, e e o Nano Banana fazendo isso. Enquanto este metodo retornava cedo em
-        imagem, a referencia anexada era jogada fora SEM AVISO, e a primeira etapa do
-        pipeline do usuario (foto da roupa -> modelo vestida) simplesmente nao existia.
+        O caminho certo e o que uma pessoa faz na tela: abrir o seletor pelo `+`,
+        enviar, ESPERAR o upload terminar, confirmar que o item esta marcado e clicar
+        em "Incluir no comando". Uma volta por referencia — MEDIDO que a selecao do
+        seletor e exclusiva, entao nao ha como marcar tres e incluir de uma vez.
 
-        A diferenca entre imagem e `chrome_extension` e a EXIGENCIA, nao o teto: os
-        dois aceitam ate tres, mas imagem sem referencia continua sendo geracao por
-        texto puro, que e o caso comum.
+        `_configurar` roda ANTES: quem decide o que cada arquivo significa e o modo ja
+        escolhido no chip, nao o seletor de arquivo.
         """
-        if p.modo is Modo.FRAMES2V:
-            # frame inicial e final continuam exclusivos deste modo
-            arquivos = [str(Path(x)) for x in (p.frame_inicial, p.frame_final) if x]
-        elif tipos.aceita_referencia(p.modo):
-            arquivos = [str(Path(r)) for r in
-                        p.referencias[:tipos.max_referencias(p.modo)]]
-        else:
-            return
+        arquivos = analise.arquivos_do_pedido(p)
         if not arquivos:
             if not tipos.exige_arquivo(p.modo):
                 return
             raise GeracaoFalhou(f"modo {p.modo.value} sem arquivo para anexar")
-        await pagina.locator(sel.UPLOAD).first.set_input_files(arquivos)
-        await pagina.wait_for_timeout(3000)
+
+        await self._limpar_referencias(pagina)
+        for arquivo in arquivos:
+            await self._incluir_referencia(pagina, arquivo)
+
+        # CONFERE, nao confia. Este e o passo que faltava: sem ele, uma referencia que
+        # nao entrou some em silencio e a geracao sai por texto puro — que foi
+        # exatamente o defeito. Divergencia e ERRO, com a reserva ainda estornavel.
+        incluidas = await pagina.locator(sel.REFERENCIA_ANEXADA).count()
+        if incluidas != len(arquivos):
+            raise GeracaoFalhou(
+                f"anexo nao confirma: pedi {len(arquivos)} referencia(s) e a barra do "
+                f"prompt mostra {incluidas}")
+
+    async def _limpar_referencias(self, pagina) -> None:
+        """Zera o rascunho antes de anexar. Referencia herdada e geracao errada.
+
+        Uma tentativa que morreu no meio deixa a miniatura na barra do prompt, e o
+        Flow SOMA a proxima em vez de trocar (medido: 1 -> 2 -> 3). Sem limpar, a
+        segunda tentativa do mesmo job geraria com o dobro das referencias.
+        """
+        if await pagina.locator(sel.REFERENCIA_ANEXADA).count() == 0:
+            return
+        await self._clicar_unico(pagina, sel.BOTAO_APAGAR_COMANDO, "apagar comando")
+        for _ in range(20):
+            await pagina.wait_for_timeout(250)
+            if await pagina.locator(sel.REFERENCIA_ANEXADA).count() == 0:
+                return
+        raise GeracaoFalhou(
+            "as referencias de uma tentativa anterior nao sairam da barra do prompt")
+
+    async def _incluir_referencia(self, pagina, arquivo: str) -> None:
+        """Uma volta completa do seletor de midia: abrir, enviar, esperar, incluir."""
+        await pagina.locator(sel.BOTAO_ANEXAR).first.click(timeout=15_000)
+        seletor = pagina.locator(sel.SELETOR_MIDIA).first
+        await seletor.wait_for(timeout=15_000)
+
+        # o `input[type=file]` vive DENTRO do seletor; nao se clica em "Enviar midia"
+        await pagina.locator(sel.UPLOAD).first.set_input_files([arquivo])
+        # antes de esperar o item: o aviso de direitos aparece por cima e segura o
+        # upload da PRIMEIRA vez de cada conta
         await self._dispensar_aviso_de_direitos(pagina)
+
+        indice = await self._esperar_item_pronto(pagina, Path(arquivo).name)
+        itens = pagina.locator(sel.ITEM_MIDIA)
+        # CONFERIR antes de clicar. MEDIDO: clicar num item JA selecionado o DESmarca,
+        # e sem selecao o botao "Incluir no comando" some da tela — o clique cego
+        # derrubaria a geracao com "esperava 1 candidato, achei 0".
+        if await itens.nth(indice).get_attribute("aria-selected") != "true":
+            await itens.nth(indice).click(timeout=15_000)
+        await self._clicar_unico(pagina, sel.BOTAO_INCLUIR_NO_COMANDO,
+                                 "Incluir no comando")
+        # o seletor fecha sozinho ao incluir; espera-se o ESTADO, nunca um sono
+        await seletor.wait_for(state="hidden", timeout=15_000)
+
+    async def _esperar_item_pronto(self, pagina, nome: str, teto_ms: int = 180_000) -> int:
+        """Espera o upload TERMINAR e devolve o indice do item na lista.
+
+        Espera pelo ITEM PRONTO, nao por tempo. MEDIDO 2026-08-20: 2,9 MB levaram
+        17,25 s, e o item entra na lista no primeiro segundo — sem miniatura — com uma
+        porcentagem correndo. Os 3 s fixos da versao anterior incluiriam um item vazio.
+
+        O teto e generoso de proposito: estourar aqui e um upload lento, que se resolve
+        esperando; incluir cedo e uma referencia vazia, que so aparece na imagem final.
+        """
+        gasto = 0
+        visto = False
+        while gasto < teto_ms:
+            itens = await pagina.evaluate(dom.ITENS_DE_MIDIA, sel.ITEM_MIDIA)
+            indice = analise.escolher_item_enviado(itens, nome)
+            if indice is not None:
+                return indice
+            visto = visto or any(
+                analise.nome_do_item(i.get("texto", "")) == nome for i in itens)
+            await pagina.wait_for_timeout(500)
+            gasto += 500
+        raise GeracaoFalhou(
+            f"{nome}: o item {'nao ficou pronto' if visto else 'nao apareceu'} no "
+            f"seletor de midia em {teto_ms // 1000}s")
 
     async def _dispensar_aviso_de_direitos(self, pagina) -> None:
         """Dispensa o modal "Aviso" que aparece na PRIMEIRA vez que a conta envia arquivo.
@@ -484,8 +591,15 @@ class TransportePlaywright:
         except Exception:
             return
         await self._clicar_unico(pagina, sel.BOTAO_CONCORDO, "aviso de direitos")
-        # o modal leva o veu junto; sem esperar, o clique seguinte bate nele
-        await self._fechar_painel(pagina)
+        # Espera o AVISO sumir, e nao "o painel fechar". A diferenca importa: isto roda
+        # com o SELETOR DE MIDIA aberto, e `_fechar_painel` casaria o seletor de midia
+        # (que tambem e `[role=dialog]`) e ficaria apertando Escape para fechar
+        # justamente a peca que a sequencia precisa que continue de pe.
+        for _ in range(20):
+            if await pagina.locator(sel.AVISO_DIREITOS).count() == 0 \
+                    and await pagina.locator(sel.VEU_ABERTO).count() == 0:
+                break
+            await pagina.wait_for_timeout(250)
         print("aviso de direitos dispensado (primeira vez desta conta)")
 
     # --------------------------------------------------------------- consultar

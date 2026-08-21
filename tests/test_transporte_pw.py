@@ -12,10 +12,12 @@ import pytest
 from flowpool.nucleo.tipos import Modelo, Modo
 from flowpool.transporte.base import GeracaoFalhou, Pedido
 from flowpool.transporte.pw import seletores as sel
+from flowpool.transporte.pw.dom import seguro
 from flowpool.transporte.pw.analise import (
-    caminho_final, confirmacao_fraca, escolher_opcao, etapas_ate_o_modo,
+    arquivos_do_pedido, caminho_final, confirmacao_fraca, custo_do_texto,
+    escolher_item_enviado, escolher_opcao, etapas_ate_o_modo,
     exigir_proporcao_do_modo, exigir_unico, faltando_no_chip, id_do_href,
-    saldo_do_texto,
+    item_pronto, nome_do_item, saldo_do_texto,
 )
 from flowpool.transporte.pw.transporte import TransportePlaywright
 
@@ -344,74 +346,202 @@ def test_confirmacao_pelo_rotulo_proprio_nao_avisa_nada():
     assert confirmacao_fraca(CHIP_IMAGEM, "imagem") is None
 
 
-# --- imagem com referencia: o Flow aceita, o transporte descartava ------
-
-
-class _InputFalso:
-    def __init__(self):
-        self.arquivos = None
-
-    async def set_input_files(self, arquivos):
-        self.arquivos = arquivos
-
-
-class _PaginaFalsa:
-    """So o que `_anexar` toca: um `input[type=file]` e a espera."""
-
-    def __init__(self):
-        self.upload = _InputFalso()
-
-    def locator(self, seletor):
-        alvo = self.upload
-        return type("L", (), {"first": alvo})()
-
-    async def wait_for_timeout(self, ms):
-        pass
+# --- quais arquivos o pedido anexa -------------------------------------
+#
+# Estes testes eram sobre `_anexar` inteiro, com uma pagina falsa de um `input` so.
+# Deixaram de ser: MEDIDO 2026-08-20, `set_input_files` sozinho nao anexa nada — so
+# manda o arquivo para o acervo. `_anexar` agora percorre o seletor de midia (abrir,
+# enviar, esperar, incluir), o que e SEQUENCIA e so se verifica rodando. O que continua
+# testavel — e o que ja errou duas vezes — e a ESCOLHA dos arquivos, que virou
+# `analise.arquivos_do_pedido`.
 
 
 def _pedido(modo, **extra):
     return Pedido(modo=modo, modelo=Modelo.NANO_BANANA, prompt="p", **extra)
 
 
-async def _anexado(pedido):
-    pagina = _PaginaFalsa()
-    await TransportePlaywright()._anexar(pagina, pedido)
-    return pagina.upload.arquivos
-
-
-async def test_imagem_com_referencia_anexa_em_vez_de_descartar():
-    # O BUG: `_anexar` retornava cedo em imagem e a referencia era jogada fora sem
-    # aviso. O pipeline do usuario COMECA aqui — foto da roupa -> modelo vestida.
-    assert await _anexado(_pedido(Modo.IMAGEM, referencias=["a.png"])) == \
+def test_imagem_com_referencia_anexa_em_vez_de_descartar():
+    # O BUG antigo: a referencia de imagem era jogada fora sem aviso. O pipeline do
+    # usuario COMECA aqui — foto da roupa -> modelo vestida.
+    assert arquivos_do_pedido(_pedido(Modo.IMAGEM, referencias=["a.png"])) == \
         [str(Path("a.png"))]
 
 
-async def test_imagem_sem_referencia_continua_sendo_texto_puro():
+def test_imagem_sem_referencia_continua_sendo_texto_puro():
     # imagem sem referencia e o caso comum e NAO pode virar erro
-    assert await _anexado(_pedido(Modo.IMAGEM)) is None
+    assert arquivos_do_pedido(_pedido(Modo.IMAGEM)) == []
 
 
-async def test_imagem_respeita_o_mesmo_teto_de_tres():
-    anexados = await _anexado(
-        _pedido(Modo.IMAGEM, referencias=["a.png", "b.png", "c.png", "d.png"]))
-    assert len(anexados) == 3
+def test_imagem_respeita_o_mesmo_teto_de_tres():
+    assert len(arquivos_do_pedido(
+        _pedido(Modo.IMAGEM, referencias=["a.png", "b.png", "c.png", "d.png"]))) == 3
 
 
-async def test_imagem_nao_anexa_frame_nenhum():
+def test_imagem_nao_anexa_frame_nenhum():
     # frame inicial e final continuam exclusivos de frames2v
-    assert await _anexado(_pedido(Modo.IMAGEM, frame_inicial="a.png")) is None
+    assert arquivos_do_pedido(_pedido(Modo.IMAGEM, frame_inicial="a.png")) == []
 
 
-async def test_t2v_nao_anexa_nada():
-    assert await _anexado(_pedido(Modo.T2V, referencias=["a.png"])) is None
+def test_t2v_nao_anexa_nada():
+    assert arquivos_do_pedido(_pedido(Modo.T2V, referencias=["a.png"])) == []
+
+
+def test_frames2v_anexa_inicial_e_final_nessa_ordem():
+    assert arquivos_do_pedido(
+        _pedido(Modo.FRAMES2V, frame_inicial="i.png", frame_final="f.png")) == \
+        [str(Path("i.png")), str(Path("f.png"))]
+
+
+def test_frames2v_com_so_o_inicial_nao_inventa_o_final():
+    assert arquivos_do_pedido(_pedido(Modo.FRAMES2V, frame_inicial="i.png")) == \
+        [str(Path("i.png"))]
 
 
 async def test_ingredients2v_sem_referencia_continua_sendo_erro():
+    # o modo EXIGE arquivo; a lista vazia so vira erro dentro de `_anexar`, e e la que
+    # o teste tem que bater para a regra nao sumir na mudanca de casa
     with pytest.raises(GeracaoFalhou, match="sem arquivo"):
-        await _anexado(_pedido(Modo.INGREDIENTS2V))
+        await TransportePlaywright()._anexar(None, _pedido(Modo.INGREDIENTS2V))
 
 
-async def test_frames2v_anexa_inicial_e_final_nessa_ordem():
-    anexados = await _anexado(
-        _pedido(Modo.FRAMES2V, frame_inicial="i.png", frame_final="f.png"))
-    assert anexados == [str(Path("i.png")), str(Path("f.png"))]
+# --- o item do seletor de midia: nome, pronto e qual e o novo -----------
+#
+# Toda esta secao existe por causa de UM defeito medido: a referencia subia para o
+# acervo do projeto e nunca entrava no comando. O conserto passa pelo seletor de midia,
+# e cada decisao dele que da para errar em silencio esta aqui.
+
+
+def test_o_nome_do_item_e_a_primeira_linha():
+    # MEDIDO: cada item rende duas linhas — nome e tipo
+    assert nome_do_item("folha-frames.png\nImagem") == "folha-frames.png"
+
+
+def test_item_gerado_leva_o_inicio_do_comando_como_nome():
+    assert nome_do_item("Red ceramic mug on table\nVideo") == "Red ceramic mug on table"
+
+
+def test_item_sem_texto_nao_estoura():
+    assert nome_do_item("") == ""
+    assert nome_do_item(None) == ""
+
+
+def test_item_so_esta_pronto_quando_tem_miniatura():
+    # MEDIDO com 2,9 MB: o item entra na lista NA HORA, sem miniatura, e a imagem so
+    # chega aos 17,25 s. Incluir antes disso e anexar referencia vazia — sem erro, com
+    # credito gasto e uma imagem que nao parece com a referencia.
+    assert item_pronto({"miniaturas": 1}) is True
+    assert item_pronto({"miniaturas": 0}) is False
+    assert item_pronto({}) is False
+
+
+def _item(nome, selecionado=False, miniaturas=1, tipo="Imagem"):
+    return {"texto": f"{nome}\n{tipo}", "selecionado": selecionado,
+            "miniaturas": miniaturas}
+
+
+def test_acha_o_item_recem_enviado_pelo_nome_do_arquivo():
+    itens = [_item("blusa.png", selecionado=True), _item("Red ceramic mug on table")]
+    assert escolher_item_enviado(itens, "blusa.png") == 0
+
+
+def test_item_que_ainda_nao_apareceu_e_espere_mais_e_nao_erro():
+    # `None` = "espere"; quem chama fica no laco ate o teto e so entao levanta
+    assert escolher_item_enviado([_item("outro.png")], "blusa.png") is None
+
+
+def test_item_que_apareceu_mas_ainda_sobe_e_espere_mais():
+    assert escolher_item_enviado([_item("blusa.png", miniaturas=0)], "blusa.png") is None
+
+
+def test_dois_arquivos_de_mesmo_nome_desempatam_pelo_selecionado():
+    # MEDIDO: enviar o mesmo arquivo duas vezes deixa dois itens de mesmo nome, e o
+    # Flow ja deixa o RECEM-ENVIADO selecionado. Recusar a ambiguidade aqui — como
+    # `escolher_opcao` faz nos menus — travaria a segunda geracao de qualquer produto.
+    itens = [_item("blusa.png"), _item("blusa.png", selecionado=True)]
+    assert escolher_item_enviado(itens, "blusa.png") == 1
+
+
+def test_sem_nenhum_selecionado_vale_o_primeiro_porque_a_lista_e_recentes():
+    itens = [_item("blusa.png"), _item("blusa.png")]
+    assert escolher_item_enviado(itens, "blusa.png") == 0
+
+
+def test_o_selecionado_so_ganha_se_estiver_pronto():
+    # um item selecionado mas ainda subindo nao pode passar na frente do que ja
+    # terminou: incluir o de cima anexaria referencia vazia
+    itens = [_item("blusa.png", selecionado=True, miniaturas=0), _item("blusa.png")]
+    assert escolher_item_enviado(itens, "blusa.png") == 1
+
+
+def test_nome_parecido_nao_casa():
+    # `blusa.png` nao pode casar com `blusa-2.png`: o `in` solto anexaria o arquivo
+    # errado sem nenhum sintoma
+    assert escolher_item_enviado([_item("blusa-2.png")], "blusa.png") is None
+
+
+def test_lista_vazia_e_espere_mais():
+    assert escolher_item_enviado([], "blusa.png") is None
+
+
+# --- o custo que o painel anuncia --------------------------------------
+#
+# MEDIDO 2026-08-20: o painel do chip diz "A geração vai usar N créditos" antes de
+# gerar. Derruba a conclusao anterior de que so o agente conversacional sabia o preco.
+
+
+def test_custo_sai_da_frase_do_painel():
+    assert custo_do_texto("A geração vai usar 12 créditos") == 12
+
+
+def test_custo_le_a_frase_ja_normalizada_sem_acento():
+    # o texto passa por `dom.seguro` antes de ser lido; o caminho que le o valor
+    # normalizado nao pode deixar de casar
+    assert custo_do_texto("a geracao vai usar 7 creditos") == 7
+
+
+def test_custo_zero_e_valido_e_e_justamente_o_da_imagem():
+    assert custo_do_texto("A geração vai usar 0 créditos") == 0
+
+
+def test_custo_de_conta_paga_tem_separador_de_milhar():
+    assert custo_do_texto("A geração vai usar 1.200 créditos") == 1200
+
+
+def test_frase_ausente_e_erro_e_nao_zero():
+    # zero e o preco da imagem; confundi-lo com "nao achei" faria a leitura parecer
+    # quebrada exatamente onde ela esta certa
+    with pytest.raises(GeracaoFalhou, match="custo"):
+        custo_do_texto("Nano Banana 2 Lite")
+
+
+def test_o_singular_tambem_casa():
+    assert custo_do_texto("A geração vai usar 1 crédito") == 1
+
+
+# --- o que se imprime tem que caber no console -------------------------
+#
+# `dom.seguro` e o unico caminho de saida para texto vindo do Flow, e ele so cumpria
+# metade do contrato: tirava acento e deixava EMOJI. O rotulo do modelo de imagem tem
+# um — e imprimir emoji num console cp1252 nao troca a letra por '?', levanta
+# UnicodeEncodeError e derruba a ferramenta. Foi assim que o `conferir.py` morreu no
+# meio do roteiro de modos, com todos os seletores corretos.
+
+
+def test_emoji_do_rotulo_de_modelo_nao_derruba_a_impressao():
+    chip = seguro("\U0001f34c Nano Banana 2 Lite crop_9_16 x1")
+    chip.encode("cp1252")            # e este encode que estourava
+    assert "nano banana 2 lite" in chip
+
+
+def test_o_que_importa_no_chip_sobrevive_ao_corte():
+    # a verificacao do chip le o texto ja normalizado; tirar o emoji nao pode levar
+    # junto a ligadura da proporcao nem a quantidade
+    chip = seguro("\U0001f34c Nano Banana 2 Lite crop_9_16 x1")
+    assert faltando_no_chip(chip, "imagem", "9:16", 1, None) == []
+
+
+def test_acento_e_segredo_continuam_saindo():
+    assert seguro("Vídeo") == "video"
+    # `seguro` tambem passa por `sem_acento`, que baixa a caixa: a mascara sai
+    # minuscula, e e assim que ela aparece no log
+    assert "<mascarado>" in seguro("token ya29.AbCdEf123")
