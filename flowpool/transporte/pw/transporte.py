@@ -584,11 +584,34 @@ class TransportePlaywright:
         raise GeracaoFalhou(
             "as referencias de uma tentativa anterior nao sairam da barra do prompt")
 
+    async def _abrir_seletor_midia(self, pagina, tentativas: int = 3):
+        """Abre o seletor de midia pelo `+`, tentando de novo se ele nao vier.
+
+        Um clique que nao abre nada acontece: o botao muda de posicao quando ja ha
+        referencia anexada (a caixa do prompt cresce), e um clique perdido nao levanta
+        erro — so nao abre. Insistir e barato; desistir custa a geracao inteira e as
+        tres tentativas do job.
+
+        Nao esconde problema de verdade: se as tres voltas falharem, o erro sobe com o
+        print salvo. O que ele evita e o job morrer por um clique que caiu no vazio.
+        """
+        for volta in range(tentativas):
+            await pagina.locator(sel.BOTAO_ANEXAR).first.click(timeout=15_000)
+            seletor = pagina.locator(sel.SELETOR_MIDIA).first
+            try:
+                await seletor.wait_for(timeout=8_000)
+                return seletor
+            except Exception:
+                if volta + 1 < tentativas:
+                    print(f"o seletor de midia nao abriu (volta {volta + 1}); repetindo")
+                    await pagina.keyboard.press("Escape")
+                    await pagina.wait_for_timeout(1200)
+        raise GeracaoFalhou(
+            f"o seletor de midia nao abriu depois de {tentativas} cliques no anexar")
+
     async def _incluir_referencia(self, pagina, arquivo: str) -> None:
         """Uma volta completa do seletor de midia: abrir, enviar, esperar, incluir."""
-        await pagina.locator(sel.BOTAO_ANEXAR).first.click(timeout=15_000)
-        seletor = pagina.locator(sel.SELETOR_MIDIA).first
-        await seletor.wait_for(timeout=15_000)
+        seletor = await self._abrir_seletor_midia(pagina)
 
         # o `input[type=file]` vive DENTRO do seletor; nao se clica em "Enviar midia"
         await pagina.locator(sel.UPLOAD).first.set_input_files([arquivo])
