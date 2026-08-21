@@ -7016,6 +7016,119 @@ Três commits separados: código+testes, painel, docs.
 
 ---
 
+### Task 17: Dois defeitos medidos ao vivo — o submodo que não existia e a referência descartada
+
+Os dois vieram do uso real, não de leitura de código, e nenhum dos dois é cosmético.
+
+#### Defeito 1 — `Frames` e `Elementos` são SUBMODOS de Vídeo
+
+Um job real falhou **três vezes** com:
+
+```
+GeracaoFalhou: modo: esperava 1 candidato para 'button:has-text("chrome_extension")', achei 0
+```
+
+Medido: **a lista de modos do painel depende do modo atual.**
+
+```
+chip em VÍDEO  -> image Imagem | videocam Vídeo | crop_free Frames | chrome_extension Elementos
+chip em IMAGEM -> image Imagem | videocam Vídeo
+```
+
+`Frames` e `Elementos` não existem enquanto o chip estiver em imagem. O `_configurar` clicava no alvo direto, então vindo de imagem ele clicava no vazio.
+
+- [ ] **Step 1: a hierarquia vira dado, em `seletores.py`**
+
+```python
+MODO_PAI = {"frames2v": "t2v", "ingredients2v": "t2v"}
+```
+
+Mora ali, e não numa condição escondida na sequência, porque é um **fato da interface**: se o Google promover Frames a modo de topo, ou criar um terceiro submodo, o conserto é uma linha deste dicionário.
+
+- [ ] **Step 2: a decisão é pura e tem teste — `analise.etapas_ate_o_modo`**
+
+`(modo, visivel) -> ["t2v", "frames2v"]` ou `["frames2v"]`. **Não forçar dois passos quando um basta:** se o alvo já está no painel, clica-se direto — cada clique extra é mais uma animação e mais uma chance de o painel redesenhar no meio. Modo de topo ausente é **erro**, não caminho inventado.
+
+- [ ] **Step 3: `_escolher_modo` no transporte**
+
+Espera o `videocam` (que existe nos **dois** estados do painel, e por isso serve de âncora), conta o alvo, percorre as etapas e espera o painel redesenhar entre elas. Contar antes de o painel renderizar diria "não está visível" e forçaria dois cliques onde um bastava — é o mesmo engano do `count()` sem espera que já custou três execuções.
+
+- [ ] **Step 4: o rótulo do submodo no chip — pendência declarada, não chute**
+
+**Não está medido** se o chip escreve "Frames"/"Elementos" nos submodos ou se continua dizendo só "Vídeo". `ROTULO_MODO_NO_CHIP` passa a guardar uma **tupla** de marcadores aceitos, e qualquer um confirma:
+
+```python
+"frames2v": ("frames", "video"), "ingredients2v": ("elementos", "video"),
+```
+
+Exigir só o marcador próprio daria **falso negativo**: bloquearia o modo inteiro depois de a troca ter dado certo. Aceitar o rótulo do pai não afrouxa o que importa — o chip que continuou em **imagem**, que era o defeito real, segue reprovando. E a tolerância não fica calada: `analise.confirmacao_fraca` devolve a linha que a corrida imprime, e essa linha é a medição que falta.
+
+- [ ] **Step 5: `conferir.py` mede sem gastar crédito**
+
+Percorre os quatro modos pela hierarquia, imprime o texto do chip em cada um e dá o veredito sobre `ROTULO_MODO_NO_CHIP`. De quebra conserta o próprio diagnóstico: ele acusava `FALTA` nos dois submodos só porque o painel estava em imagem — o mesmo engano, dito pela ferramenta que existe para achá-lo. Termina deixando o painel em vídeo, que é o modo com duração e com o dropdown de vídeo.
+
+#### Defeito 2 — o modo imagem ACEITA referência, e o app descartava em silêncio
+
+Medido: com o chip em modo imagem a página tem **1 `input[type=file]` e 1 botão de anexar**. O Flow aceita imagem com referência — é o Nano Banana gerando a partir de uma foto.
+
+O `_anexar` retornava cedo em `Modo.IMAGEM`, então a referência era **jogada fora sem aviso**. O usuário relatou exatamente isso: cola a imagem, troca para modo imagem, a imagem some.
+
+**Por que é grave:** o pipeline dele **começa** em "foto da roupa → imagem da modelo vestida". Isso é imagem com referência. A primeira etapa do trabalho não estava contemplada.
+
+- [ ] **Step 6: o domínio diz quem aceita — `tipos.max_referencias`**
+
+Três em `ingredients2v` e em `imagem`, zero nos outros dois. E `tipos.exige_arquivo` separa **aceitar** de **exigir**: imagem sem referência é geração por texto puro, o caso comum, e confundir as duas coisas transformaria toda geração de imagem em erro.
+
+- [ ] **Step 7: o transporte anexa em imagem**
+
+`frame_inicial`/`frame_final` continuam **exclusivos de `frames2v`**; o resto sai de `max_referencias`, então não há um segundo lugar dizendo quem aceita o quê.
+
+- [ ] **Step 8: a API valida por modo**
+
+O teto sai do campo (`max_length=3`) e vira validação por modo, com a mensagem dizendo o modo e o número. Modo que **não** aceita referência passa a recusar com `422`, em vez de deixar o transporte descartar o arquivo lá na frente — é a mesma regra do passo tolerante, pela outra porta. E `frame_inicial`/`frame_final` fora de `frames2v` viram `422`, que até agora era acordo tácito.
+
+Cuidado com a regra de quantidade: **imagem aceita `x1..x4` e isso continua valendo com referência.** São duas regras independentes, e amarrar uma na outra tiraria as variações justamente do caso em que elas mais servem.
+
+- [ ] **Step 9: o painel para de sequestrar o modo**
+
+O vaivém que o usuário descreveu tinha causa aqui: colar forçava `ingredients2v`; ele trocava para imagem, o teto de anexos naquele modo era zero e a referência caía fora; colava de novo, voltava para vídeo. **Duas regras discordando na mesma barra.**
+
+Agora o modo só troca quando o modo atual não aceita arquivo — hoje, só `t2v`. Imagem entra no mapa de papéis com o mesmo teto de três, o `corpoDoJob` manda `referencias` em imagem, o atalho das três da pasta aparece, e `exigeAnexo()` espelha `tipos.exige_arquivo` para que imagem sem referência não vire erro antes de sair.
+
+- [ ] **Step 10: Rodar a suíte**
+
+Run: `.venv/Scripts/python.exe -m pytest -q`
+Expected: `461 passed` (432 → 461; +29 casos — 18 em `test_transporte_pw.py`, 5 em `test_tipos.py`, 6 em `test_api.py`).
+
+Os que provam a mudança, e não só a acompanham:
+
+- `test_submodo_ausente_passa_pelo_video_primeiro` — **o teste do defeito 1**.
+- `test_modo_visivel_no_painel_e_um_clique_so` — o contrapeso: a correção não pode virar "sempre dois cliques".
+- `test_modo_de_topo_ausente_e_erro_e_nao_caminho_inventado` — `imagem` e `t2v` sumirem é deploy do Google, não caminho a adivinhar.
+- `test_chip_que_so_diz_video_ainda_confirma_o_submodo` e `test_chip_que_continuou_em_imagem_reprova_o_submodo` — o par que define a tolerância: ela cobre o que não está medido e **não** cobre o defeito real.
+- `test_imagem_com_referencia_anexa_em_vez_de_descartar` — **o teste do defeito 2**.
+- `test_imagem_sem_referencia_continua_sendo_texto_puro` — o contrapeso, e o que impede a correção de quebrar o caso comum.
+- `test_aceitar_arquivo_nao_e_o_mesmo_que_exigir` — a distinção em uma linha.
+- `test_imagem_com_referencia_continua_aceitando_quatro_variacoes` — quantidade e referência são independentes.
+- `test_t2v_recusa_referencia_em_vez_de_descartar_calado` — o descarte silencioso fechado pela outra porta.
+
+- [ ] **Step 11: Fumaça — o que rodar, e nesta ordem**
+
+Nenhuma das duas correções se prova com teste: são sequência contra o Google.
+
+1. **Sem gastar nada** (mede a hierarquia e o rótulo do chip):
+   `python -m flowpool.transporte.pw.conferir perfis/g1 <uuid-do-projeto>`
+2. **Imagem com referência** (imagem é gratuita — medido: saldo 50 → 50), exercita as duas correções de uma vez, porque sai de vídeo para imagem **e** anexa:
+   `python -m flowpool.transporte.pw.fumaca perfis/g1 imagem nano-banana "a modelo vestindo a roupa da referência" "Moda/roupa.png"`
+3. **Elementos** (gasta crédito), o modo do erro original:
+   `python -m flowpool.transporte.pw.fumaca perfis/g1 ingredients2v omni-flash "a modelo andando" "Moda/roupa.png" --duracao 4s`
+
+- [ ] **Step 12: Commit**
+
+Quatro commits separados: domínio/API, transporte+testes, painel, docs.
+
+---
+
 ## Depois deste plano
 
 O painel web é o **plano 2**: uma página servida pelo próprio FastAPI, consumindo `/contas`, `/jobs` e `/saude`, com botão de cadastrar conta e um formulário de lote. Não começa antes deste plano estar rodando ponta a ponta — tela para API que nunca gerou clipe é trabalho jogado fora.

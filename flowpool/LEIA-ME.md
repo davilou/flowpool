@@ -58,6 +58,12 @@ um formulário para enfileirar e um botão para cancelar job ainda pendente. O f
 esconde o que a API recusaria: duração só existe em vídeo, quantidade acima de 1 só em
 imagem, e proporção de vídeo é só 9:16 ou 16:9.
 
+**Imagem aceita referência** — até 3, pelo mesmo `+` (ou Ctrl+V, ou arrastando). É o
+Nano Banana gerando a partir de uma foto, e é por aí que o pipeline começa: foto da
+roupa → imagem da modelo vestida. Imagem sem referência continua sendo geração por
+texto puro. Anexar em **vídeo — texto** é o único caso em que o painel troca o modo
+sozinho (para *vídeo — referências*), porque lá o arquivo não teria para onde ir.
+
 A tela se atualiza sozinha a cada 4 segundos.
 
 ## Proxy

@@ -18,6 +18,14 @@ doméstico** e uma VPN gratuita destravou. Daí o **proxy por conta**, desenhado
 deixado opcional e vazio. Propagado em *Restrições assumidas*, *Modelo de dados*, *Fila
 e execução* e *API HTTP*, e removido de *Fora de escopo*.
 
+**Quarta revisão de campo:** 2026-08-20 — duas coisas que o desenho tinha erradas, as
+duas medidas contra o Flow real. **(1)** `Frames` e `Elementos` são **submodos de
+Vídeo**, não irmãos dos outros dois: a lista de modos do painel muda com o modo atual, e
+um job real falhou três vezes clicando num botão que não existia. **(2)** o modo
+**imagem aceita referência** — e o transporte a descartava em silêncio, justamente na
+primeira etapa do pipeline do usuário ("foto da roupa → imagem da modelo vestida").
+Propagado em *Modos suportados*, *Transporte* e *API HTTP*.
+
 ## O que é
 
 Um serviço local que gera vídeos e imagens no Google Flow usando um pool de contas Google cadastradas, escolhendo sozinho qual conta usar conforme o crédito disponível. Expõe uma API HTTP; o painel web e os scripts do pipeline (`prompt_h3.py`, `frames.py`) são clientes dela.
@@ -361,6 +369,8 @@ Corpo de `POST /jobs`:
 }
 ```
 
+`referencias` vale em `ingredients2v` e em **`imagem`**, com o mesmo teto de **3**; `ingredients2v` exige ao menos uma, imagem não (sem referência é geração por texto puro). Nos dois modos que não aceitam referência, mandar o campo é **422** — o transporte não anexaria nada ali, e aceitar seria prometer uma coisa e gerar outra. `frame_inicial`/`frame_final` são **exclusivos de `frames2v`**, e mandá-los em outro modo também é `422`.
+
 `produto` é **obrigatório**; `destino` é opcional e, quando ausente, vira `{produto}/clipes`. Na pasta do usuário cada produto já é uma pasta, então mandar `produto: "Panelas Monaco"` basta e repetir o caminho é ruído. `destino` explícito continua aceito para quando o arquivo deve cair em outro lugar.
 
 `modelo` também é opcional, com padrão **por modo**: os três modos de vídeo herdam `omni-flash`, `imagem` herda `nano-banana`. Assumir `veo-fast` seria o app escolhendo por conta própria um modelo que custa diferente e sai diferente do que a própria interface faria — ver *Decisões de geração*.
@@ -397,7 +407,7 @@ a recusa acontece — ver *Restrições assumidas*.
 
 ## Modos suportados
 
-Os quatro do Flow: **text-to-video**, **frames-to-video** (1º e opcionalmente último frame), **ingredients-to-video** (até 3 referências — é o R2V que segura a identidade da Clara e do Rafa) e **imagem** (Nano Banana / Imagen). Mudam quase só o corpo do payload.
+Os quatro do Flow: **text-to-video**, **frames-to-video** (1º e opcionalmente último frame), **ingredients-to-video** (até 3 referências — é o R2V que segura a identidade da Clara e do Rafa) e **imagem** (Nano Banana / Imagen — **com ou sem referência**, até 3, e é assim que a foto da roupa vira a imagem da modelo vestida). Mudam quase só o corpo do payload.
 
 Os quatro rodam **dentro de um projeto**, e do mesmo projeto: o projeto é escolhido pelo `produto` do job, não pelo modo. Um produto que gera imagem de referência e depois o vídeo a partir dela guarda as duas coisas no mesmo lugar — que é como uma pessoa usaria o Flow na mão. Ver *Projetos*.
 
@@ -407,7 +417,7 @@ Medido em 20/08. Os quatro modos **não** são quatro telas nem quatro conjuntos
 
 | grupo | valores medidos |
 |---|---|
-| modo | `image Imagem`, `videocam Vídeo`, `crop_free Frames`, `chrome_extension Elementos` |
+| modo | `image Imagem`, `videocam Vídeo`, `crop_free Frames`, `chrome_extension Elementos` — **mas nem sempre os quatro; ver abaixo** |
 | proporção | vídeo aceita **só** `9:16` e `16:9`; imagem aceita as cinco |
 | duração | só vídeo: `4s`, `6s`, `8s`, `10s` |
 | quantidade | `x1` a `x4` |
@@ -419,7 +429,30 @@ Isso desfaz três suposições que este spec carregou até 20/08:
 2. **`tune Configurações` não é o painel de geração.** É a política de confirmação do agente conversacional. A armadilha de ordem que ele impunha ("só aparece depois do primeiro prompt") sai do caminho da geração: o chip existe desde o primeiro instante do projeto.
 3. **A confirmação do agente deixa de ser obstáculo.** Configurando pelo chip, o Flow não pergunta nada: debita e gera. O radio "Sempre"/"Nunca" governa só o agente, que o transporte não usa. Ver o trade-off em *Transporte*.
 
-Continua valendo que a UI tem **um único** `input[type=file]` (`multiple=True`, `accept="image/*"`), não três campos separados. O que faltava era saber quem dá significado ao arquivo, e agora se sabe: é o **modo já escolhido no chip**. Em `crop_free` os arquivos viram frame inicial e final; em `chrome_extension`, referências. Por isso a ordem no transporte é configurar **antes** de anexar, e não o contrário.
+#### Frames e Elementos são SUBMODOS de Vídeo — medido em 20/08
+
+Os quatro botões não estão sempre lá. **A lista de modos do painel depende do modo atual:**
+
+```
+chip em VÍDEO  -> image Imagem | videocam Vídeo | crop_free Frames | chrome_extension Elementos
+chip em IMAGEM -> image Imagem | videocam Vídeo
+```
+
+`Frames` e `Elementos` **não existem** enquanto o chip estiver em imagem. São submodos de Vídeo, não irmãos dos outros dois — e a tabela acima, que os lista lado a lado, descrevia só um dos dois estados do painel.
+
+A medição saiu de um job real que falhou **três vezes** com `modo: esperava 1 candidato para 'button:has-text("chrome_extension")', achei 0`. Vindo de imagem, o clique direto no submodo era um clique no vazio.
+
+Consequência para o transporte: **chegar num submodo é uma troca em duas etapas** — clica-se `videocam`, espera-se o painel redesenhar, e só então o submodo. Duas etapas só quando são necessárias: se o alvo já está visível, clica-se direto, porque cada clique extra é mais uma animação e mais uma chance de o painel redesenhar no meio. A hierarquia mora em `seletores.MODO_PAI`, como dado explícito, porque é um fato da interface — se o Google promover Frames a modo de topo, o conserto é uma linha.
+
+Fica uma pendência declarada: **não está medido** se o chip escreve "Frames"/"Elementos" nos submodos ou se continua dizendo só "Vídeo". A verificação aceita as duas coisas (o rótulo próprio ou o do pai) e **anuncia** quando confirmou pelo fraco — exigir o rótulo próprio daria falso negativo e bloquearia o modo depois de a troca ter dado certo, e recusar em silêncio seria pior ainda. O chip que continuou em **imagem** — o defeito real — segue reprovando. Fecha-se a medição sem gastar crédito: `python -m flowpool.transporte.pw.conferir <perfil> <uuid>` percorre os quatro modos e imprime o texto do chip em cada um.
+
+#### O arquivo, e quem lhe dá significado
+
+Continua valendo que a UI tem **um único** `input[type=file]` (`multiple=True`, `accept="image/*"`), não três campos separados. O que faltava era saber quem dá significado ao arquivo, e agora se sabe: é o **modo já escolhido no chip**. Em `crop_free` os arquivos viram frame inicial e final; em `chrome_extension` e **em imagem**, referências. Por isso a ordem no transporte é configurar **antes** de anexar, e não o contrário.
+
+**Imagem aceita referência** — medido em 20/08: com o chip em modo imagem a página tem um `input[type=file]` e um botão de anexar. É o Nano Banana gerando a partir de uma foto. Isso não é um canto raro do app: o pipeline do Davi **começa** em "foto da roupa → imagem da modelo vestida", que é exatamente imagem com referência. Enquanto o transporte retornava cedo em imagem, a referência anexada era descartada **sem aviso** — a pessoa colava a imagem, trocava para modo imagem e a imagem sumia. A primeira etapa do trabalho não estava contemplada.
+
+O teto é o mesmo dos outros: **três**. A diferença entre imagem e `chrome_extension` é a **exigência**, não o teto — `ingredients2v` sem referência não tem o que gerar, imagem sem referência é geração por texto puro, que é o caso comum. Quantidade e referência continuam independentes: imagem aceita `x1..x4` com ou sem referência. `frame_inicial`/`frame_final` continuam **exclusivos de `frames2v`**, e a API passou a recusar explicitamente quem os manda em outro modo, em vez de deixar o transporte descartá-los lá na frente.
 
 Observação de campo (19/08, confirmada em 20/08): o Flow passou a expor um modelo **Gemini Omni** — vídeo a partir de qualquer referência, com edição conversacional. **`Omni Flash` é o padrão do dropdown de vídeo**. Entrou no escopo como `Modelo.OMNI_FLASH` e como padrão de vídeo da API. A previsão de deixar o campo `modelo` aberto se pagou — acomodou o modelo novo sem migração nenhuma.
 
@@ -492,6 +525,12 @@ O preço é ser **cego ao preço**. Quem cobre esse buraco é a reconciliação 
 Isso vem de errar. A primeira versão do configurador tinha um passo tolerante — `except: segue`, pensado para o caso benigno de "essa opção já estava assim". O que ele fez foi engolir um clique que não pegou: uma geração pedida em **4s saiu em 8s**, com crédito debitado, arquivo na pasta e ninguém percebendo. Passo tolerante em configuração de geração é o pior padrão possível neste app, porque a saída existe e parece certa.
 
 Duas consequências de forma: o modelo **não** aparece no texto do chip, então ele é conferido com o painel ainda aberto, lendo o rótulo do dropdown; e a comparação de textos passa por normalização sem acento, porque "Vídeo" impresso num console cp1252 vira "V?deo" e um seletor montado a partir daí nunca casa.
+
+### O painel muda de forma — duas regras que saem disso
+
+**A lista de modos depende do modo atual.** Frames e Elementos são submodos de Vídeo e só existem depois de o painel estar em vídeo. Chegar neles é uma troca em duas etapas, e a hierarquia é dado (`seletores.MODO_PAI`), não esperteza da sequência. Ver *Modos suportados*.
+
+**Descartar arquivo em silêncio é o mesmo pecado do passo tolerante.** O `_anexar` retornava cedo em modo imagem e jogava a referência fora sem dizer nada — o Flow aceitava, nós é que não mandávamos. Vale a regra geral: quando um modo não aceita um campo, quem recusa é a **API, com 422**, antes de o job existir; o que o transporte não pode fazer é aceitar o campo e não usá-lo.
 
 ### Regras de download
 
