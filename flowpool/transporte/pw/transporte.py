@@ -584,27 +584,6 @@ class TransportePlaywright:
         raise GeracaoFalhou(
             "as referencias de uma tentativa anterior nao sairam da barra do prompt")
 
-    async def _exigir_janela_visivel(self, pagina, o_que: str) -> None:
-        """Recusa esperar por algo que a janela coberta nunca vai renderizar.
-
-        MEDIDO ontem: partes da interface do Flow (lista de projetos, portao do aviso,
-        miniatura do upload) dependem de `IntersectionObserver`, que NAO dispara com
-        `document.visibilityState == 'hidden'`. E no Windows uma janela totalmente
-        COBERTA por outra conta como oculta — nao precisa estar minimizada.
-
-        Sem esta checagem o sintoma engana: o app fica esperando um elemento que nunca
-        vai existir, estoura o teto e culpa o seletor. O usuario ve "Playwright parado"
-        e vai procurar defeito no lugar errado. Melhor falhar em dois segundos dizendo
-        a verdade.
-        """
-        if await pagina.evaluate("() => document.visibilityState") != "hidden":
-            return
-        await self.print_de_falha(pagina, f"janela-coberta-{o_que}")
-        raise GeracaoFalhou(
-            f"a janela do Chrome esta COBERTA ou minimizada, e o Flow para de renderizar "
-            f"quando isso acontece — {o_que} nunca vai aparecer. Traga a janela para a "
-            f"frente e deixe-a visivel enquanto o job roda.")
-
     async def _abrir_seletor_midia(self, pagina, tentativas: int = 3):
         """Abre o seletor de midia pelo `+`, tentando de novo se ele nao vier.
 
@@ -617,7 +596,6 @@ class TransportePlaywright:
         print salvo. O que ele evita e o job morrer por um clique que caiu no vazio.
         """
         for volta in range(tentativas):
-            await self._exigir_janela_visivel(pagina, "o seletor de midia")
             await pagina.locator(sel.BOTAO_ANEXAR).first.click(timeout=15_000)
             seletor = pagina.locator(sel.SELETOR_MIDIA).first
             try:
@@ -666,9 +644,6 @@ class TransportePlaywright:
         gasto = 0
         visto = False
         while gasto < teto_ms:
-            # a cada volta, nao so no comeco: a janela pode ser coberta NO MEIO do
-            # upload, e ai a miniatura congela onde estava
-            await self._exigir_janela_visivel(pagina, f"a miniatura de {nome}")
             itens = await pagina.evaluate(dom.ITENS_DE_MIDIA, sel.ITEM_MIDIA)
             indice = analise.escolher_item_enviado(itens, nome)
             if indice is not None:
