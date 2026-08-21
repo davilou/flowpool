@@ -18,6 +18,7 @@ from flowpool.transporte.base import (
     Estado, GeracaoFalhou, Pedido, ProjetoRemoto, SaldoInsuficiente, Sessao, SessaoMorta,
 )
 from flowpool.transporte.pw import analise, dom
+from flowpool.transporte.pw.cura import AutoCura
 from flowpool.transporte.pw import seletores as sel
 from flowpool.transporte.pw.sessao import abrir_contexto, interpretar_sessao
 
@@ -48,9 +49,25 @@ def _medido(nome: str, seletor: str) -> str:
     return seletor
 
 
+def _pagina_de(escopo):
+    """A pagina por tras de um escopo de clique.
+
+    `_clicar_unico` recebe ora a pagina, ora um localizador (o painel do chip, o menu
+    do card, um item da grade) — e a cura precisa da PAGINA para tirar print e varrer
+    o DOM, enquanto a validacao continua acontecendo no escopo estreito. Localizador
+    expoe `.page`; a pagina nao expoe, e e ela mesma.
+    """
+    return getattr(escopo, "page", escopo)
+
+
 class TransportePlaywright:
-    def __init__(self, timeout_ms: int = 600_000) -> None:
+    def __init__(self, timeout_ms: int = 600_000, cura: AutoCura | None = None) -> None:
         self.timeout_ms = timeout_ms
+        # A auto-cura vive UMA por transporte, e nao uma por clique, porque o teto de
+        # curas e por execucao: e o contador dela que separa "o Google mexeu num botao"
+        # de "o Google refez a tela", e um contador que renasce a cada clique nao
+        # separaria nada. Ela se desliga sozinha sem modelo respondendo.
+        self.cura = cura if cura is not None else AutoCura()
         self._repeticoes: dict[str, int] = {}
         # `baixar` recebe so o id_remoto, e o menu de resolucao e diferente entre
         # imagem e video. Guardar o modo no momento de gerar e mais barato do que
@@ -222,7 +239,22 @@ class TransportePlaywright:
             await loc.first.wait_for(timeout=15_000)
         except Exception:
             pass   # segue para o exigir_unico, que da a mensagem boa
-        analise.exigir_unico(await loc.count(), seletor, o_que)
+        quantos = await loc.count()
+
+        # AUTO-CURA, e SO com zero candidatos. Dois candidatos e AMBIGUIDADE, e
+        # ambiguidade nao se cura: foi um desempate automatico que mandou um video do
+        # usuario para a lixeira. Zero e outra coisa — e o Google ter mexido no botao —,
+        # e ai perguntar tem sentido. `cura` recusa sozinha tudo o que for destrutivo,
+        # tudo o que nao tiver descricao e tudo o que passar do teto da execucao; ela
+        # nunca levanta, entao o pior caso continua sendo o erro de sempre.
+        if quantos == 0:
+            novo = await self.cura.curar(
+                _pagina_de(escopo), escopo, seletor, o_que, self.print_de_falha)
+            if novo:
+                loc = escopo.locator(novo)
+                quantos = await loc.count()
+
+        analise.exigir_unico(quantos, seletor, o_que)
         await loc.click(timeout=15_000)
 
     async def _escolher_modo(self, pagina, painel, modo: str) -> None:
