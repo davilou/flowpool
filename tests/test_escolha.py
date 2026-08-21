@@ -172,3 +172,71 @@ def test_lote_grande_pula_a_free_quando_o_clipe_e_longo_e_cabe_quando_e_curto():
                     duracao="8s").id == 2
     assert escolher([free, pro], Modelo.VEO_LITE, AGORA, quantidade=4,
                     duracao="4s").id == 1
+
+
+# ---------------------------------------------------------------- simultaneidade
+#
+# A invariante do pool com varias janelas: UM job por conta, UM navegador por conta.
+# Nao e preferencia — dois Chromes com o mesmo `--user-data-dir` nao coexistem: o
+# segundo entrega a URL ao primeiro e morre. A conta que ja esta gerando precisa,
+# portanto, sair da escolha enquanto durar a geracao.
+
+
+def test_conta_ocupada_nao_e_escolhida():
+    ocupada = conta(1, Tier.FREE, 50)
+    livre = conta(2, Tier.FREE, 30)
+    assert escolher([ocupada, livre], Modelo.VEO_FAST, AGORA,
+                    ocupadas=frozenset({1})).id == 2
+
+
+def test_todas_ocupadas_devolve_none():
+    # nao e "pool seco": e "pool cheio". Quem chama trata os dois do mesmo jeito —
+    # devolve o job a fila — mas o motivo no evento e outro.
+    assert escolher([conta(1, Tier.FREE, 50)], Modelo.VEO_FAST, AGORA,
+                    ocupadas=frozenset({1})) is None
+
+
+def test_ocupadas_vazio_e_o_padrao_e_nao_muda_nada():
+    contas = [conta(1, Tier.FREE, 50)]
+    assert escolher(contas, Modelo.VEO_FAST, AGORA).id == 1
+    assert escolher(contas, Modelo.VEO_FAST, AGORA, ocupadas=frozenset()).id == 1
+
+
+def test_conta_ocupada_tambem_sai_da_escolha_em_imagem():
+    # imagem nao olha saldo, mas olha janela: o limite dela e o perfil do Chrome
+    ocupada = conta(1, Tier.FREE, 0)
+    assert escolher([ocupada], Modelo.NANO_BANANA, AGORA,
+                    ocupadas=frozenset({1})) is None
+
+
+# ------------------------------------------------------- imagem nao olha credito
+
+
+def test_imagem_escolhe_conta_com_saldo_zero():
+    # MEDIDO tres vezes: imagem custa ZERO. Exigir saldo dela e recusar uma geracao
+    # que o Flow faria de graca.
+    assert escolher([conta(1, Tier.FREE, 0)], Modelo.NANO_BANANA, AGORA).id == 1
+
+
+def test_imagem_escolhe_conta_seca():
+    # "seca" quer dizer "sem credito". Imagem nao precisa de credito, entao o prazo
+    # de seca nao diz nada sobre ela.
+    seca = conta(1, Tier.FREE, 0, seca_ate=AGORA + timedelta(hours=1))
+    assert escolher([seca], Modelo.NANO_BANANA, AGORA).id == 1
+    assert apta(seca, Modelo.NANO_BANANA, AGORA) is True
+
+
+def test_video_continua_recusando_conta_seca_e_conta_sem_saldo():
+    # o afrouxamento vale so onde o custo e zero; o corte que importa segue de pe
+    seca = conta(1, Tier.FREE, 50, seca_ate=AGORA + timedelta(hours=1))
+    pobre = conta(2, Tier.FREE, 3)
+    assert escolher([seca, pobre], Modelo.VEO_FAST, AGORA) is None
+
+
+def test_imagem_nao_escolhe_conta_expirada_nem_desativada():
+    # o que imagem dispensa e CREDITO. Sessao caida e conta desligada continuam fora:
+    # sem login nao ha o que clicar, de graca ou pago.
+    morta = conta(1, Tier.FREE, 0, saude=SaudeSessao.EXPIRADA)
+    desligada = conta(2, Tier.FREE, 0, ativa=False)
+    bloqueada = conta(3, Tier.FREE, 0, saude=SaudeSessao.BLOQUEADA)
+    assert escolher([morta, desligada, bloqueada], Modelo.NANO_BANANA, AGORA) is None
