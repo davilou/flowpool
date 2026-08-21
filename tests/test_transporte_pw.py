@@ -9,9 +9,13 @@ from pathlib import Path
 
 import pytest
 
-from flowpool.nucleo.tipos import Modelo, Modo
-from flowpool.transporte.base import GeracaoFalhou, Pedido
+from flowpool.nucleo.tipos import Conta, Modelo, Modo, Tier
+from flowpool.transporte.base import GeracaoFalhou, Pedido, Sessao
 from flowpool.transporte.pw import seletores as sel
+from flowpool.transporte.pw.diario import (
+    Diario, descartar_traco, guardar_traco, iniciar_traco, proximo_traco,
+    traco_ligado,
+)
 from flowpool.transporte.pw.dom import seguro
 from flowpool.transporte.pw.analise import (
     agente_ligado, arquivos_do_pedido, caminho_final, confirmacao_fraca,
@@ -529,7 +533,8 @@ async def test_ingredients2v_sem_referencia_continua_sendo_erro():
     # o modo EXIGE arquivo; a lista vazia so vira erro dentro de `_anexar`, e e la que
     # o teste tem que bater para a regra nao sumir na mudanca de casa
     with pytest.raises(GeracaoFalhou, match="sem arquivo"):
-        await TransportePlaywright()._anexar(None, _pedido(Modo.INGREDIENTS2V))
+        await TransportePlaywright()._anexar(None, _pedido(Modo.INGREDIENTS2V),
+                                            Diario(1))
 
 
 # --- o item do seletor de midia: nome, pronto e qual e o novo -----------
@@ -762,7 +767,7 @@ async def test_o_aviso_de_direitos_e_pego_quando_aparece_no_meio_do_upload():
     # jobs perdendo a estreia juntos.
     pagina = _PaginaComAviso()
     indice = await TransportePlaywright()._esperar_item_pronto(
-        pagina, "gato.png", teto_ms=60_000)
+        pagina, "gato.png", Diario(1), teto_ms=60_000)
 
     assert indice == 0
     assert pagina.aviso_aceito is True
@@ -775,7 +780,7 @@ async def test_upload_sem_aviso_nao_clica_em_nada():
     pagina = _PaginaComAviso(aparece_na_volta=10_000)
     pagina.aviso_aceito = True          # ja aceito ha muito tempo nesta conta
     indice = await TransportePlaywright()._esperar_item_pronto(
-        pagina, "gato.png", teto_ms=60_000)
+        pagina, "gato.png", Diario(1), teto_ms=60_000)
 
     assert indice == 0
     assert pagina.clicados == []
@@ -833,3 +838,201 @@ def test_o_teto_de_repeticoes_tem_margem_sobre_o_caso_medido():
     # job inteiro — nova tentativa, novo navegador, chip reconfigurado, referencias
     # re-anexadas. A assimetria manda no numero.
     assert MAX_REPETICOES > 2
+
+
+# --- o traco e o log de passo: instrumento que nao pode quebrar nada ----
+#
+# Existem por um defeito aberto: geracao com DUAS referencias falha nas primeiras
+# tentativas e passa numa posterior, com
+#   TargetClosedError: Page.wait_for_timeout: Target page, context or browser
+#   has been closed
+# Tres hipoteses ja foram deduzidas do erro final e as tres estavam erradas. O que
+# falta e ver a tela no instante exato.
+#
+# O que se testa AQUI nao e o conteudo do traco — isso so se ve abrindo o zip. E a
+# unica propriedade que o instrumento nao pode perder: NAO DERRUBAR O JOB QUE ELE
+# DIAGNOSTICA, e nao encher o disco em job que deu certo.
+
+
+class _TracingQuebrado:
+    """A gravacao falha de todo jeito. E o que acontece com o navegador ja morto."""
+
+    async def start(self, **kw):
+        raise RuntimeError("browser has been closed")
+
+    async def stop(self, path=None):
+        raise RuntimeError("browser has been closed")
+
+
+class _TracingFalso:
+    def __init__(self):
+        self.iniciado = False
+        self.paradas: list[str | None] = []
+
+    async def start(self, **kw):
+        self.iniciado = True
+
+    async def stop(self, path=None):
+        self.paradas.append(path)
+
+
+class _CtxFalso:
+    def __init__(self, tracing=None):
+        self.tracing = tracing if tracing is not None else _TracingFalso()
+        self.fechado = False
+
+    async def close(self):
+        self.fechado = True
+
+
+class _PwFalso:
+    def __init__(self):
+        self.parado = False
+
+    async def stop(self):
+        self.parado = True
+
+
+async def test_traco_que_nao_inicia_nao_derruba_o_job():
+    # a regra que este modulo existe para cumprir: diagnostico que quebra a coisa que
+    # ele diagnostica e pior do que nenhum
+    assert await iniciar_traco(_CtxFalso(_TracingQuebrado())) is False
+
+
+async def test_traco_que_nao_grava_nao_derruba_o_job(tmp_path):
+    # e o caso QUE MAIS INTERESSA: com o navegador morto nao ha de onde coletar o que
+    # foi gravado. O traco se perde, o job segue, e o log de passo — que e stdout —
+    # continua sendo a prova do que aconteceu
+    assert await guardar_traco(_CtxFalso(_TracingQuebrado()),
+                               tmp_path / "x.zip") is None
+
+
+async def test_descartar_traco_engole_a_propria_falha():
+    await descartar_traco(_CtxFalso(_TracingQuebrado()))   # nao levanta
+
+
+async def test_desligavel_por_ambiente(monkeypatch):
+    # a gravacao tem custo por acao; quem estiver medindo tempo precisa poder tirar o
+    # instrumento do caminho sem editar codigo
+    monkeypatch.setenv("FLOWPOOL_TRACO", "0")
+    ctx = _CtxFalso()
+    assert traco_ligado() is False
+    assert await iniciar_traco(ctx) is False
+    assert ctx.tracing.iniciado is False
+
+
+async def test_ligado_por_padrao(monkeypatch):
+    monkeypatch.delenv("FLOWPOOL_TRACO", raising=False)
+    assert traco_ligado() is True
+
+
+def test_o_nome_do_traco_nao_sobrescreve_o_anterior(tmp_path):
+    # sem relogio de proposito: `datetime.now()` dentro do transporte tornaria o teste
+    # dependente da hora, e o que importa e so nao perder o traco de ontem
+    primeiro = proximo_traco(6, tmp_path)
+    assert primeiro.name == "conta6-0001.zip"
+    primeiro.write_bytes(b"x")
+    assert proximo_traco(6, tmp_path).name == "conta6-0002.zip"
+
+
+def test_os_tracos_de_contas_diferentes_nao_disputam_numero(tmp_path):
+    # ate cinco navegadores trabalham ao mesmo tempo, um por conta
+    (tmp_path / "conta6-0001.zip").write_bytes(b"x")
+    assert proximo_traco(7, tmp_path).name == "conta7-0001.zip"
+
+
+async def test_job_bem_sucedido_nao_deixa_arquivo_no_disco(tmp_path, monkeypatch):
+    # alguns MB por traco, dezenas de jobs por dia: guardar tudo enche o disco em uma
+    # semana. Em sucesso, `stop()` vai SEM `path`, que e o descarte do Playwright.
+    monkeypatch.chdir(tmp_path)
+    t = TransportePlaywright()
+    ctx, pw = _CtxFalso(), _PwFalso()
+    s = Sessao(conta=Conta(id=6, email="a@b.com", tier=Tier.FREE, perfil="p"),
+               handle=(pw, ctx, None))
+    t._tracando.add(6)
+
+    await t.fechar(s)
+
+    assert ctx.tracing.paradas == [None]        # parou, sem caminho = descartou
+    assert list(tmp_path.rglob("*.zip")) == []
+    assert (ctx.fechado, pw.parado) == (True, True)
+
+
+async def test_falha_guarda_o_traco_uma_vez_so(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    t = TransportePlaywright()
+    ctx = _CtxFalso()
+    s = Sessao(conta=Conta(id=6, email="a@b.com", tier=Tier.FREE, perfil="p"),
+               handle=(_PwFalso(), ctx, None))
+    t._tracando.add(6)
+
+    await t._traco_da_falha(s)
+    # a segunda chamada nao pode parar de novo: `consultar` pode devolver FALHOU e
+    # `baixar` falhar em seguida na mesma sessao, e um `stop` duplo levanta
+    await t._traco_da_falha(s)
+
+    assert len(ctx.tracing.paradas) == 1
+    assert ctx.tracing.paradas[0].endswith("conta6-0001.zip")
+
+
+async def test_o_traco_ja_guardado_nao_e_descartado_no_fechar(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    t = TransportePlaywright()
+    ctx, pw = _CtxFalso(), _PwFalso()
+    s = Sessao(conta=Conta(id=6, email="a@b.com", tier=Tier.FREE, perfil="p"),
+               handle=(pw, ctx, None))
+    t._tracando.add(6)
+
+    await t._traco_da_falha(s)
+    await t.fechar(s)
+
+    assert len(ctx.tracing.paradas) == 1        # so a gravacao da falha
+
+
+# --- o log de passo -----------------------------------------------------
+
+
+class _RelogioDeMentira:
+    """Um relogio que so anda quando o teste manda. Nao dorme, nao olha a maquina."""
+
+    def __init__(self):
+        self.agora = 0.0
+
+    def __call__(self):
+        return self.agora
+
+
+def test_espera_curta_nao_imprime_nada(capsys):
+    # quase toda espera termina rapido; uma linha "ainda esperando" no segundo zero
+    # seria ruido em todo job
+    relogio = _RelogioDeMentira()
+    d = Diario(6, relogio=relogio)
+    for segundo in (1.0, 5.0, 14.0):
+        relogio.agora = segundo
+        d.esperando("a miniatura de blusa.png")
+    assert capsys.readouterr().out == ""
+
+
+def test_espera_longa_avisa_uma_vez_a_cada_janela(capsys):
+    # `_esperar_item_pronto` gira a cada 500 ms: sem limite, um upload de 3 minutos
+    # escreveria 360 linhas iguais. E com silencio total o usuario fecha a janela
+    # achando que travou — foi o que aconteceu em 21/08.
+    relogio = _RelogioDeMentira()
+    d = Diario(6, relogio=relogio)
+    for decimo in range(1, 301):        # 30 s, amostrados como o laco real amostra
+        relogio.agora = decimo * 0.1
+        d.esperando("a miniatura de blusa.png")
+    saida = capsys.readouterr().out
+    assert saida.count("ainda esperando") == 2      # aos 15s e aos 30s, nao 300 vezes
+    assert "a miniatura de blusa.png" in saida
+
+
+def test_o_passo_carrega_a_conta_e_o_tempo(capsys):
+    # ate cinco geracoes escrevem na mesma saida; sem a conta no prefixo o log de
+    # cinco jobs vira um so, ilegivel
+    relogio = _RelogioDeMentira()
+    d = Diario(6, relogio=relogio)
+    relogio.agora = 2.4
+    d.passo("configurando: imagem / nano-banana / 9:16 / x1")
+    assert capsys.readouterr().out == (
+        "[   2s] conta 6: configurando: imagem / nano-banana / 9:16 / x1\n")

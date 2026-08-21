@@ -19,6 +19,9 @@ from flowpool.transporte.base import (
 )
 from flowpool.transporte.pw import analise, dom
 from flowpool.transporte.pw.cura import AutoCura
+from flowpool.transporte.pw.diario import (
+    Diario, descartar_traco, guardar_traco, iniciar_traco, proximo_traco,
+)
 from flowpool.transporte.pw import seletores as sel
 from flowpool.transporte.pw.sessao import abrir_contexto, interpretar_sessao
 
@@ -99,6 +102,41 @@ class TransportePlaywright:
         # imagem e video. Guardar o modo no momento de gerar e mais barato do que
         # adivinhar pelo DOM — e adivinhar errado baixaria a resolucao errada calado.
         self._modo_do_card: dict[tuple[int, str], Modo] = {}
+        # O log de passo e o traco sao POR CONTA pelo mesmo motivo das duas tabelas
+        # acima: ate cinco geracoes correm ao mesmo tempo, uma por conta, e um diario
+        # por transporte misturaria os relogios de cinco jobs num so.
+        self._diarios: dict[int, Diario] = {}
+        # quem esta com gravacao ligada. Sai do conjunto quando o traco e guardado (na
+        # falha) ou descartado (no fim), e e o que impede tentar parar duas vezes.
+        self._tracando: set[int] = set()
+
+    def _diario(self, conta_id: int) -> Diario:
+        """O diario daquela conta. NUNCA None.
+
+        `setdefault` em vez de exigir sessao aberta porque os scripts de fumaca e os
+        testes chamam metodos internos direto, sem passar por `abrir_sessao`. Um
+        `None` a ser checado em cada ponto de log espalharia `if` por toda a sequencia
+        para proteger uma linha de print.
+        """
+        return self._diarios.setdefault(conta_id, Diario(conta_id))
+
+    async def _traco_da_falha(self, s: Sessao) -> None:
+        """Guarda o traco AGORA, no momento da falha, e para de gravar.
+
+        No momento da falha, e nao em `fechar`, porque a falha que motivou tudo isto e
+        um navegador que morre: em `fechar` o contexto ja pode nao existir para coletar
+        o que gravou. Aqui ele ainda tem chance.
+
+        Nunca levanta — chamada de dentro de um `except`, e um erro daqui substituiria
+        a excecao de verdade por uma sobre gravacao de arquivo.
+        """
+        if s.conta.id not in self._tracando:
+            return
+        self._tracando.discard(s.conta.id)
+        try:
+            await guardar_traco(s.handle[1], proximo_traco(s.conta.id))
+        except Exception as e:
+            print(f"traco: {type(e).__name__} ao guardar - seguindo")
 
     # ------------------------------------------------------------------ sessao
     async def abrir_sessao(self, conta: Conta) -> Sessao:
@@ -106,6 +144,13 @@ class TransportePlaywright:
         # proprio e o Google nao consegue correlacionar as vinte entre si. Vazio e o
         # normal hoje, e `abrir_contexto` trata None como "sem proxy".
         pw, ctx = await abrir_contexto(Path(conta.perfil), conta.proxy)
+        # o relogio do log de passo comeca aqui: e o instante em que a conta passa a
+        # ocupar um navegador, e e desse total que o usuario reclama quando "travou"
+        self._diarios[conta.id] = d = Diario(conta.id)
+        # a gravacao comeca ANTES da primeira acao. Um traco que so pega o fim nao
+        # responde a pergunta que se faz dele, que e o que a tela mostrava ANTES
+        if await iniciar_traco(ctx):
+            self._tracando.add(conta.id)
         pagina = ctx.pages[0] if ctx.pages else await ctx.new_page()
         await pagina.goto(sel.URL_FLOW, wait_until="domcontentloaded")
         try:
@@ -114,13 +159,27 @@ class TransportePlaywright:
             resposta = await pagina.request.get(sel.URL_BASE + sel.URL_SESSAO)
             interpretar_sessao(await resposta.json())
         except SessaoMorta:
+            # sessao caida NAO rende traco: nao e defeito de sequencia, e um login que
+            # expirou, e o diagnostico e uma linha no evento. Guardar um zip de alguns
+            # MB por conta expirada encheria o disco pelo motivo mais banal possivel.
+            self._tracando.discard(conta.id)
+            self._diarios.pop(conta.id, None)
+            await descartar_traco(ctx)
             await ctx.close()
             await pw.stop()
             raise SessaoMorta(f"sessao de {conta.email} caiu")
+        d.passo("sessao aberta")
         return Sessao(conta=conta, handle=(pw, ctx, pagina))
 
     async def fechar(self, s: Sessao) -> None:
         pw, ctx, _ = s.handle
+        # traco que chega inteiro ate aqui e de job que NAO falhou — na falha ele ja
+        # foi guardado, no instante em que ela aconteceu. Descartar e a regra 2 do
+        # `diario.py`: alguns MB por job, dezenas de jobs por dia, uma semana de disco.
+        if s.conta.id in self._tracando:
+            self._tracando.discard(s.conta.id)
+            await descartar_traco(ctx)
+        self._diarios.pop(s.conta.id, None)
         await ctx.close()
         await pw.stop()
 
@@ -455,7 +514,7 @@ class TransportePlaywright:
         analise.exigir_agente_desligado(await botao.get_attribute(sel.ATRIBUTO_AGENTE))
         return True
 
-    async def _configurar(self, pagina, p: Pedido) -> str:
+    async def _configurar(self, pagina, p: Pedido, d: Diario) -> str:
         """Abre o chip, ajusta tudo e CONFERE. Devolve o texto final do chip.
 
         Nada de passo tolerante. Um `except: segue` engoliu um clique de duracao que
@@ -463,6 +522,8 @@ class TransportePlaywright:
         na pasta e ninguem percebendo. Se o chip nao confirmar o estado, e erro.
         """
         modo = p.modo.value
+        d.passo(f"configurando: {modo} / {p.modelo.value} / {p.proporcao} / "
+                f"x{p.quantidade}")
         # recusa ANTES de tocar no chip, com a reserva de credito ainda estornavel
         analise.exigir_proporcao_do_modo(modo, p.proporcao)
 
@@ -526,6 +587,7 @@ class TransportePlaywright:
         aviso = analise.confirmacao_fraca(chip, modo)
         if aviso:
             print("chip:", aviso)
+        d.passo(f"chip confirmado: {chip}")
         return chip
 
     async def _custo_anunciado(self, pagina) -> int | None:
@@ -547,12 +609,19 @@ class TransportePlaywright:
 
     # ------------------------------------------------------------------- gerar
     async def gerar(self, s: Sessao, p: Pedido) -> str:
-        """Envolvido em print-em-falha: interface so se diagnostica vendo a tela."""
+        """Envolvido em print-em-falha: interface so se diagnostica vendo a tela.
+
+        E em traco-em-falha, pelo mesmo motivo levado a serio: o print mostra UM
+        instante — o do fim, que e o menos informativo —, e o defeito das duas
+        referencias precisa do instante ANTERIOR ao erro. O traco guarda todos.
+        """
         _, _, pagina = s.handle
         try:
             return await self._gerar(s, p, pagina)
         except Exception as e:
             await self.print_de_falha(pagina, f"gerar {p.modo.value} {type(e).__name__}")
+            self._diario(s.conta.id).passo(f"FALHOU em gerar: {type(e).__name__}: {e}")
+            await self._traco_da_falha(s)
             raise
 
     async def _gerar(self, s: Sessao, p: Pedido, pagina) -> str:
@@ -567,8 +636,9 @@ class TransportePlaywright:
         grade = _medido("CARD_GRADE", sel.CARD_GRADE)
         antes = await pagina.locator(grade).count()
 
-        await self._configurar(pagina, p)
-        await self._anexar(pagina, p)
+        d = self._diario(s.conta.id)
+        await self._configurar(pagina, p, d)
+        await self._anexar(pagina, p, d)
 
         # ARMADILHA: `input[aria-label="Texto editavel"]` e o NOME DO PROJETO. Escrever
         # ali renomeia o projeto em vez de gerar, e o sintoma e "nada acontece" — que e
@@ -579,15 +649,17 @@ class TransportePlaywright:
         await self._escrever_prompt(pagina, p.prompt)
 
         # dois botoes contem a palavra "Criar": anexar e enviar. So a ligadura separa.
+        d.passo(f"enviando o comando ({len(p.prompt)} caracteres)")
         await pagina.locator(sel.BOTAO_ENVIAR).first.click(timeout=15_000)
 
         if await self._sem_credito(pagina):
             raise SaldoInsuficiente(f"conta {s.conta.email} sem credito")
 
         # o card novo aparecendo e a UNICA confirmacao de que o Flow aceitou o pedido
-        await self._esperar_card_novo(pagina, antes)
+        await self._esperar_card_novo(pagina, antes, d)
         indice = 0 if sel.CARDS_NOVOS_PRIMEIRO else antes
         id_remoto = f"card-{indice}"
+        d.passo(f"o Flow aceitou: {id_remoto}")
         self._repeticoes[(s.conta.id, id_remoto)] = 0
         self._modo_do_card[(s.conta.id, id_remoto)] = p.modo
         return id_remoto
@@ -604,16 +676,18 @@ class TransportePlaywright:
             return False
         return await pagina.locator(sel.AVISO_SEM_CREDITO).count() > 0
 
-    async def _esperar_card_novo(self, pagina, antes: int, teto_ms: int = 120_000) -> None:
+    async def _esperar_card_novo(self, pagina, antes: int, d: Diario,
+                                 teto_ms: int = 120_000) -> None:
         gasto = 0
         while gasto < teto_ms:
             if await pagina.locator(sel.CARD_GRADE).count() > antes:
                 return
             await pagina.wait_for_timeout(2000)
             gasto += 2000
+            d.esperando("o card novo aparecer na grade")
         raise GeracaoFalhou("o Flow nao criou card novo depois do envio")
 
-    async def _anexar(self, pagina, p: Pedido) -> None:
+    async def _anexar(self, pagina, p: Pedido, d: Diario) -> None:
         """Faz cada arquivo virar REFERENCIA DA GERACAO, pelo seletor de midia.
 
         O DEFEITO QUE ISTO CONSERTA: a versao anterior fazia `set_input_files` no
@@ -638,8 +712,17 @@ class TransportePlaywright:
             raise GeracaoFalhou(f"modo {p.modo.value} sem arquivo para anexar")
 
         await self._limpar_referencias(pagina)
-        for arquivo in arquivos:
-            await self._incluir_referencia(pagina, arquivo)
+        for n, arquivo in enumerate(arquivos, 1):
+            # o numero DENTRO do total e o que fecha o caso das duas referencias: com
+            # ele, "parou na 2 de 2" e "nem chegou na 2" deixam de ser a mesma linha
+            d.passo(f"anexando referencia {n} de {len(arquivos)}: {Path(arquivo).name}")
+            quanto = d.cronometro()
+            await self._incluir_referencia(pagina, arquivo, d)
+            # o tempo POR REFERENCIA e a medicao que hoje falta: a lentidao com duas e
+            # real e irregular ("as vezes demora, as vezes envia rapidamente") e
+            # ninguem sabe por que. Com dezenas de jobs por dia, esta linha vira a
+            # distribuicao real em vez de impressao — e sem custo nenhum.
+            d.passo(f"referencia {n} incluida no comando em {quanto():.1f}s")
 
         # CONFERE, nao confia. Este e o passo que faltava: sem ele, uma referencia que
         # nao entrou some em silencio e a geracao sai por texto puro — que foi
@@ -692,7 +775,7 @@ class TransportePlaywright:
         raise GeracaoFalhou(
             f"o seletor de midia nao abriu depois de {tentativas} cliques no anexar")
 
-    async def _incluir_referencia(self, pagina, arquivo: str) -> None:
+    async def _incluir_referencia(self, pagina, arquivo: str, d: Diario) -> None:
         """Uma volta completa do seletor de midia: abrir, enviar, esperar, incluir."""
         seletor = await self._abrir_seletor_midia(pagina)
 
@@ -700,7 +783,7 @@ class TransportePlaywright:
         await pagina.locator(sel.UPLOAD).first.set_input_files([arquivo])
         # o aviso de direitos e vigiado DENTRO da espera, nao antes dela — ver
         # `_esperar_item_pronto`
-        indice = await self._esperar_item_pronto(pagina, Path(arquivo).name)
+        indice = await self._esperar_item_pronto(pagina, Path(arquivo).name, d)
         itens = pagina.locator(sel.ITEM_MIDIA)
         # CONFERIR antes de clicar. MEDIDO: clicar num item JA selecionado o DESmarca,
         # e sem selecao o botao "Incluir no comando" some da tela — o clique cego
@@ -712,7 +795,8 @@ class TransportePlaywright:
         # o seletor fecha sozinho ao incluir; espera-se o ESTADO, nunca um sono
         await seletor.wait_for(state="hidden", timeout=15_000)
 
-    async def _esperar_item_pronto(self, pagina, nome: str, teto_ms: int = 180_000) -> int:
+    async def _esperar_item_pronto(self, pagina, nome: str, d: Diario,
+                                   teto_ms: int = 180_000) -> int:
         """Espera o upload TERMINAR e devolve o indice do item na lista.
 
         Espera pelo ITEM PRONTO, nao por tempo. MEDIDO 2026-08-20: 2,9 MB levaram
@@ -748,6 +832,11 @@ class TransportePlaywright:
                 analise.nome_do_item(i.get("texto", "")) == nome for i in itens)
             await pagina.wait_for_timeout(500)
             gasto += 500
+            # A LINHA QUE FALTAVA. Meia hora ja foi gasta investigando um job que
+            # estava apenas subindo um arquivo grande. Diz tambem se o item ja
+            # APARECEU, que e o que separa "upload lento" de "o arquivo nem chegou".
+            d.esperando(f"a miniatura de {nome}"
+                        f"{'' if visto else ' (o item nem apareceu na lista)'}")
         raise GeracaoFalhou(
             f"{nome}: o item {'nao ficou pronto' if visto else 'nao apareceu'} no "
             f"seletor de midia em {teto_ms // 1000}s")
@@ -834,6 +923,9 @@ class TransportePlaywright:
                 # job nem reabrir navegador. O usuario decidiu que nao quer notificacao
                 # — entao a repeticao tem que ser invisivel e barata.
                 self._repeticoes[(s.conta.id, id_remoto)] = vezes + 1
+                self._diario(s.conta.id).passo(
+                    f"{id_remoto} falhou; repetindo pelo card "
+                    f"(gratuito, {vezes + 1} de {MAX_REPETICOES})")
                 await self._clicar_unico(card, sel.BOTAO_REPETIR_CARD,
                                          f"repetir {id_remoto}")
                 await pagina.wait_for_timeout(3000)
@@ -844,6 +936,11 @@ class TransportePlaywright:
             if await pagina.locator(sel.AVISO_ALTA_DEMANDA).count() > 0:
                 raise GeracaoFalhou(
                     "Flow em alta demanda: falha do Google, a conta esta boa")
+            # o Flow desistiu do card. Isto NAO levanta — quem transforma em falha do
+            # job e o orquestrador —, entao o traco tem que ser guardado aqui ou ele
+            # seria descartado em `fechar` como se o job tivesse dado certo.
+            self._diario(s.conta.id).passo(f"{id_remoto}: o Flow devolveu FALHOU")
+            await self._traco_da_falha(s)
             return Estado.FALHOU
 
         if await card.locator(sel.CARD_MIDIA).count() > 0:
@@ -852,6 +949,23 @@ class TransportePlaywright:
 
     # ------------------------------------------------------------------ baixar
     async def baixar(self, s: Sessao, id_remoto: str, destino: Path) -> Path:
+        """Envolvido em traco-em-falha pelo mesmo motivo de `gerar`.
+
+        O menu do card e a parte mais perigosa da sequencia — o vizinho de "Baixar" e
+        "Mover para a lixeira" —, e quando ela erra a pergunta e sempre a mesma: o que
+        estava na tela naquele instante.
+        """
+        d = self._diario(s.conta.id)
+        d.passo(f"baixando {id_remoto} para {destino.name}")
+        try:
+            return await self._baixar(s, id_remoto, destino, d)
+        except Exception as e:
+            d.passo(f"FALHOU em baixar: {type(e).__name__}: {e}")
+            await self._traco_da_falha(s)
+            raise
+
+    async def _baixar(self, s: Sessao, id_remoto: str, destino: Path,
+                      d: Diario) -> Path:
         _, _, pagina = s.handle
         card = await self._card(pagina, id_remoto)
 
@@ -890,6 +1004,7 @@ class TransportePlaywright:
         real = analise.caminho_final(destino, download.suggested_filename)
         real.parent.mkdir(parents=True, exist_ok=True)
         await download.save_as(real)
+        d.passo(f"baixado: {real}")
         return real
 
     async def _logar_menu(self, pagina, menu) -> None:
