@@ -490,8 +490,16 @@ async def test_banco_que_falha_nao_derruba_a_cura(tmp_path):
 def test_os_seletores_que_o_transporte_clica_tem_descricao():
     # os que passam por `_clicar_unico` e nao sao destrutivos: sao exatamente os
     # curaveis, e sem descricao a cura nao acontece
-    for nome in ("DROPDOWN_MODELO", "BOTAO_REPETIR_CARD", "CHIP_CONFIG",
-                 "CAMPO_PROMPT", "BOTAO_ENVIAR"):
+    for nome in ("DROPDOWN_MODELO", "CHIP_CONFIG", "CAMPO_PROMPT", "BOTAO_ENVIAR"):
         assert nome in sel.DESCRICAO
     for chave in sel.BOTAO_MODO:
         assert f"BOTAO_MODO[{chave}]" in sel.DESCRICAO
+
+
+def test_o_botao_de_repetir_saiu_dos_curaveis():
+    # Ele e clicado pelo transporte, mas nao pode ser curado: VISTO em 2026-08-21, o
+    # card de falha tem tres botoes em fila e um deles APAGA a geracao. Um modelo
+    # escolhendo entre vizinhos ali nao custa um clique perdido, custa o trabalho do
+    # usuario. Mesmo motivo do menu do card.
+    assert "BOTAO_REPETIR_CARD" in sel.NAO_CURAVEIS
+    assert "BOTAO_REPETIR_CARD" not in sel.DESCRICAO

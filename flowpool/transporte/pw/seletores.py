@@ -414,8 +414,45 @@ ROTULO_MODELO = {
 # com hash muda.
 CARD_GRADE = "div[data-tile-id]"
 CARD_MIDIA = 'img[src*="media.getMedia"], img[src*="trpc"]'   # a miniatura dentro dele
+# Card que FALHOU. Sao dois seletores porque a frase nao e uma so.
+#
+# VISTO EM PRODUCAO 2026-08-21, com um texto que `CARD_FALHA` nao casa:
+#   "Falha / Falha ao gerar audio. Tente usar outro comando ou envie feedback. /
+#    Nao houve cobranca por esta geracao."
+# Correspondencia exata com UMA frase deixava `consultar` sem reconhecer a falha: ele
+# devolvia RODANDO ate o timeout de dez minutos, e o usuario via "travado".
+#
+# `CARD_FALHA_TITULO` casa a ESTRUTURA — o titulo "Falha" SOZINHO, ancorado. Sem a
+# ancora, "Falha ao gerar audio" no corpo do card, ou qualquer "falhou" perdido na
+# tela, viraria falso positivo. A segunda condicao (o botao de repetir existir dentro
+# do MESMO card) e conferida em `consultar`, nao aqui: duas condicoes juntas erram
+# menos que uma frase decorada.
 CARD_FALHA = 'text="Ops! Algo deu errado"'
-BOTAO_REPETIR_CARD = 'button:has-text("redo")'   # repete a geracao SEM cobrar de novo
+CARD_FALHA_TITULO = r'text=/^\s*Falha\s*$/'
+
+# Repete a geracao SEM cobrar de novo — a propria mensagem de falha diz "Nao houve
+# cobranca por esta geracao", e e isso que justifica repetir pelo card em vez de
+# refazer o job (refazer paga).
+#
+# CONFERIR AO VIVO. O card de falha visto em 2026-08-21 tem TRES botoes em fila, e o
+# terceiro tem cara de APAGAR. `button:has-text("redo")` foi medido no card de falha
+# antigo; nao ha medicao dos tres botoes do card novo. Enquanto nao houver, `consultar`
+# so clica se houver EXATAMENTE UM candidato dentro do card — com zero ou com dois ele
+# desiste e devolve FALHOU, porque errar entre repetir e apagar joga fora o trabalho
+# do usuario.
+BOTAO_REPETIR_CARD = 'button:has-text("redo")'   # CONFERIR: ver os tres botoes acima
+
+# Onde se desliga o AUDIO nativo do video. PENDENTE — o link "configuracoes" do proprio
+# card de falha leva la, mas o caminho nao foi medido.
+#
+# Vale mais que o conserto da falha acima: o `PIPELINE.md` do usuario diz "a modelo
+# nunca fala; o audio nativo e descartado", ou seja, todo audio gerado vai para o lixo.
+# Desligar audio nas configuracoes faz a classe inteira de "Falha ao gerar audio"
+# DEIXAR DE EXISTIR, e provavelmente gera mais rapido.
+#
+# Mexer em configuracao de conta e do usuario, nao do app: mapear e registrar, sim;
+# clicar, so com autorizacao dele.
+CONFIG_SEM_AUDIO = PENDENTE
 
 # Onde o card recem-nascido entra na grade. CONFIRMAR ao vivo — errar isso NAO da erro:
 # o app baixa um clipe antigo, grava o caminho no banco e marca o job como pronto.
@@ -557,8 +594,8 @@ DESCRICAO = {
     "CARD_GRADE": "o container de UM item da grade de resultados — o quadrado clicavel "
                   "que envolve a miniatura, e nao a miniatura em si",
     "CARD_MIDIA": "a miniatura (imagem ou video) ja pronta dentro de um item da grade",
-    "BOTAO_REPETIR_CARD": "no item da grade que falhou, o botao que REPETE a geracao "
-                          "sem cobrar de novo",
+    "CARD_FALHA_TITULO": "no item da grade que falhou, o TITULO da falha — a palavra "
+                         "sozinha, nao a frase que explica o motivo",
 
     # projeto e conta
     "BOTAO_NOVO_PROJETO": "na lista de projetos, o botao que cria um projeto novo",
@@ -604,6 +641,10 @@ NAO_CURAVEIS = frozenset({
     "BOTAO_CONCORDO", "CAIXA_CONSENTIMENTO",
     # parar uma geracao em curso joga fora credito ja gasto
     "BOTAO_PARAR",
+    # o botao de repetir mora numa fila de tres botoes DENTRO do card de falha, e um
+    # deles apaga a geracao. Mesmo motivo do menu do card: um vizinho errado nao custa
+    # um clique perdido, custa o trabalho do usuario.
+    "BOTAO_REPETIR_CARD",
 })
 
 

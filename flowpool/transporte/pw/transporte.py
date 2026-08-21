@@ -68,11 +68,20 @@ class TransportePlaywright:
         # de "o Google refez a tela", e um contador que renasce a cada clique nao
         # separaria nada. Ela se desliga sozinha sem modelo respondendo.
         self.cura = cura if cura is not None else AutoCura()
-        self._repeticoes: dict[str, int] = {}
+        # As duas tabelas abaixo sao por (CONTA, card), nunca so por card.
+        #
+        # `id_remoto` e POSICIONAL — `card-0` e "o primeiro item da grade daquela
+        # conta". Com geracoes simultaneas em contas diferentes, duas delas produzem
+        # `card-0` ao mesmo tempo, e uma chave so por card faria um job baixar a
+        # resolucao escolhida pelo outro (video em "Tamanho original", imagem em
+        # "720p") e contar as repeticoes do vizinho. O par com o id da conta separa,
+        # e as tres chamadas que precisam disso — `gerar`, `consultar`, `baixar` —
+        # recebem a sessao, entao o id da conta esta sempre a mao.
+        self._repeticoes: dict[tuple[int, str], int] = {}
         # `baixar` recebe so o id_remoto, e o menu de resolucao e diferente entre
         # imagem e video. Guardar o modo no momento de gerar e mais barato do que
         # adivinhar pelo DOM — e adivinhar errado baixaria a resolucao errada calado.
-        self._modo_do_card: dict[str, Modo] = {}
+        self._modo_do_card: dict[tuple[int, str], Modo] = {}
 
     # ------------------------------------------------------------------ sessao
     async def abrir_sessao(self, conta: Conta) -> Sessao:
@@ -505,8 +514,8 @@ class TransportePlaywright:
         await self._esperar_card_novo(pagina, antes)
         indice = 0 if sel.CARDS_NOVOS_PRIMEIRO else antes
         id_remoto = f"card-{indice}"
-        self._repeticoes[id_remoto] = 0
-        self._modo_do_card[id_remoto] = p.modo
+        self._repeticoes[(s.conta.id, id_remoto)] = 0
+        self._modo_do_card[(s.conta.id, id_remoto)] = p.modo
         return id_remoto
 
     async def _sem_credito(self, pagina) -> bool:
@@ -615,10 +624,8 @@ class TransportePlaywright:
 
         # o `input[type=file]` vive DENTRO do seletor; nao se clica em "Enviar midia"
         await pagina.locator(sel.UPLOAD).first.set_input_files([arquivo])
-        # antes de esperar o item: o aviso de direitos aparece por cima e segura o
-        # upload da PRIMEIRA vez de cada conta
-        await self._dispensar_aviso_de_direitos(pagina)
-
+        # o aviso de direitos e vigiado DENTRO da espera, nao antes dela — ver
+        # `_esperar_item_pronto`
         indice = await self._esperar_item_pronto(pagina, Path(arquivo).name)
         itens = pagina.locator(sel.ITEM_MIDIA)
         # CONFERIR antes de clicar. MEDIDO: clicar num item JA selecionado o DESmarca,
@@ -640,10 +647,25 @@ class TransportePlaywright:
 
         O teto e generoso de proposito: estourar aqui e um upload lento, que se resolve
         esperando; incluir cedo e uma referencia vazia, que so aparece na imagem final.
+
+        O AVISO DE DIREITOS e vigiado a cada volta, e nao numa janela fixa antes desta
+        espera. MEDIDO em producao (job #19, conta estreando): o aviso so aparece
+        quando o Flow COMECA A RECEBER o arquivo, e o upload leva de 7 a 17 segundos.
+        Uma espera de 2 s antes do laco quase nunca o encontrava; o modal ficava na
+        tela segurando o upload, esta funcao contava ate 180 s por uma miniatura que
+        nao vinha, e a conta perdia uma tentativa inteira e ~180 s na estreia. Uma vez
+        em CADA conta do pool — com cinco contas estreando em paralelo, cinco jobs
+        perdendo a primeira tentativa juntos.
+
+        Vigiar custa uma contagem por volta, e a contagem para assim que o aviso for
+        dispensado: a ausencia e o caso comum em todas as geracoes seguintes.
         """
         gasto = 0
         visto = False
+        vigiar_aviso = True
         while gasto < teto_ms:
+            if vigiar_aviso and await self._dispensar_aviso_de_direitos(pagina):
+                vigiar_aviso = False
             itens = await pagina.evaluate(dom.ITENS_DE_MIDIA, sel.ITEM_MIDIA)
             indice = analise.escolher_item_enviado(itens, nome)
             if indice is not None:
@@ -656,23 +678,25 @@ class TransportePlaywright:
             f"{nome}: o item {'nao ficou pronto' if visto else 'nao apareceu'} no "
             f"seletor de midia em {teto_ms // 1000}s")
 
-    async def _dispensar_aviso_de_direitos(self, pagina) -> None:
-        """Dispensa o modal "Aviso" que aparece na PRIMEIRA vez que a conta envia arquivo.
+    async def _dispensar_aviso_de_direitos(self, pagina) -> bool:
+        """Dispensa o modal "Aviso" da primeira vez que a conta envia arquivo, SE ele
+        estiver na tela agora. Devolve se dispensou.
 
         Autorizado pelo Davi em 2026-08-20, e a autorizacao e sobre o comportamento
         permanente, nao sobre um clique: o aviso aparece uma vez em CADA conta do pool.
         Ele declara que quem envia tem os direitos sobre as imagens — e quem pode
-        afirmar isso e o dono delas, por isso a decisao foi dele.
+        afirmar isso e o dono delas, por isso a decisao foi dele. `BOTAO_CONCORDO`
+        continua entre os NAO CURAVEIS pelo mesmo motivo: aceitar termo em nome do
+        usuario nao e conserto de interface.
 
-        Verificacao curta e nao bloqueante DE PROPOSITO. O aviso so existe no primeiro
-        upload de cada conta; procurar por 15s um modal ja aceito faria todas as
-        geracoes seguintes pagarem o preco de um pop-up que existiu uma vez. Nao achou
-        em 2s, segue — a ausencia e o caso comum, nao a excecao.
+        Olhada instantanea, sem espera NENHUMA — nem os 2 s de antes. Quem espera e
+        quem chama, volta a volta, durante todo o upload: e la que o aviso aparece, em
+        momento imprevisivel entre o segundo 0 e o 17. Uma espera bloqueante aqui
+        dentro faria toda geracao seguinte pagar o preco de um pop-up que existiu uma
+        vez so.
         """
-        try:
-            await pagina.locator(sel.AVISO_DIREITOS).first.wait_for(timeout=2000)
-        except Exception:
-            return
+        if await pagina.locator(sel.AVISO_DIREITOS).count() == 0:
+            return False
         await self._clicar_unico(pagina, sel.BOTAO_CONCORDO, "aviso de direitos")
         # Espera o AVISO sumir, e nao "o painel fechar". A diferenca importa: isto roda
         # com o SELETOR DE MIDIA aberto, e `_fechar_painel` casaria o seletor de midia
@@ -684,6 +708,7 @@ class TransportePlaywright:
                 break
             await pagina.wait_for_timeout(250)
         print("aviso de direitos dispensado (primeira vez desta conta)")
+        return True
 
     # --------------------------------------------------------------- consultar
     async def _card(self, pagina, id_remoto: str):
@@ -692,6 +717,23 @@ class TransportePlaywright:
         if await cards.count() <= indice:
             raise GeracaoFalhou(f"{id_remoto} sumiu da grade")
         return cards.nth(indice)
+
+    @staticmethod
+    async def _card_falhou(card) -> bool:
+        """Se aquele item da grade e um card de FALHA.
+
+        Duas frases, nao uma. `CARD_FALHA` e a mensagem antiga, casada por texto exato;
+        `CARD_FALHA_TITULO` casa o titulo "Falha" sozinho, que e o que aparece nas
+        outras. VISTO EM PRODUCAO 2026-08-21: "Falha ao gerar audio. Tente usar outro
+        comando ou envie feedback." nao casava a frase antiga, `consultar` nao
+        reconhecia a falha, nao clicava no repetir, e devolvia RODANDO ate o timeout de
+        dez minutos — para o usuario, "travado".
+
+        Reconhecer pela ESTRUTURA e nao pela frase e o que impede a proxima redacao do
+        Google de reabrir o mesmo buraco.
+        """
+        return (await card.locator(sel.CARD_FALHA).count() > 0
+                or await card.locator(sel.CARD_FALHA_TITULO).count() > 0)
 
     async def consultar(self, s: Sessao, id_remoto: str) -> Estado:
         """Le o estado pela GRADE, nunca pela conversa.
@@ -703,15 +745,21 @@ class TransportePlaywright:
         _, _, pagina = s.handle
         card = await self._card(pagina, id_remoto)
 
-        if await card.locator(sel.CARD_FALHA).count() > 0:
-            vezes = self._repeticoes.get(id_remoto, 0)
-            if vezes < MAX_REPETICOES:
-                # `redo` repete SEM cobrar de novo. Repetir aqui, dentro de `consultar`,
-                # e o que faz o orquestrador nem tomar conhecimento: `_esperar` ve
-                # RODANDO e continua o polling, sem gastar tentativa do job nem
-                # reabrir navegador. O usuario decidiu que nao quer notificacao — entao
-                # a repeticao tem que ser invisivel e barata.
-                self._repeticoes[id_remoto] = vezes + 1
+        if await self._card_falhou(card):
+            vezes = self._repeticoes.get((s.conta.id, id_remoto), 0)
+            # CONFERIR o botao antes de mirar nele. O card de falha tem tres botoes em
+            # fila e um deles APAGA; com zero ou com dois candidatos o certo e desistir
+            # e devolver FALHOU — o job volta pra fila e alguem olha — em vez de clicar
+            # no vizinho e jogar fora o trabalho do usuario.
+            repetir = card.locator(sel.BOTAO_REPETIR_CARD)
+            if vezes < MAX_REPETICOES and await repetir.count() == 1:
+                # `redo` repete SEM cobrar de novo — a propria mensagem do card diz
+                # "Nao houve cobranca por esta geracao". Repetir aqui, dentro de
+                # `consultar`, e o que faz o orquestrador nem tomar conhecimento:
+                # `_esperar` ve RODANDO e continua o polling, sem gastar tentativa do
+                # job nem reabrir navegador. O usuario decidiu que nao quer notificacao
+                # — entao a repeticao tem que ser invisivel e barata.
+                self._repeticoes[(s.conta.id, id_remoto)] = vezes + 1
                 await self._clicar_unico(card, sel.BOTAO_REPETIR_CARD,
                                          f"repetir {id_remoto}")
                 await pagina.wait_for_timeout(3000)
@@ -749,7 +797,8 @@ class TransportePlaywright:
         # assumir VIDEO quando o modo nao e conhecido e o default seguro: pedir "720p"
         # num menu de imagem nao acha rotulo e `escolher_opcao` grita, enquanto pedir
         # "Tamanho original" num menu de video baixaria em silencio o errado.
-        chave = sel.BAIXAR[RESOLUCAO[self._modo_do_card.get(id_remoto, Modo.T2V)]]
+        chave = sel.BAIXAR[
+            RESOLUCAO[self._modo_do_card.get((s.conta.id, id_remoto), Modo.T2V)]]
         submenu = pagina.locator(sel.MENU_CARD).last
         itens = submenu.locator(sel.MENU_ITEM)
         # os rotulos do submenu tem QUEBRA DE LINHA ("270p\nGIF animado"): passar o

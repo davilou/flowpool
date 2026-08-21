@@ -545,3 +545,154 @@ def test_acento_e_segredo_continuam_saindo():
     # `seguro` tambem passa por `sem_acento`, que baixa a caixa: a mascara sai
     # minuscula, e e assim que ela aparece no log
     assert "<mascarado>" in seguro("token ya29.AbCdEf123")
+
+
+# --- geracoes simultaneas: a chave dos cards e (conta, card) ------------
+#
+# `id_remoto` e POSICIONAL: `card-0` quer dizer "o primeiro item da grade DAQUELA
+# conta". Com duas geracoes ao mesmo tempo em contas diferentes, as duas produzem
+# `card-0`, e uma tabela indexada so pelo card faria um job baixar a resolucao
+# escolhida pelo outro.
+
+
+def test_dois_cards_de_mesmo_nome_em_contas_diferentes_nao_se_misturam():
+    t = TransportePlaywright()
+    t._modo_do_card[(1, "card-0")] = Modo.IMAGEM
+    t._modo_do_card[(2, "card-0")] = Modo.T2V
+    t._repeticoes[(1, "card-0")] = 2
+    t._repeticoes[(2, "card-0")] = 0
+
+    assert t._modo_do_card[(1, "card-0")] is Modo.IMAGEM
+    assert t._modo_do_card[(2, "card-0")] is Modo.T2V
+    assert t._repeticoes[(2, "card-0")] == 0
+
+
+# --- o aviso de direitos aparece NO MEIO do upload ----------------------
+
+
+class _LocatorContado:
+    def __init__(self, pagina, seletor):
+        self.pagina = pagina
+        self.seletor = seletor
+
+    async def count(self):
+        return self.pagina.quantos(self.seletor)
+
+    async def click(self, timeout=None):
+        self.pagina.clicados.append(self.seletor)
+        if self.seletor == sel.BOTAO_CONCORDO:
+            self.pagina.aviso_aceito = True
+
+
+class _PaginaComAviso:
+    """A tela do seletor de midia durante um upload que trava atras do aviso.
+
+    Reproduz o que foi medido em producao: o modal so aparece quando o Flow COMECA a
+    receber o arquivo (aqui, na volta 6 do laco — uns 3 s), e enquanto ele estiver na
+    tela o item nunca fica pronto.
+    """
+
+    def __init__(self, aparece_na_volta=6, pronto_apos=2):
+        self.voltas = 0
+        self.aparece_na_volta = aparece_na_volta
+        self.pronto_apos = pronto_apos
+        self.aviso_aceito = False
+        self.voltas_com_aviso_aceito = 0
+        self.clicados = []
+
+    @property
+    def aviso_na_tela(self):
+        return self.voltas >= self.aparece_na_volta and not self.aviso_aceito
+
+    def quantos(self, seletor):
+        if seletor in (sel.AVISO_DIREITOS, sel.VEU_ABERTO):
+            return 1 if self.aviso_na_tela else 0
+        if seletor == sel.BOTAO_CONCORDO:
+            return 1 if self.aviso_na_tela else 0
+        return 0
+
+    def locator(self, seletor):
+        return _LocatorContado(self, seletor)
+
+    async def evaluate(self, script, seletor):
+        # o item so fica PRONTO (com miniatura) depois de o aviso sair da tela
+        if self.aviso_aceito:
+            self.voltas_com_aviso_aceito += 1
+        pronto = self.aviso_aceito and self.voltas_com_aviso_aceito > self.pronto_apos
+        return [{"texto": "gato.png", "selecionado": False,
+                 "miniaturas": 1 if pronto else 0}]
+
+    async def wait_for_timeout(self, ms):
+        self.voltas += 1
+
+
+async def test_o_aviso_de_direitos_e_pego_quando_aparece_no_meio_do_upload():
+    # ANTES: a checagem era uma janela fixa de 2 s ANTES da espera. O aviso chega
+    # entre 7 e 17 s (o tempo do upload), entao ela quase nunca o encontrava: o modal
+    # ficava na tela, a espera contava ate 180 s e a conta perdia a primeira tentativa
+    # inteira. Uma vez em CADA conta do pool — com cinco estreando em paralelo, cinco
+    # jobs perdendo a estreia juntos.
+    pagina = _PaginaComAviso()
+    indice = await TransportePlaywright()._esperar_item_pronto(
+        pagina, "gato.png", teto_ms=60_000)
+
+    assert indice == 0
+    assert pagina.aviso_aceito is True
+    assert sel.BOTAO_CONCORDO in pagina.clicados
+
+
+async def test_upload_sem_aviso_nao_clica_em_nada():
+    # a ausencia e o caso comum: o aviso existe uma vez por conta, e todas as geracoes
+    # seguintes nao podem pagar preco nenhum por ele
+    pagina = _PaginaComAviso(aparece_na_volta=10_000)
+    pagina.aviso_aceito = True          # ja aceito ha muito tempo nesta conta
+    indice = await TransportePlaywright()._esperar_item_pronto(
+        pagina, "gato.png", teto_ms=60_000)
+
+    assert indice == 0
+    assert pagina.clicados == []
+
+
+# --- o card de falha e reconhecido pela estrutura -----------------------
+
+
+class _CardFalso:
+    def __init__(self, presentes):
+        self.presentes = presentes
+
+    def locator(self, seletor):
+        return _LocatorContado(self, seletor)
+
+    def quantos(self, seletor):
+        return 1 if seletor in self.presentes else 0
+
+
+async def test_a_falha_antiga_continua_reconhecida():
+    assert await TransportePlaywright()._card_falhou(
+        _CardFalso({sel.CARD_FALHA})) is True
+
+
+async def test_a_falha_de_audio_tambem_e_reconhecida():
+    # VISTO EM PRODUCAO 2026-08-21: "Falha ao gerar audio. Tente usar outro comando ou
+    # envie feedback." nao casava `text="Ops! Algo deu errado"`, e `consultar` devolvia
+    # RODANDO ate o timeout de dez minutos. Para o usuario, "travado".
+    assert await TransportePlaywright()._card_falhou(
+        _CardFalso({sel.CARD_FALHA_TITULO})) is True
+
+
+async def test_card_normal_nao_e_falha():
+    assert await TransportePlaywright()._card_falhou(_CardFalso(set())) is False
+
+
+def test_o_titulo_da_falha_e_ancorado():
+    # sem a ancora, "Falha ao gerar audio" no CORPO do card — ou qualquer "falhou"
+    # perdido na tela — viraria falso positivo e mataria geracao boa
+    assert sel.CARD_FALHA_TITULO.startswith("text=/^")
+    assert sel.CARD_FALHA_TITULO.endswith("$/")
+
+
+def test_desligar_o_audio_continua_por_medir():
+    # o caminho vale mais que o conserto: o usuario descarta o audio de todo video, e
+    # desligar audio nas configuracoes faria a classe inteira de falha deixar de
+    # existir. Mexer em configuracao da conta dele precisa da autorizacao dele.
+    assert sel.CONFIG_SEM_AUDIO == sel.PENDENTE
