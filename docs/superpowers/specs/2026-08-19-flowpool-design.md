@@ -7,6 +7,8 @@ Playwright, visibilidade de janela, deep link, varredura de DOM, locale na URL, 
 por texto). Propagadas nas seções *Restrições assumidas*, *Projetos*, *Transporte* e *Erro
 e observabilidade*. Referência primária: `flowpool/transporte/pw/seletores.py`.
 
+**Revisão de 2026-08-21 — gerações simultâneas.** Três medições novas, e uma delas **corrige uma afirmação errada** que este documento carregava: janela do Chrome **coberta por outra não congela** — ela fica `visible`, porque o Playwright passa `--disable-backgrounding-occluded-windows`. Com isso o teto de simultâneos deixou de ser sobre espaço de tela e passou a ser sobre **contas livres**. As outras duas vieram de produção: o aviso de direitos aparece no meio do upload (não antes), e o card de falha tem mais de uma redação. Propagadas em *Fila e execução*, *Escolha de conta* e *Transporte*.
+
 **Segunda revisão de campo:** 2026-08-20 — o mapeamento do **painel de configuração da
 geração** (`tune Configurações`) mostrou quatro grupos: confirmação, proporção,
 quantidade e **dois** dropdowns de modelo (um de imagem, um de vídeo). Daí três decisões
@@ -209,7 +211,7 @@ Acima do limiar, o delta com sinal e o valor lido viram um evento `divergencia`.
 
 ## Escolha de conta
 
-Função pura: `escolher(contas, modelo, agora, quantidade=1, duracao=None) -> Conta | None`.
+Função pura: `escolher(contas, modelo, agora, quantidade=1, duracao=None, ocupadas=frozenset()) -> Conta | None`.
 
 O parâmetro é o **modelo**, não um custo: o custo depende do tier (Ultra paga 10 por um Fast que custa 20 na grátis), então um número único não descreveria um pool misto — e é o modelo, não o custo, que diz se o job é Quality e portanto proibido em conta grátis.
 
@@ -221,8 +223,11 @@ A **duração** entra pela mesma porta e pela mesma razão. Ela não multiplica,
 
 (`prioridade` no job é outra coisa: ordena a **fila**, não influencia a conta. Inteiro, maior primeiro, empate resolvido por ordem de chegada.)
 
+As **ocupadas** entram por último e pelo mesmo princípio: é o conjunto de ids que já têm uma geração em curso, e ele vem **explícito**, não filtrando a lista antes de chamar. A regra de exclusão fica num lugar só, testável sem subir motor nenhum, e a função continua pura — quem está gerando agora é estado de processo do orquestrador, não dado do domínio, e por isso atravessa como parâmetro em vez de virar coluna.
+
 Política, com o porquê:
 
+0. Descarta conta **ocupada**. Um job por conta, um navegador por conta: dois Chromes com o mesmo `--user-data-dir` não coexistem. Não é preferência nem balanceamento — é o que o sistema operacional permite.
 1. Descarta conta sem sessão viva, inativa, ou com saldo abaixo do custo **total** do pedido (custo de uma geração naquela `duracao` × `quantidade`).
 2. Descarta conta com `seca_ate` no futuro — o Flow já recusou gerar nela apesar do saldo aparente, e insistir antes do prazo é o laço quente descrito em *Modelo de dados*.
 3. Descarta conta grátis quando o pedido não cabe no teto diário — sempre o caso de Quality (59 no clipe mais curto, contra 50), e também de qualquer lote cujo total estoure o teto. A duração conta aqui nas duas direções: três clipes de 8s (60) estouram o teto, três de 4s (36) não.
@@ -230,7 +235,9 @@ Política, com o porquê:
 5. Entre contas do mesmo tier, a de maior saldo — espalha o uso e evita deixar sobras inúteis de 5 créditos espalhadas pelo pool.
 6. Nenhuma serve: o job volta para a fila com um horário de reavaliação (o próximo reset conhecido), em vez de falhar.
 
-Uma exceção antes de tudo isso: job que volta para a fila **com `id_remoto`** tem geração paga em curso no Flow, e ela só pode ser retomada de dentro da conta que a criou. Nesse caso a conta anterior tem preferência, e a política acima só entra se ela não servir mais.
+**Custo zero dispensa as regras de crédito — e "seca" é uma delas.** Imagem foi medida em zero três vezes. Quando o custo total do pedido é zero, os itens 1 (saldo) e 2 (`seca_ate`) deixam de valer: exigir saldo de quem não vai gastar nada tira do pool uma conta capaz de fazer, de graça, o que o job pede; e "seca" quer dizer literalmente *sem crédito*, um carimbo que não diz nada sobre imagem. O que **não** afrouxa: sessão expirada, conta bloqueada e conta desativada continuam fora sempre — sem login não há o que clicar, pago ou não. E a conta ocupada (item 0) também continua fora: o limite dela é o perfil do Chrome, não o crédito.
+
+Uma exceção antes de tudo isso: job que volta para a fila **com `id_remoto`** tem geração paga em curso no Flow, e ela só pode ser retomada de dentro da conta que a criou. Nesse caso a conta anterior tem preferência, e a política acima só entra se ela não servir mais. Se aquela conta estiver **ocupada**, o job **espera** em vez de trocar: esperar custa minutos, trocar abandona crédito já gasto — um Quality de 11 minutos custa 200 créditos e não entrega nada.
 
 ## Projetos
 
@@ -277,9 +284,37 @@ O transporte não decide projeto: ele lista, cria e abre. Quem decide é o motor
 
 ## Fila e execução
 
-Um worker por conta viva, com teto global de simultâneos (configurável; começa em 3 — cada worker segura um navegador enquanto o transporte for A).
+**Gerações simultâneas, uma por conta.** `passo()` reivindica um job, **reserva a conta** e solta a geração numa tarefa de fundo; o laço volta a reivindicar enquanto houver vaga e conta livre. Com cinco contas livres e cinco jobs na fila, as cinco gerações começam em cinco voltas seguidas do laço, sem esperar nenhuma terminar.
 
-**Puxar da fila é atômico.** O worker adquire o teto de simultâneos *antes* de puxar, e a leitura do job e a marcação de `rodando` acontecem numa instrução só (`UPDATE ... RETURNING`). Ler primeiro e marcar depois deixa entre os dois uma janela em que o job continua `pendente` e visível para todo mundo: com três workers e teto 1, dois jobs viraram três gerações e 60 créditos gastos em vez de 40, e o worker perdedor sobrescreveu o arquivo do vencedor.
+### A invariante: um job por conta, um navegador por conta
+
+Não é preferência nem balanceamento de carga. Dois Chromes com o mesmo `--user-data-dir` **não coexistem**: o segundo entrega a URL ao primeiro e morre, e o Playwright vê `TargetClosedError`. É o sistema operacional falando, não o desenho.
+
+Ela paga um segundo problema de graça: **escrita concorrente na tabela `conta`**. `salvar_conta` grava a linha inteira a partir de uma cópia carregada no começo do passo, então dois trabalhadores na mesma conta produziriam escrita perdida a cada cruzamento. Com a conta exclusiva, dois trabalhadores nunca tocam a mesma linha. (A escrita campo a campo de `marcar_sessao` continua onde está — ela cobre o caso em que a conta muda de mão entre passos, não a corrida entre dois workers.)
+
+O que **também** abre navegador e por isso também toma a conta: a **leitura de saldo** (`semear_saldo`). Ela é chamada pelo motor e por três rotas do painel, e a trava mora dentro dela justamente por isso — proteger só o caminho do motor deixaria o botão "reler saldo" abrindo um segundo Chrome no perfil de uma conta que está gerando. Pelo mesmo motivo, `POST /contas/{id}/revalidar` recusa conta ocupada com 409: revalidar abre um Chrome de **login** no mesmo perfil e derrubaria o job junto.
+
+### O teto — e o que o decide de verdade
+
+`MAX_SIMULTANEOS = 5`, configurável por `FLOWPOOL_MAX_SIMULTANEOS`.
+
+O teto efetivo é o **menor entre três coisas**, e a que costuma mandar é a primeira:
+
+1. **Quantas contas estão livres.** Uma geração por conta, sempre. Com cinco contas cadastradas, cinco é o máximo teórico de qualquer jeito, e o parâmetro só vira limite quando houver mais contas do que ele.
+2. **O teto configurado.**
+3. **A memória.** Cada Chrome custa entre 400 MB e 1 GB. A máquina tem 62 GB, ~30 GB livres com o ComfyUI residente — folgado para cinco. Mas a memória é **compartilhada com o ComfyUI**, que gera imagem e vídeo localmente no mesmo computador: com os dois trabalhando juntos, 5 pode apertar. Se a máquina engasgar, **baixar este número é a primeira coisa a tentar**, e a variável de ambiente existe exatamente para isso.
+
+O que **não** decide o teto: espaço de tela. Ver a correção em *Transporte* — janela coberta continua `visible`, porque o Playwright sobe o Chrome com `--disable-backgrounding-occluded-windows`. As janelas podem se sobrepor à vontade.
+
+O rastro de contas ocupadas mora **em memória, no orquestrador**, não no banco. É estado de processo, não dado do domínio, e um restart o limpa naturalmente — que é exatamente o certo, porque depois de um restart não há navegador nenhum aberto. Uma coluna no banco precisaria de limpeza no boot para não deixar o pool inteiro marcado como ocupado por um crash.
+
+**Puxar da fila é atômico, e reservar a conta acontece antes de soltar a tarefa.** A leitura do job e a marcação de `rodando` acontecem numa instrução só (`UPDATE ... RETURNING`): ler primeiro e marcar depois deixa entre os dois uma janela em que o job continua `pendente` e visível para todo mundo — com três workers, dois jobs viraram três gerações e 60 créditos gastos em vez de 40, e o worker perdedor sobrescreveu o arquivo do vencedor. A reserva da conta obedece à mesma regra por um motivo simétrico: ela é feita **antes** de `create_task`, sem nenhum `await` no meio. Com a reserva dentro da tarefa, dois passos seguidos reivindicariam dois jobs e escolheriam a **mesma** conta, porque a primeira tarefa ainda não teria começado a rodar.
+
+**A conta é devolvida num `finally`, inclusive quando o job falha.** Conta que não volta some da escolha para sempre: o pool encolhe a cada erro e o motor vai parando sem ninguém entender por quê.
+
+**O motor não reivindica job que não teria onde rodar.** Antes de puxar, ele confere se existe conta viva livre. Sem essa pergunta, com as janelas cheias, cada volta do laço puxaria mais um job só para empurrá-lo trinta segundos à frente — a fila inteira remexida por nada. (Pool com **nenhuma** conta viva é o caso oposto e o job *precisa* ser puxado: é a recusa dele que vira o evento que o painel usa para explicar por que nada anda.)
+
+**"Nenhuma conta serve" e "as que servem estão ocupadas" são esperas diferentes.** A primeira aguarda o reset diário (`ESPERA_RESET`, uma hora, evento `sem_conta_apta`); a segunda aguarda a janela do vizinho fechar (`ESPERA_JANELA`, trinta segundos, evento `sem_conta_livre`). Adiar por uma hora um job que só esbarrou numa janela ocupada deixaria o pool ocioso com a fila cheia.
 
 **Há recuperação no boot.** Antes de o motor puxar qualquer coisa nova, todo job deixado em `rodando` por um crash anterior é resolvido — a fila só olha para `pendente`, então sem isso ele nunca seria retomado nem falharia, e o crédito que ele reservou nunca voltaria. A diferença é o `id_remoto`: vazio significa que o Flow nunca aceitou o pedido, então a reserva é estornada e o job volta para `pendente` sem gastar tentativa (não foi ele que falhou, foi a máquina); preenchido significa que existe geração lá fora, já paga, e aí o job volta preservando `id_remoto` e conta, sem estorno. Cada caso vira evento (`recuperado_sem_gerar`, `recuperado_com_geracao`).
 
@@ -306,7 +341,13 @@ Cada leitura vira evento — `saldo_semeado` com o valor lido e o anterior, `sal
 
 **O laço do motor não morre em silêncio.** Toda exceção que escapa de um passo vira evento (`passo_falhou`) e o laço continua. Sem isso a task do motor termina e ninguém observa: a API segue respondendo HTTP normalmente enquanto a fila nunca mais anda.
 
-**Geração falha é repetida pelo card, e o motor nem fica sabendo.** Medido em 20/08: um card que falha mostra "Ops! Algo deu errado" e um botão `redo` **no próprio card, que repete sem cobrar de novo**. O transporte clica nele durante `consultar` e devolve `rodando` — então o polling do motor simplesmente continua, sem gastar tentativa do job, sem devolver à fila e sem reabrir navegador. Decisão do Davi: **não quer notificação**; a repetição tem que ser invisível e barata, e é o `redo` que a torna barata. Só depois de esgotadas as repetições o job vira falha de verdade.
+**Geração falha é repetida pelo card, e o motor nem fica sabendo.** Medido em 20/08: um card que falha mostra um botão `redo` **no próprio card, que repete sem cobrar de novo** — a mensagem do card diz literalmente *"Não houve cobrança por esta geração"*. O transporte clica nele durante `consultar` e devolve `rodando` — então o polling do motor simplesmente continua, sem gastar tentativa do job, sem devolver à fila e sem reabrir navegador. Decisão do Davi: **não quer notificação**; a repetição tem que ser invisível e barata, e é o `redo` que a torna barata. Só depois de esgotadas as repetições o job vira falha de verdade.
+
+O teto de repetições é **4**, e a conta é assimétrica. Medido em 21/08: um caso real precisou de **2** repetições — saiu na terceira —, ou seja, o teto anterior de 2 batia exatamente no limite e não tinha margem nenhuma. Repetir pelo card custa só tempo; desistir cedo custa o job inteiro (nova tentativa, navegador reaberto, chip reconfigurado, referências re-anexadas). O teto continua existindo porque falha que persiste quatro vezes não é transitória: é problema de verdade, e aí o job deve falhar e aparecer para a pessoa.
+
+O card de falha é reconhecido pela **estrutura, não pela frase**. Visto em produção (21/08): *"Falha ao gerar áudio. Tente usar outro comando ou envie feedback."* não casava o `text="Ops! Algo deu errado"` decorado, então `consultar` não reconhecia a falha, não clicava no `redo` e devolvia `rodando` até o timeout de dez minutos — para o usuário, "travado". Agora casa o título "Falha" sozinho e ancorado, **ou** a frase antiga. E o clique só acontece com **exatamente um** candidato dentro do card: o card tem três botões em fila e um deles **apaga**. Com zero ou dois, o transporte desiste e devolve falha — errar entre repetir e apagar joga fora o trabalho do usuário. Pelo mesmo motivo `BOTAO_REPETIR_CARD` entrou nos **não curáveis**.
+
+**A medir, e vale mais que o conserto acima:** a própria mensagem sugere *"Você pode atualizar suas configurações para retornar vídeos sem áudio"*. O `PIPELINE.md` diz que a modelo nunca fala e que o áudio nativo é descartado — ou seja, todo áudio gerado vai para o lixo. Desligar áudio nas configurações do Flow faria essa classe inteira de falha **deixar de existir**, e provavelmente gera mais rápido. O seletor está registrado como `CONFIG_SEM_AUDIO = PENDENTE`; o caminho ainda não foi medido, e **mexer em configuração da conta exige autorização do Davi**.
 
 **Proxy morto não é conta morta.** Falha de conexão por proxy indisponível
 (`net::ERR_PROXY_CONNECTION_FAILED` e parentes) é **falha de rede**: gasta tentativa,
@@ -325,7 +366,9 @@ caçando outro bug, acrescentar uma marcação de saúde àquele ramo.
 
 **Instabilidade do Google não é problema da conta.** O Flow mostra um banner — *"Flow is currently experiencing high demand, affecting video generation"* — em pico de demanda. Falha sob esse aviso **nunca** pode marcar a conta como seca nem como expirada: seria um pico do Google derrubando o pool inteiro de uma vez, e cada conta assim marcada exige reset estimado ou login humano para voltar. O transporte trata isso levantando o erro genérico de geração, que o motor já sabe repetir sem tocar na saúde da conta.
 
-**O teto de simultâneos é sobre janelas visíveis, e começa em 1.** Ver *Transporte* para as duas medições que derrubaram o 3.
+**Nada em `_executar` supõe execução única.** `job` e `conta` são objetos próprios de cada passo, e como a conta é exclusiva, `salvar_conta` nunca disputa a mesma linha. O que é compartilhado está serializado: a conexão do sqlite tem trava (`_Conexao`), o `registrar_projeto` já é upsert, e o transporte guarda o estado de card por **(conta, card)** — ver a nota abaixo.
+
+**`id_remoto` é posicional, e por isso a chave do transporte é o par.** `card-0` significa "o primeiro item da grade *daquela* conta". Com duas gerações ao mesmo tempo em contas diferentes, as duas produzem `card-0`; as tabelas `_repeticoes` e `_modo_do_card` do transporte, indexadas só pelo card, fariam um job baixar a resolução escolhida pelo outro — vídeo em "Tamanho original", imagem em "720p" — e contar as repetições do vizinho. A chave é `(conta, card)`; as três chamadas que precisam disso (`gerar`, `consultar`, `baixar`) já recebem a sessão.
 
 ## API HTTP
 
@@ -529,10 +572,11 @@ A autenticação **é** replicável: cookie `__Secure-next-auth.session-token` �
 Consequências diretas para a implementação:
 
 - **Usar `channel="chrome"`, apontando para uma instalação real do Chrome.** O Chromium empacotado do Playwright é rejeitado pelo stack de auth do Google. Falhar cedo e com mensagem clara se o Chrome não for encontrado. Isso vale para o Chrome que **opera** a sessão já autenticada — o login em si não passa por aqui, ver *Restrições assumidas*.
-- **Headless está fora, mas não basta não ser headless.** Medido em campo (20/08): `document.visibilityState` só fica `'visible'` com a janela realmente visível — minimizada, fora de tela ou em aba de segundo plano conta como oculta para o navegador, e isso impede o `IntersectionObserver` de disparar. Duas partes da UI dependem dele: o botão "Continuar" do aviso de privacidade do onboarding nunca habilita, e os cards da lista de projetos nunca terminam de renderizar. Cada worker precisa portanto de uma janela de verdade ocupando espaço de tela — não dá para escondê-la atrás de outra janela nem jogá-la para fora da área visível.
-- **O teto de simultâneos deixa de ser sobre RAM/CPU e passa a ser sobre espaço de tela.** Cada worker precisa de uma janela visível de verdade, então o teto real é quantas janelas cabem visíveis ao mesmo tempo na máquina do Davi — não quantos processos de Chrome ela aguenta. O número 3 é um chute de partida herdado do raciocínio antigo (RAM) e **precisa ser reavaliado por medição** assim que a Task 9+ estiver rodando. Fica em aberto, e a medir, se a geração em si — não só o onboarding e a lista — também depende de visibilidade.
+- **Headless está fora, mas janela coberta está dentro.** Medido em campo (20/08): `document.visibilityState` só fica `'visible'` com a janela realmente visível — minimizada ou em aba de segundo plano conta como oculta para o navegador, e isso impede o `IntersectionObserver` de disparar. Duas partes da UI dependem dele: o botão "Continuar" do aviso de privacidade do onboarding nunca habilita, e os cards da lista de projetos nunca terminam de renderizar.
+
+  **CORREÇÃO (21/08) — a parte sobre janela COBERTA era falsa.** Este spec afirmou por semanas que o Chrome no Windows marca como oculta a janela totalmente coberta por outra, e que por isso as janelas não podiam se sobrepor. **Medido na máquina do usuário: a janela ficou `visible` por 90 segundos seguidos, coberta ou não.** O Playwright sobe o Chrome com `--disable-backgrounding-occluded-windows`, que impede exatamente esse comportamento. As janelas **podem se sobrepor à vontade** — só não podem ser minimizadas nem headless.
 - **Seletores são por texto/role, nunca por classe CSS.** As classes são styled-components com hash (`button.sc-e8425ea6-0.hOBPaw`) e mudam a cada deploy do Google; os textos vêm de um dicionário i18n versionado, e é por eles que a navegação se mantém estável entre deploys. Ver `flowpool/transporte/pw/seletores.py`.
-- **O teto de simultâneos começa em 1, não em 3.** O 3 era chute herdado do raciocínio de RAM. Duas razões medidas o derrubam: o Chrome no Windows marca como oculta a janela **totalmente coberta por outra**, e uma janela oculta trava a interface sem erro; e duas sessões no mesmo perfil são impossíveis, porque dois Chromes com o mesmo `--user-data-dir` fazem o segundo entregar para o primeiro. O teto real é "quantas janelas de contas distintas cabem visíveis lado a lado", e isso se mede na máquina, não se estima.
+- **O teto de simultâneos é 5, e o que o decide não é a tela.** Com a correção acima, sobra apenas uma restrição dura, e ela vale por duas: **duas sessões no mesmo perfil são impossíveis**, porque dois Chromes com o mesmo `--user-data-dir` fazem o segundo entregar a URL ao primeiro e morrer (`TargetClosedError` do lado do Playwright). Disso sai a invariante que organiza o motor inteiro: **um job por conta, um navegador por conta**. Ver *Fila e execução* para o teto e para o que ele custa.
 - **C (híbrido) fica como otimização futura**, restrita ao que não é vídeo: leitura de saldo e possivelmente geração de imagem. Vale medir depois que o A estiver de pé, nunca antes.
 
 ### Modo direto (chip) ou agente conversacional — DECIDIDO: direto
@@ -547,6 +591,18 @@ O Flow tem dois caminhos para disparar uma geração, e eles trocam propriedades
 O padrão é o **direto**, e o critério é o modo de falha. O agente pode responder qualquer coisa — inclusive pedir esclarecimento — e um robô esperando "Aprovar" fica pendurado até o timeout, queima as três tentativas e marca o job como falho sem dizer o porquê. O chip é uma máquina de estados pequena e legível.
 
 O preço é ser **cego ao preço**. Quem cobre esse buraco é a reconciliação de saldo que já existe: leitura real depois de cada job, evento `divergencia`, tabela de custos servindo só para reservar antes. Vale registrar o que se abre mão: pelo agente, o custo de **cada configuração** viria de graça no texto (a mesma família de pedido anunciou 7 e 15 créditos em ajustes diferentes), e é exatamente a informação que a tabela por modelo não modela. Se um dia o custo por configuração passar a importar mais do que o determinismo, o agente é o caminho — e a leitura do custo é a única coisa que ele faz melhor.
+
+### O aviso de direitos, e por que ele é vigiado durante o upload inteiro
+
+O Flow mostra um modal *"Aviso — verifique se você tem os direitos necessários"* na **primeira vez que cada conta envia um arquivo**, e ele bloqueia o upload enquanto estiver na tela.
+
+Medido em produção (21/08, job #19, conta estreando): a conta perdeu **uma tentativa inteira e ~180 s** — 257 s do início ao fim, contra ~60 s do normal. A causa era a forma da checagem: uma janela fixa de 2 s **antes** da espera do upload. Mas o aviso só aparece quando o Flow **começa a receber** o arquivo, e o upload leva de 7 a 17 segundos; nos 2 s iniciais ele quase nunca estava lá. A função voltava sem fazer nada, o modal ficava na tela, e a espera contava até 180 s por uma miniatura que não vinha.
+
+A checagem passou para **dentro do laço da espera**: a cada volta, se o aviso estiver na tela, dispensa e continua esperando. Não bloqueante — uma contagem por volta, que para assim que o aviso for dispensado, porque a ausência é o caso de todas as gerações seguintes.
+
+Isso acontece **uma vez em cada conta do pool**. Com o paralelismo, cinco contas estreando ao mesmo tempo significariam cinco jobs perdendo a primeira tentativa juntos.
+
+O clique em "Concordo" continua sendo comportamento **autorizado pelo Davi**, e `BOTAO_CONCORDO` continua entre os não curáveis: aceitar termo em nome do usuário não é conserto de interface.
 
 ### Configurou, confere — regra dura
 
@@ -709,6 +765,8 @@ A **duração** ganha o teste gêmeo, e pelo mesmo raciocínio: **conta com sald
 **O impasse do pool que nasce morto tem teste próprio, e ele é o mais importante da suíte de motor:** conta com saldo `0` no banco, 50 no transporte, um job na fila — depois de N passos, o job **rodou**. Escrito antes da correção, ele falhava exatamente como o defeito se manifestava em produção: job `pendente`, zero tentativas, nenhum erro. Um teste que só afirmasse sobre o saldo passaria sem provar nada; a asserção tem que ser sobre o job ter andado.
 
 Ele vem acompanhado do teste que o equilibra: **conta com `saldo_confiavel` verdadeiro e saldo insuficiente não é relida.** Sem essa segunda asserção, a correção do impasse transformaria um pool legitimamente seco num laço de abrir e fechar navegador — e a prova é a contagem de sessões abertas no transporte falso, não o estado final do banco, porque o estado final não distingue "não abriu" de "abriu e não adiantou".
+
+**A simultaneidade é provada pelo transporte falso, não pelo relógio.** Ele conta as sessões abertas **ao mesmo tempo** (`pico_abertas`) e registra `colisoes` — toda vez que uma conta chega a ter duas sessões abertas de uma vez. Medir por tempo total seria frouxo: duas gerações sequenciais rápidas passariam. Sete cenários ficam presos: dois jobs em duas contas livres rodam juntos (pico 2); com uma conta livre o segundo espera sem estourar e sem ser adiado; conta ocupada perde para uma conta pior; o teto segura o terceiro job mesmo com conta livre; a conta volta ao pool quando o job **falha** e quando a sessão morre; job de imagem roda em conta com saldo 0 e em conta seca, enquanto o de vídeo não roda em nenhuma das duas; e a semeadura de saldo recusa abrir navegador em conta ocupada. Em todos, `colisoes` tem que estar vazia — é ela que prende a invariante.
 
 O transporte real é verificado à mão contra o Flow, não em CI. Três coisas do chip só se provam ali:
 

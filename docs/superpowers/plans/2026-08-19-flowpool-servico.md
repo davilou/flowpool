@@ -6572,18 +6572,18 @@ from flowpool.transporte.pw.transporte import TransportePlaywright
 RAIZ = Path(__file__).resolve().parent.parent   # a pasta "Tiktok Shop"
 BANCO = RAIZ / "flowpool" / "flowpool.db"
 
-# UM por enquanto, e o motivo nao e RAM.
+# Quantas geracoes ao mesmo tempo. Padrao 5, configuravel por
+# `FLOWPOOL_MAX_SIMULTANEOS`.
 #
-# Cada worker precisa de uma janela de Chrome VISIVEL: o IntersectionObserver que
-# renderiza a lista de projetos e libera o aviso de privacidade nao dispara com
-# `visibilityState == 'hidden'`, e o Chrome no Windows marca como oculta a janela que
-# esta totalmente coberta por outra. Duas janelas empilhadas numa tela so sao uma
-# janela funcionando e outra travada sem erro nenhum.
+# CORRECAO (21/08): a versao anterior dizia que janela COBERTA por outra congela a
+# interface. E FALSO — medido na maquina do usuario, a janela ficou `visible` por 90s
+# seguidos, coberta ou nao, porque o Playwright sobe o Chrome com
+# `--disable-backgrounding-occluded-windows`. As janelas podem se sobrepor.
 #
-# Alem disso, duas sessoes no mesmo perfil sao impossiveis: dois Chromes com o mesmo
-# --user-data-dir fazem o segundo entregar para o primeiro. O teto so pode subir com
-# contas distintas E espaco de tela — medir na Task 14, Step 6.
-MAX_SIMULTANEOS = 1
+# O que continua verdadeiro: duas sessoes no mesmo perfil sao impossiveis, porque dois
+# Chromes com o mesmo --user-data-dir fazem o segundo entregar para o primeiro. O teto
+# real e o numero de CONTAS LIVRES, nao de janelas.
+MAX_SIMULTANEOS = teto_do_ambiente()
 
 
 def main() -> None:
@@ -6602,7 +6602,8 @@ if __name__ == "__main__":
 
 ```python
 def criar_app(repo: Repo, transporte: FlowTransport, raiz: Path | str,
-              rodar_motor: bool = False, max_simultaneos: int = 3) -> FastAPI:
+              rodar_motor: bool = False,
+              max_simultaneos: int = MAX_SIMULTANEOS) -> FastAPI:
     orq = Orquestrador(repo, transporte, raiz, max_simultaneos=max_simultaneos)
 ```
 
@@ -6695,11 +6696,11 @@ AVISO_SEM_CREDITO = 'text=/<o texto medido>/i'
 
 Rode `conferir.py` de novo — o resumo tem que fechar em `0 faltando, 0 pendentes`.
 
-- [ ] **Step 6: Medir o teto de simultâneos**
+- [x] **Step 6: Medir o teto de simultâneos** — MEDIDO 21/08, e o resultado derruba a premissa deste step.
 
-Com **duas** contas cadastradas e `MAX_SIMULTANEOS = 2`, dispare dois jobs de produtos diferentes e observe as duas janelas do Chrome lado a lado, **sem sobreposição**. Se ambas concluírem, o teto 2 é real nesta máquina; se a janela de trás travar sem erro, o Chrome a marcou como ocluída e o teto continua 1.
+A pergunta que ele fazia ("as janelas cabem lado a lado sem sobreposição?") estava errada. Medição na máquina do usuário: **a janela ficou `visible` por 90 segundos seguidos, coberta ou não** — o Playwright sobe o Chrome com `--disable-backgrounding-occluded-windows`, que impede o Chrome de marcar como ocluída uma janela tapada por outra. As janelas podem se sobrepor à vontade.
 
-Anote o número medido em `MAX_SIMULTANEOS` e no LEIA-ME. Este é o número que o spec deixou explicitamente em aberto — deixar 3 chutado ali era o que transformaria "não cabe na tela" num job travado sem mensagem.
+O teto real é o **número de contas livres**, não de janelas. `MAX_SIMULTANEOS = 5` (decisão do Davi: 62 GB de RAM, ~30 GB livres com o ComfyUI residente, cada Chrome entre 400 MB e 1 GB), configurável por `FLOWPOOL_MAX_SIMULTANEOS` — e baixar esse número é a primeira coisa a tentar se a máquina engasgar com o ComfyUI gerando junto. Ver *Fila e execução* no spec.
 
 - [ ] **Step 7: Escrever o LEIA-ME**
 
@@ -6775,8 +6776,9 @@ Use o caminho que `esperar` devolve — imagem sai em **.jpeg**, não em .png.
   cobra de novo. Não há notificação, de propósito.
 - Instabilidade do Google ("Flow is currently experiencing high demand") **não** marca
   a conta como seca nem expirada — é falha do Flow, não da conta.
-- Uma janela de Chrome **visível** por worker. Janela coberta por outra conta como
-  oculta e a geração trava sem erro. Por isso `MAX_SIMULTANEOS` começa em 1.
+- **Gerações simultâneas, uma por conta.** `MAX_SIMULTANEOS = 5`, configurável por
+  `FLOWPOOL_MAX_SIMULTANEOS`. As janelas podem se sobrepor — janela coberta continua
+  `visible`. O que limita é ter conta livre: dois Chromes não abrem o mesmo perfil.
 - `produto` é obrigatório: é a pasta de destino (`{produto}/clipes`, se você não mandar
   `destino`) e o nome do projeto no Flow.
 - Um projeto por produto **em cada conta** — projeto do Flow pertence a uma conta só.
