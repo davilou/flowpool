@@ -1086,6 +1086,32 @@ class TransportePlaywright:
         return (await card.locator(sel.CARD_FALHA).count() > 0
                 or await card.locator(sel.CARD_FALHA_TITULO).count() > 0)
 
+    async def _esperar_sair_da_falha(self, pagina, id_remoto: str, d: Diario,
+                                     teto_ms: int = 45_000) -> bool:
+        """Depois do `redo`, espera o card DEIXAR de ser card de falha.
+
+        Devolve se saiu. `False` nao e erro: e "ainda nao", e quem chama segue o
+        polling sem gastar outra repeticao — que era exatamente o gasto que
+        transformava uma falha em quatro.
+
+        O teto e generoso porque estourar aqui nao custa nada (o polling continua) e
+        encurtar custa a repeticao inteira. O card sai da falha quando o Flow assume a
+        nova geracao; isso demora bem mais que os 3 s que estavam aqui.
+        """
+        gasto = 0
+        while gasto < teto_ms:
+            await pagina.wait_for_timeout(500)
+            gasto += 500
+            try:
+                card = await self._card(pagina, id_remoto)
+            except GeracaoFalhou:
+                # o card sumiu da grade no meio da troca: isso E sair da falha
+                return True
+            if not await self._card_falhou(card):
+                return True
+            d.esperando(f"{id_remoto} sair do estado de falha depois do repetir")
+        return False
+
     async def consultar(self, s: Sessao, id_remoto: str) -> Estado:
         """Le o estado pela GRADE, nunca pela conversa.
 
@@ -1116,7 +1142,28 @@ class TransportePlaywright:
                     f"(gratuito, {vezes + 1} de {MAX_REPETICOES})")
                 await self._clicar_unico(card, sel.BOTAO_REPETIR_CARD,
                                          f"repetir {id_remoto}")
-                await pagina.wait_for_timeout(3000)
+                # ESPERA O ESTADO, NAO UM SONO. O `wait_for_timeout(3000)` daqui
+                # custou tres jobs marcados como falhos com o video GERADO na conta.
+                #
+                # MEDIDO nos tracos conta1-0007 e conta8-0008, identicos: 4 cliques em
+                # `redo`, 4 sonos de 3 s, 5 checagens de falha. O card NAO sai do
+                # estado de falha em 3 s — entao a volta seguinte do polling relia o
+                # MESMO card de falha, contava como falha nova, gastava mais uma
+                # repeticao e clicava em `redo` de novo. As quatro repeticoes se
+                # queimavam em ~12 segundos, e `consultar` devolvia FALHOU.
+                #
+                # E os `redo` FUNCIONAVAM: o ultimo quadro do traco mostra um card
+                # gerando a 21%. O Flow refazia o video e o codigo ja tinha desistido
+                # de olhar — o usuario via o video pronto na conta e o painel dizendo
+                # que falhou.
+                if not await self._esperar_sair_da_falha(
+                        pagina, id_remoto, self._diario(s.conta.id)):
+                    # nao saiu: nao adianta clicar de novo, e clicar de novo e
+                    # justamente o que fabricava o defeito. Devolve RODANDO e deixa a
+                    # proxima volta do polling reavaliar com a tela mais adiantada.
+                    self._diario(s.conta.id).passo(
+                        f"{id_remoto}: o card nao saiu da falha depois do repetir; "
+                        "seguindo o polling sem gastar outra repeticao")
                 return Estado.RODANDO
             # Sob o banner de alta demanda a falha e do Google, nao da conta. Levantar
             # SaldoInsuficiente ou SessaoMorta aqui marcaria a conta seca ou expirada e
