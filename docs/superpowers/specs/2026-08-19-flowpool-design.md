@@ -626,6 +626,45 @@ Isso acontece **uma vez em cada conta do pool**. Com o paralelismo, cinco contas
 
 O clique em "Concordo" continua sendo comportamento **autorizado pelo Davi**, e `BOTAO_CONCORDO` continua entre os não curáveis: aceitar termo em nome do usuário não é conserto de interface.
 
+### A referência é identificada por **id**, e nunca por nome nem por posição
+
+**O pior defeito visto neste app até hoje: duas referências viraram a mesma foto, sem erro, com o crédito gasto e um resultado plausível.** Nas palavras do usuário: *"eu joguei duas referências, duas fotos diferentes. Ele mandou as duas referências com uma segunda foto."* A conferência só contava **quantas** fichas entraram na barra do prompt; viu duas e aprovou.
+
+**A medição que fecha o caso (21/08).** O item da lista de mídia e a **ficha** da barra do prompt carregam o mesmo identificador, no `src` da miniatura: `.../media.getMediaUrlRedirect?name=<uuid>`. E — o fato decisivo — **dois itens de mesmo nome têm ids diferentes**, medido com dois `e511c628ec3c92a4.png` (`776d74d8…` e `095679c9…`). O nome do arquivo **não identifica nada**; o id identifica, e vale nos dois lados, que é o que torna possível conferir *qual* arquivo entrou.
+
+Três causas independentes, todas medidas, e as três eram necessárias para o estrago:
+
+**1. O homônimo velho do acervo.** O acervo do projeto **persiste entre jobs**, e os arquivos vêm de `_coladas/` com nome por hash — reusar a mesma personagem entre gerações é o caso *comum*. A espera pelo upload procurava o item **pelo nome** e aceitava o primeiro que tivesse miniatura; o homônimo velho já tem miniatura desde o job anterior, então **a espera terminava no primeiro instante, sem ter esperado nada**, com o arquivo real ainda em voo. Como a personagem reaproveitada é quase sempre a *segunda* referência, travava sempre na 2 — e o "às vezes" era só o acaso de o arquivo já estar no acervo ou não. Pior: **a própria repetição fabricava a condição** — a tentativa 0 subia A e morria na B, a tentativa 1 subia A de novo, e já havia um homônimo pronto para a espera devolver na hora. O conserto é passar para a decisão o **retrato da lista antes do envio**: só pode ser o recém-enviado o que apareceu depois dele.
+
+**2. O `+` é um interruptor, e o código o tratava como um "abrir".** Medido: `aria-expanded` alterna `false`/`true`, e **clicar com ele aberto fecha**. O painel se fecha com animação e continua declarando `open` enquanto ela corre; o clique da referência seguinte caía nessa janela e **fechava**. E como o painel ainda estava visível saindo de cena, um `wait_for(visible)` respondia "abriu" e a sequência seguia contra uma tela sem lista nenhuma — medido ao vivo: **180 s de espera com `[role=option]` em zero**. Era exatamente o que o usuário via: *"às vezes ele fecha ali o mais onde você coloca as fotos."* Pergunta-se o estado ao botão antes de clicar, como se faz com o interruptor do Agente; e "aberto" passou a exigir as três coisas: o `+` declarando aberto, o diálogo visível **e** a lista com itens.
+
+**3. O índice decorado.** Clicava-se `itens.nth(indice)` com um índice calculado numa varredura anterior, numa lista que **reordena** (o recém-enviado sobe ao topo) e **encolhe** (o incluído sai dela). Agora o id vai no próprio seletor e o alvo é resolvido no instante do clique, por `_clicar_unico`. E confere-se a **seleção**, não o item que o código julga ter escolhido: "Incluir no comando" age sobre o que está marcado, e os dois podiam divergir sem sintoma.
+
+**Duas regras novas, e elas valem além deste caso:**
+
+- **Barreira entre referências.** A próxima só começa depois de a ficha desta chegar na barra **e** ser a do arquivo que subiu. Fecha a corrida, dá tempo de o `+` reassentar depois do reflow, e transforma "sumiu em silêncio" em erro no ponto certo, com o nome do arquivo que sumiu.
+- **A conferência final compara identidade, não número.** Três condições independentes — quantidade, **repetida** e trocada —, cada uma pegando um defeito diferente. Duas fichas iguais agora reprovam.
+
+Verificado ao vivo no pior caso — três e quatro homônimos já no acervo, todos com miniatura: duas referências, duas mídias distintas.
+
+**Jobs suspeitos no banco**, pelo padrão "2+ referências com `tentativas > 1`": **#16, #20, #26 e #27** saíram `pronto` e podem ter referência trocada. O #27 é o caso confirmado. Vale conferir os arquivos antes de usá-los.
+
+### O app conta o que está fazendo — log de passo e traço
+
+**O silêncio prolongado é um defeito, não um detalhe de conforto.** Em 21/08 vários jobs de duas referências morreram com `TargetClosedError`, e três rodadas de investigação foram gastas atrás de crash, memória e vazamento de navegador. Não era nada disso: *"sobre o navegador fechando, fui eu que fechei. Por quê? Porque ele estava demorando muito para enviar as duas referências."* O app trabalhava calado por minutos, e olhar uma tela parada e concluir "travou" é a leitura razoável de quem está do lado de fora.
+
+O **log de passo** dá sinal de vida a cada etapa e **durante** as esperas longas — uma linha a cada ~15 s, não a cada volta de laço (`_esperar_item_pronto` gira a cada 500 ms e escreveria 360 linhas iguais num upload de três minutos). É por conta, e não por processo: até cinco gerações correm ao mesmo tempo e um relógio só misturaria os cinco jobs numa saída ilegível. Cada inclusão sai com **o tempo que levou** — com dezenas de jobs por dia isso vira a distribuição real da lentidão com duas referências, em vez de impressão.
+
+O **traço do Playwright** (`scratch/tracos/`, `python -m playwright show-trace`) grava print antes e depois de cada ação, o DOM daquele instante e a chamada feita. Guardado **só na falha e no instante dela** — em `fechar` o contexto pode já não existir para coletar. Job que deu certo descarta: alguns MB por traço, dezenas de jobs por dia, uma semana de disco. `FLOWPOOL_TRACO=0` desliga. Nada disso levanta: diagnóstico que quebra a coisa que ele diagnostica é pior do que nenhum.
+
+### Espera-se o **estado**, nunca o tempo — inclusive no download
+
+A regra já valia em todo o transporte, e sobrava **um** sono fixo. Ele custou dois vídeos gerados e pagos: jobs **29 e 30**, três tentativas cada, `esperava 1 candidato para "rotulo '720p'", achei 0`, os dois com `id_remoto` gravado e `arquivo = None` — o Flow gerou e cobrou, e a falha foi só no download; sem estorno (correto) e sem tentativas, ficaram para baixar na mão.
+
+`baixar` dormia 1,5 s e depois pegava `MENU_CARD.last`. Quando o submenu de resolução demora — e ele demora justamente quando a página acabou de renderizar um vídeo novo — o `.last` ainda é o menu **de cima** ("Baixar", "Animar", "Mover para a lixeira"), que não tem "720p". Agora se espera o menu que **contém** a opção pedida: menu sem a opção é "espere mais", não "achei 0". E identifica-se pelo **conteúdo** em vez de `.last` — com dois menus abertos, "o último" é tão frágil quanto índice em lista que reordena, e o vizinho errado ali é "Mover para a lixeira".
+
+**E o erro lista o que havia na tela.** Sem isso a falha chegou como "achei 0" sem dizer o que existia, e meia hora se perdeu nisso.
+
 ### Configurou, confere — regra dura
 
 **Depois de configurar, o transporte lê o texto do chip e confere que bate com o pedido. Se não bater, é erro, não aviso.**
