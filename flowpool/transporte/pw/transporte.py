@@ -403,6 +403,58 @@ class TransportePlaywright:
             "o painel do chip nao fechou: ele continua na tela (ou sobrou veu) e "
             "nenhum clique no campo de prompt passaria")
 
+    async def _exigir_agente_desligado(self, pagina) -> bool:
+        """Garante o MODO DIRETO antes de qualquer outra coisa. Devolve se desligou.
+
+        O botao "Agente" da barra do prompt e um interruptor, e ele troca o modo de
+        operacao do Flow. VISTO EM PRODUCAO: as vezes ele amanhece ligado, e ai "o
+        Playwright nao consegue identificar as coisas".
+
+        MEDIDO 2026-08-21, os dois estados: com o agente LIGADO o `CHIP_CONFIG` casa
+        ZERO elementos — o chip some da barra e no lugar dele entram `tune
+        Configuracoes` e `article_spark Instrucoes para o agente`. E por isso que esta
+        verificacao roda ANTES de tocar no chip, e nao junto com ele: no estado errado o
+        chip nem existe para ser clicado, e o erro que sai fala do chip, nunca do
+        interruptor que o tirou da tela.
+
+        Desligar tambem nao e "clicar e seguir". Confirma-se o estado depois, porque um
+        clique que nao pegou deixaria a geracao inteira no caminho conversacional — o
+        que pergunta antes de gastar, com Aprovar/Rejeitar, e espera uma confirmacao
+        que o transporte nao sabe dar.
+
+        Espera o ESTADO, nunca dorme por tempo: quem dorme aqui troca um defeito
+        constante por um intermitente.
+        """
+        loc = pagina.locator(_medido("BOTAO_AGENTE", sel.BOTAO_AGENTE))
+        try:
+            await loc.first.wait_for(timeout=15_000)
+        except Exception:
+            pass   # segue para o exigir_unico, que da a mensagem boa
+        # zero e "o interruptor sumiu da tela"; dois e ambiguidade. Nenhum dos dois se
+        # resolve chutando, e a auto-cura nao entra aqui de proposito — o vizinho deste
+        # botao e o de ENVIAR, e um chute ali dispara geracao de verdade
+        # (seletores.NAO_CURAVEIS diz isso na outra ponta)
+        analise.exigir_unico(await loc.count(), sel.BOTAO_AGENTE, "interruptor do Agente")
+
+        botao = loc.first
+        if not analise.agente_ligado(await botao.get_attribute(sel.ATRIBUTO_AGENTE)):
+            return False
+
+        print("agente LIGADO na barra do prompt: desligando antes de configurar o chip")
+        await botao.click(timeout=15_000)
+        # o botao REDESENHA ao trocar de estado (medido: o conteudo interno muda). Por
+        # isso se le o atributo de novo a cada volta, e nao uma vez so depois de dormir.
+        for _ in range(20):
+            await pagina.wait_for_timeout(250)
+            try:
+                if not analise.agente_ligado(
+                        await botao.get_attribute(sel.ATRIBUTO_AGENTE)):
+                    break
+            except GeracaoFalhou:
+                continue   # marcador ausente no meio do redesenho: o veredito e abaixo
+        analise.exigir_agente_desligado(await botao.get_attribute(sel.ATRIBUTO_AGENTE))
+        return True
+
     async def _configurar(self, pagina, p: Pedido) -> str:
         """Abre o chip, ajusta tudo e CONFERE. Devolve o texto final do chip.
 
@@ -413,6 +465,11 @@ class TransportePlaywright:
         modo = p.modo.value
         # recusa ANTES de tocar no chip, com a reserva de credito ainda estornavel
         analise.exigir_proporcao_do_modo(modo, p.proporcao)
+
+        # O MODO DE OPERACAO vem antes do chip, e nao por gosto de ordem: com o agente
+        # ligado o chip NAO EXISTE na barra (medido), e a linha seguinte morreria num
+        # timeout que fala do chip e nunca da causa.
+        await self._exigir_agente_desligado(pagina)
 
         await pagina.locator(sel.CHIP_CONFIG).first.click(timeout=15_000)
         painel = self._painel(pagina)

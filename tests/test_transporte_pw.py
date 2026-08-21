@@ -306,6 +306,174 @@ def test_clicou_e_desligou_passa():
     exigir_agente_desligado(sel.AGENTE_DESLIGADO)
 
 
+class _BotaoAgenteFalso:
+    """Um interruptor de mentira: le e troca `aria-pressed`, e conta os cliques.
+
+    `gruda=True` e o botao que NAO obedece — o clique acontece e o estado continua
+    ligado. E o caso que precisa virar erro em vez de seguir para um chip que nao
+    existe.
+    """
+
+    def __init__(self, pressed, gruda=False):
+        self.pressed = pressed
+        self.gruda = gruda
+        self.cliques = 0
+
+    @property
+    def first(self):
+        return self
+
+    async def wait_for(self, timeout=None):
+        return None
+
+    async def count(self):
+        return 1
+
+    async def get_attribute(self, nome):
+        assert nome == sel.ATRIBUTO_AGENTE
+        return self.pressed
+
+    async def click(self, timeout=None):
+        self.cliques += 1
+        if not self.gruda:
+            self.pressed = sel.AGENTE_DESLIGADO
+
+
+class _PaginaComAgente:
+    def __init__(self, botao):
+        self.botao = botao
+
+    def locator(self, seletor):
+        assert seletor == sel.BOTAO_AGENTE
+        return self.botao
+
+    async def wait_for_timeout(self, ms):
+        return None
+
+
+async def test_agente_ligado_e_clicado_antes_de_configurar():
+    botao = _BotaoAgenteFalso(sel.AGENTE_LIGADO)
+    desligou = await TransportePlaywright()._exigir_agente_desligado(
+        _PaginaComAgente(botao))
+    assert (desligou, botao.cliques, botao.pressed) == (
+        True, 1, sel.AGENTE_DESLIGADO)
+
+
+async def test_agente_desligado_nao_e_tocado():
+    # clicar "por garantia" LIGARIA o agente — interruptor nao tem clique inofensivo
+    botao = _BotaoAgenteFalso(sel.AGENTE_DESLIGADO)
+    desligou = await TransportePlaywright()._exigir_agente_desligado(
+        _PaginaComAgente(botao))
+    assert (desligou, botao.cliques) == (False, 0)
+
+
+async def test_clique_que_nao_pegou_derruba_a_geracao():
+    botao = _BotaoAgenteFalso(sel.AGENTE_LIGADO, gruda=True)
+    with pytest.raises(GeracaoFalhou, match="continuou LIGADO"):
+        await TransportePlaywright()._exigir_agente_desligado(_PaginaComAgente(botao))
+
+
+async def test_interruptor_ambiguo_ou_ausente_e_erro():
+    # zero e "o interruptor sumiu da tela"; dois e ambiguidade. Nenhum se resolve
+    # chutando: o vizinho deste botao na barra do prompt e o de ENVIAR.
+    class _Sumido(_BotaoAgenteFalso):
+        async def count(self):
+            return 0
+
+    botao = _Sumido(sel.AGENTE_DESLIGADO)
+    with pytest.raises(GeracaoFalhou, match="esperava 1 candidato"):
+        await TransportePlaywright()._exigir_agente_desligado(_PaginaComAgente(botao))
+    assert botao.cliques == 0
+
+
+# --- Frames e Elementos sao SUBMODOS de Video ---------------------------
+#
+# MEDIDO 2026-08-20, ao vivo, num job que falhou tres vezes com
+#   "modo: esperava 1 candidato para 'button:has-text(\"chrome_extension\")', achei 0"
+# A lista de modos do painel DEPENDE do modo atual:
+#   chip em VIDEO  -> image Imagem | videocam Video | crop_free Frames | chrome_extension Elementos
+#   chip em IMAGEM -> image Imagem | videocam Video
+# Frames e Elementos nao existem enquanto o chip estiver em imagem.
+
+
+def test_frames_e_elementos_sao_submodos_de_video():
+    # a hierarquia e um FATO DA INTERFACE, e por isso mora em seletores.py — nao numa
+    # esperteza escondida na sequencia do transporte
+    assert sel.MODO_PAI["frames2v"] == "t2v"
+    assert sel.MODO_PAI["ingredients2v"] == "t2v"
+
+
+def test_os_dois_modos_de_topo_nao_tem_pai():
+    assert "t2v" not in sel.MODO_PAI
+    assert "imagem" not in sel.MODO_PAI
+
+
+def test_modo_visivel_no_painel_e_um_clique_so():
+    # nao forcar dois passos quando um basta: cada clique extra e uma animacao a mais
+    # e uma chance a mais de o painel redesenhar no meio
+    assert etapas_ate_o_modo("imagem", True) == ["imagem"]
+    assert etapas_ate_o_modo("frames2v", True) == ["frames2v"]
+
+
+def test_submodo_ausente_passa_pelo_video_primeiro():
+    # e a correcao do defeito: vindo de imagem, `chrome_extension` nao existe no painel
+    assert etapas_ate_o_modo("ingredients2v", False) == ["t2v", "ingredients2v"]
+    assert etapas_ate_o_modo("frames2v", False) == ["t2v", "frames2v"]
+
+
+def test_modo_de_topo_ausente_e_erro_e_nao_caminho_inventado():
+    # `imagem` e `videocam` existem nos dois estados do painel; um deles sumir e deploy
+    # do Google, e o conserto e em seletores.py — nao um clique adivinhado aqui
+    for modo in ("imagem", "t2v"):
+        with pytest.raises(GeracaoFalhou, match="painel"):
+            etapas_ate_o_modo(modo, False)
+
+
+# --- o rotulo do submodo no chip: tolerancia declarada ------------------
+
+
+CHIP_FRAMES = "frames - 720p - 4s crop_9_16 x1"
+CHIP_SO_VIDEO = "video - 720p - 4s crop_9_16 x1"
+CHIP_IMAGEM = "nano banana 2 lite crop_9_16 x1"
+
+
+def test_chip_que_nomeia_o_submodo_confirma():
+    assert faltando_no_chip(CHIP_FRAMES, "frames2v", "9:16", 1, "4s") == []
+
+
+def test_chip_que_so_diz_video_ainda_confirma_o_submodo():
+    # NAO MEDIDO: nao se sabe se o chip nomeia "Frames"/"Elementos" ou se mostra so
+    # "Video" nos submodos. Recusar aqui seria falso negativo — bloquearia o modo
+    # inteiro por causa de uma palavra que talvez nunca apareca.
+    assert faltando_no_chip(CHIP_SO_VIDEO, "frames2v", "9:16", 1, "4s") == []
+    assert faltando_no_chip(CHIP_SO_VIDEO, "ingredients2v", "9:16", 1, "4s") == []
+
+
+def test_chip_que_continuou_em_imagem_reprova_o_submodo():
+    # ESTE e o caso que o defeito produzia: o clique no submodo nao acontecia e a
+    # geracao seguia em imagem. Tolerar o rotulo do pai nao pode tolerar isto.
+    faltou = faltando_no_chip(CHIP_IMAGEM, "ingredients2v", "9:16", 1, "4s")
+    assert "elementos" in faltou
+
+
+def test_chip_de_video_puro_nao_e_confundido_com_frames():
+    # o contrario tambem: t2v so aceita "video", e um chip que diz "frames" reprova
+    assert faltando_no_chip(CHIP_FRAMES, "t2v", "9:16", 1, "4s") == ["video"]
+
+
+def test_confirmacao_pelo_rotulo_do_pai_e_declarada():
+    # a tolerancia nao pode ser calada: a corrida imprime a medicao que falta, e a
+    # linha vira o valor definitivo de ROTULO_MODO_NO_CHIP
+    aviso = confirmacao_fraca(CHIP_SO_VIDEO, "frames2v")
+    assert aviso and "frames2v" in aviso and "video" in aviso
+
+
+def test_confirmacao_pelo_rotulo_proprio_nao_avisa_nada():
+    assert confirmacao_fraca(CHIP_FRAMES, "frames2v") is None
+    assert confirmacao_fraca(CHIP_VIDEO, "t2v") is None
+    assert confirmacao_fraca(CHIP_IMAGEM, "imagem") is None
+
+
 # --- quais arquivos o pedido anexa -------------------------------------
 #
 # Estes testes eram sobre `_anexar` inteiro, com uma pagina falsa de um `input` so.

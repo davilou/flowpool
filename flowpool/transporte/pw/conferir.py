@@ -10,6 +10,10 @@ referencia e desfaz. Trocar de modo entrou no roteiro porque a lista de modos do
 depende do modo atual (`seletores.MODO_PAI`), e porque e a unica forma de medir o que o
 chip escreve em `frames2v` e `ingredients2v` sem mandar uma geracao — ver `_medir_modos`.
 
+A PRIMEIRA coisa conferida dentro do projeto e o interruptor do AGENTE, porque ele
+manda em todo o resto: com ele ligado o chip nao existe na barra, e o roteiro inteiro
+acusaria falta sem nada estar quebrado. Ver `_medir_agente`.
+
 Anexar entrou porque contar seletor nao bastava. O defeito de 2026-08-20 — a referencia
 subindo para o acervo e nunca entrando no comando — passava por TODOS os `count()`: o
 `input[type=file]` existia, o botao de anexar existia, e mesmo assim a geracao saia por
@@ -204,6 +208,55 @@ def _veredito_do_rotulo(modo: str, chip: str) -> None:
               f"{pai!r} — o modo pode nao ter trocado")
 
 
+async def _medir_agente(pagina, p: Placar) -> None:
+    """O interruptor do Agente: reporta o estado e, se estiver ligado, DESLIGA.
+
+    Tem que rodar ANTES de qualquer conferencia do chip. MEDIDO 2026-08-21: com o
+    agente ligado o `CHIP_CONFIG` casa ZERO elementos — o chip some da barra. Um
+    diagnostico que ignorasse isso acusaria FALTA no chip, nos quatro modos, nas cinco
+    proporcoes, nas quatro duracoes e nos modelos, tudo de uma vez, e mandaria a pessoa
+    consertar treze seletores que nunca quebraram.
+
+    DESLIGA, como o transporte desliga, e diz que desligou. Nao e cortesia: e o que
+    torna o resto do roteiro possivel de medir. E o estado nao e escolha do usuario que
+    se esteja atropelando — o modo direto e a decisao de desenho do app inteiro (ver
+    o spec, em *Transporte*), e o transporte faria o mesmo na proxima geracao.
+    """
+    await p.checar(pagina, "agente", "BOTAO_AGENTE", sel.BOTAO_AGENTE)
+    loc = pagina.locator(sel.BOTAO_AGENTE)
+    if await loc.count() != 1:
+        print("    o interruptor do Agente nao esta unico na tela — sem ele nao da "
+              "para garantir o modo direto, e toda geracao vira loteria")
+        return
+    bruto = await loc.first.get_attribute(sel.ATRIBUTO_AGENTE)
+    try:
+        ligado = analise.agente_ligado(bruto)
+    except Exception as e:
+        p.faltando.append("agente.ATRIBUTO_AGENTE")
+        print(f"[{'agente':9}] {'ATRIBUTO_AGENTE':24} FALTA "
+              f"({sel.ATRIBUTO_AGENTE}={bruto!r}) — {e}")
+        return
+    p.ok += 1
+    print(f"[{'agente':9}] {'ATRIBUTO_AGENTE':24} OK "
+          f"({sel.ATRIBUTO_AGENTE}={bruto!r} = {'LIGADO' if ligado else 'desligado'})")
+    if not ligado:
+        return
+    print("    AGENTE LIGADO: desligando, senao o chip nao existe e o resto do "
+          "roteiro acusa falta em tudo")
+    await loc.first.click()
+    for _ in range(20):
+        await pagina.wait_for_timeout(250)
+        if await loc.first.get_attribute(sel.ATRIBUTO_AGENTE) == sel.AGENTE_DESLIGADO:
+            break
+    agora = await loc.first.get_attribute(sel.ATRIBUTO_AGENTE)
+    if agora == sel.AGENTE_DESLIGADO:
+        print("    desligado — o chip deve estar de volta na barra")
+    else:
+        p.faltando.append("agente.DESLIGAR")
+        print(f"    NAO DESLIGOU ({sel.ATRIBUTO_AGENTE}={agora!r}) — o transporte "
+              f"falharia aqui, e antes de gastar credito")
+
+
 async def _medir_custo(pagina, p: Placar) -> None:
     """Le o "A geração vai usar N créditos" do painel do chip. Nao gasta nada.
 
@@ -310,6 +363,10 @@ async def main(perfil: str, uuid: str | None = None) -> int:
             # regra 3: entra-se CLICANDO no card, nunca por goto direto
             await pagina.locator(f'a[href*="{uuid}"]').first.click()
             await pagina.wait_for_timeout(8000)
+
+            # PRIMEIRA COISA dentro do projeto: com o agente ligado o chip nao existe,
+            # e todo o resto acusaria falta sem nada estar quebrado
+            await _medir_agente(pagina, p)
 
             await p.checar(pagina, "projeto", "CAMPO_PROMPT", sel.CAMPO_PROMPT)
             await p.checar(pagina, "projeto", "BOTAO_ENVIAR", sel.BOTAO_ENVIAR)
