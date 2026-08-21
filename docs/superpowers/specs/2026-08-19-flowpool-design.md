@@ -470,7 +470,7 @@ Isso desfaz três suposições que este spec carregou até 20/08:
 
 1. **Não existem dois dropdowns de modelo.** Existe um, e ele lista Omni Flash / Veo 3.1 Lite / Fast / Quality em vídeo, e Nano Banana Pro / 2 / 2 Lite em imagem.
 2. **`tune Configurações` não é o painel de geração.** É a política de confirmação do agente conversacional. A armadilha de ordem que ele impunha ("só aparece depois do primeiro prompt") sai do caminho da geração: o chip existe desde o primeiro instante do projeto.
-3. **A confirmação do agente deixa de ser obstáculo.** Configurando pelo chip, o Flow não pergunta nada: debita e gera. O radio "Sempre"/"Nunca" governa só o agente, que o transporte não usa. Ver o trade-off em *Transporte*.
+3. **A confirmação do agente deixa de ser obstáculo.** Configurando pelo chip, o Flow não pergunta nada: debita e gera. O radio "Sempre"/"Nunca" governa só o agente, que o transporte não usa. Ver o trade-off em *Transporte* — e ver ali também por que "não usa" precisou virar **garantia verificada** e não suposição: o modo tem um interruptor na barra do prompt, e ligado ele faz o chip sumir da tela.
 
 #### Frames e Elementos são SUBMODOS de Vídeo — medido em 20/08
 
@@ -591,6 +591,28 @@ O Flow tem dois caminhos para disparar uma geração, e eles trocam propriedades
 O padrão é o **direto**, e o critério é o modo de falha. O agente pode responder qualquer coisa — inclusive pedir esclarecimento — e um robô esperando "Aprovar" fica pendurado até o timeout, queima as três tentativas e marca o job como falho sem dizer o porquê. O chip é uma máquina de estados pequena e legível.
 
 O preço é ser **cego ao preço**. Quem cobre esse buraco é a reconciliação de saldo que já existe: leitura real depois de cada job, evento `divergencia`, tabela de custos servindo só para reservar antes. Vale registrar o que se abre mão: pelo agente, o custo de **cada configuração** viria de graça no texto (a mesma família de pedido anunciou 7 e 15 créditos em ajustes diferentes), e é exatamente a informação que a tabela por modelo não modela. Se um dia o custo por configuração passar a importar mais do que o determinismo, o agente é o caminho — e a leitura do custo é a única coisa que ele faz melhor.
+
+#### Escolher o modo direto não bastava: ele tem um interruptor, e ele mora na tela do usuário
+
+**Visto em produção (21/08).** Nas palavras do usuário: *"às vezes aquele botãozinho de agente está clicado. E aí o playwright não consegue identificar as coisas."*
+
+A decisão acima estava tomada e escrita, e ainda assim o transporte quebrava — porque escolher o modo direto é uma coisa e **garantir** que o Flow está nele é outra. O modo não é configuração do nosso app: é um **botão "Agente" na barra do prompt**, ao lado do `+`, que o usuário liga e desliga na mesma tela que o robô dirige. O transporte assumia o estado; nunca o verificava.
+
+**O que a medição ao vivo mostrou (21/08, perfil `conta1`, os dois estados):** ligar o Agente não deixa a interface "um pouco diferente" — ele **remove o chip da barra**. Com `aria-pressed="true"`, o seletor `CHIP_CONFIG` casa **zero** elementos, e no lugar do chip entram `tune Configurações` e `article_spark Instruções para o agente`.
+
+Isso explica o sintoma inteiro, e explica por que ele era tão difícil de ler: `_configurar` morre na **primeira linha**, com um timeout que fala do **chip**, e nunca do interruptor que tirou o chip da tela. O erro nomeia a vítima, não a causa.
+
+**A correção é uma garantia, não uma tentativa** — `_exigir_agente_desligado`, chamada no começo de `_configurar`, **antes de tocar no chip**. Nessa ordem por necessidade medida, não por gosto: no estado errado o chip nem existe para ser clicado. Se o interruptor estiver ligado, clica e **confirma** que desligou; um clique que não pegou é erro claro, ali, com a reserva ainda estornável — e não uma geração inteira percorrendo o caminho conversacional, que pergunta antes de gastar e espera um "Aprovar" que o transporte não sabe dar.
+
+Três coisas que a medição decidiu, e que a intuição teria errado:
+
+- **O estado sai em `aria-pressed`**, `"true"`/`"false"`, e o atributo existe nos **dois** estados. A classe também muda (`sc-59223abb-3 dmZGYv` → `bdRbOx`) e não se usa: é styled-component com hash, a regra 1 de `seletores.py`.
+- **`:has-text("Agente")` sozinho é ambíguo justamente no estado ruim** — casa 1 elemento desligado e **2** ligado, porque `has-text` é substring e pega também *"Instruções para o agente"*, que só existe nesse estado. Um seletor cuja ambiguidade depende do estado que ele deveria ler não serve. O selecionado é `button[aria-pressed]:has-text("Agente")`, medido único nos dois.
+- **`:text-is("Agente")` casa zero nos dois estados**, porque o texto mora num neto (`<span class="content">`) e o motor de texto do Playwright casa o menor elemento que contém a frase.
+
+**Marcador desconhecido é erro, não "desligado".** Se um deploy trocar o atributo, tratar a ausência como "está desligado" reabriria exatamente este defeito — toda geração voltaria a rodar com o agente possivelmente ligado, e o sintoma seria de novo um timeout falando do chip. O interruptor também entra em `NAO_CURAVEIS`: o vizinho dele na barra é o botão de **enviar**, e um seletor curado errado ali não custa um clique perdido, dispara uma geração de verdade.
+
+O diagnóstico herdou a mesma ordem: `conferir.py` mede o interruptor **antes** de qualquer conferência do chip e desliga se estiver ligado. Sem isso, um agente ligado faria o conferidor acusar falta no chip, nos quatro modos, nas cinco proporções, nas quatro durações e nos modelos — treze seletores intactos apontados como quebrados por causa de um botão.
 
 ### O aviso de direitos, e por que ele é vigiado durante o upload inteiro
 
