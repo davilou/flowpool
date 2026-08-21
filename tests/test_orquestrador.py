@@ -6,7 +6,9 @@ from pathlib import Path
 import pytest
 
 from flowpool.dados.repo import Repo
-from flowpool.motor.orquestrador import MAX_TENTATIVAS, Orquestrador
+from flowpool.motor.orquestrador import (
+    MAX_SIMULTANEOS, MAX_TENTATIVAS, Orquestrador, teto_do_ambiente,
+)
 from flowpool.nucleo.custos import custo_de
 from flowpool.nucleo.escolha import escolher
 from flowpool.nucleo.erros import SaldoInsuficiente
@@ -29,13 +31,26 @@ def job_fast(nome="c1", modelo=Modelo.VEO_FAST, produto="", duracao="8s"):
                destino="clipes", nome=nome, produto=produto, duracao=duracao)
 
 
+async def ciclo(orq):
+    """Um passo E a espera do que ele despachou.
+
+    `passo` deixou de esperar: ele reivindica, reserva a conta e solta a geracao numa
+    tarefa de fundo, para o motor poder reivindicar a proxima em outra conta. Quase
+    todo teste daqui olha o BANCO depois do job terminar, entao a espera precisa
+    acontecer em algum lugar — aqui, uma vez, e nao espalhada em cada teste.
+    """
+    despachou = await orq.passo()
+    await orq.drenar()
+    return despachou
+
+
 async def test_job_roda_e_fica_pronto(repo, tmp_path):
     cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
     c = repo.conta(cid); c.saldo = 50; repo.salvar_conta(c)
     jid = repo.criar_job(job_fast())
 
     orq = Orquestrador(repo, TransporteFalso(saldos={cid: 50}), raiz=tmp_path)
-    await orq.passo()
+    await ciclo(orq)
 
     j = repo.job(jid)
     assert j.estado is EstadoJob.PRONTO
@@ -49,7 +64,7 @@ async def test_saldo_e_reconciliado_com_o_lido(repo, tmp_path):
     repo.criar_job(job_fast())
 
     orq = Orquestrador(repo, TransporteFalso(saldos={cid: 50}), raiz=tmp_path)
-    await orq.passo()
+    await ciclo(orq)
 
     assert repo.conta(cid).saldo == 30
     assert repo.conta(cid).saldo_confiavel is True
@@ -61,7 +76,7 @@ async def test_sem_conta_apta_o_job_volta_pra_fila_com_reavaliar(repo, tmp_path)
     jid = repo.criar_job(job_fast())
 
     orq = Orquestrador(repo, TransporteFalso(saldos={cid: 5}), raiz=tmp_path)
-    await orq.passo()
+    await ciclo(orq)
 
     j = repo.job(jid)
     assert j.estado is EstadoJob.PENDENTE
@@ -76,7 +91,7 @@ async def test_saldo_insuficiente_no_transporte_seca_a_conta_e_devolve_o_job(rep
     jid = repo.criar_job(job_fast())
 
     orq = Orquestrador(repo, TransporteFalso(saldos={cid: 0}), raiz=tmp_path)
-    await orq.passo()
+    await ciclo(orq)
 
     assert repo.job(jid).estado is EstadoJob.PENDENTE
     assert repo.conta(cid).saldo == 0
@@ -88,7 +103,7 @@ async def test_sessao_morta_marca_conta_expirada(repo, tmp_path):
     jid = repo.criar_job(job_fast())
 
     orq = Orquestrador(repo, TransporteFalso(saldos={cid: 50}, mortas={cid}), raiz=tmp_path)
-    await orq.passo()
+    await ciclo(orq)
 
     assert repo.conta(cid).saude is SaudeSessao.EXPIRADA
     assert repo.job(jid).estado is EstadoJob.PENDENTE
@@ -101,7 +116,7 @@ async def test_job_desiste_depois_do_teto_de_tentativas(repo, tmp_path):
 
     orq = Orquestrador(repo, TransporteFalso(saldos={cid: 500}, falha_em={cid}), raiz=tmp_path)
     for _ in range(MAX_TENTATIVAS):
-        await orq.passo()
+        await ciclo(orq)
 
     j = repo.job(jid)
     assert j.estado is EstadoJob.FALHOU
@@ -117,7 +132,7 @@ async def test_quality_vai_pra_conta_paga_mesmo_com_free_disponivel(repo, tmp_pa
     jid = repo.criar_job(job_fast(modelo=Modelo.VEO_QUALITY))
 
     orq = Orquestrador(repo, TransporteFalso(saldos={free: 50, ultra: 9000}), raiz=tmp_path)
-    await orq.passo()
+    await ciclo(orq)
 
     assert repo.job(jid).conta_id == ultra
 
@@ -137,7 +152,7 @@ async def test_falha_de_rede_estorna_a_reserva(repo, tmp_path):
     t.saldo = rede_caiu  # a rede caiu inteira: nem a releitura de saldo salva o dia
 
     orq = Orquestrador(repo, t, raiz=tmp_path)
-    await orq.passo()
+    await ciclo(orq)
 
     j = repo.job(jid)
     assert repo.conta(cid).saldo == 50    # 50 - 20 reservados + 20 estornados
@@ -147,7 +162,7 @@ async def test_falha_de_rede_estorna_a_reserva(repo, tmp_path):
 
 async def test_passo_sem_job_nao_explode(repo, tmp_path):
     orq = Orquestrador(repo, TransporteFalso(saldos={}), raiz=tmp_path)
-    assert await orq.passo() is False
+    assert await ciclo(orq) is False
 
 
 async def test_arquivo_cai_no_destino_com_o_nome_pedido(repo, tmp_path):
@@ -157,7 +172,7 @@ async def test_arquivo_cai_no_destino_com_o_nome_pedido(repo, tmp_path):
                              destino="Video Roupa/clipes", nome="c3-take1"))
 
     orq = Orquestrador(repo, TransporteFalso(saldos={cid: 50}), raiz=tmp_path)
-    await orq.passo()
+    await ciclo(orq)
 
     esperado = tmp_path / "Video Roupa" / "clipes" / "c3-take1.mp4"
     assert repo.job(jid).arquivo == str(esperado)
@@ -171,7 +186,7 @@ async def test_job_de_imagem_sai_com_extensao_png(repo, tmp_path):
                              prompt="p", destino="imgs", nome="i1"))
 
     orq = Orquestrador(repo, TransporteFalso(saldos={cid: 50}), raiz=tmp_path)
-    await orq.passo()
+    await ciclo(orq)
 
     assert repo.job(jid).arquivo.endswith("i1.png")
 
@@ -184,7 +199,7 @@ async def test_geracao_passa_por_rodando_antes_de_ficar_pronta(repo, tmp_path):
 
     t = TransporteFalso(saldos={cid: 50}, passos_rodando=3)
     orq = Orquestrador(repo, t, raiz=tmp_path, intervalo_polling=0.001)
-    await orq.passo()
+    await ciclo(orq)
 
     assert repo.job(jid).estado is EstadoJob.PRONTO
     assert len(t.geracoes) == 1
@@ -201,7 +216,7 @@ async def test_timeout_devolve_o_job_com_id_remoto_e_nao_gera_de_novo(repo, tmp_
     orq = Orquestrador(repo, t, raiz=tmp_path,
                        timeout_geracao=timedelta(milliseconds=20),
                        intervalo_polling=0.001)
-    await orq.passo()
+    await ciclo(orq)
 
     j = repo.job(jid)
     assert j.estado is EstadoJob.PENDENTE
@@ -210,7 +225,7 @@ async def test_timeout_devolve_o_job_com_id_remoto_e_nao_gera_de_novo(repo, tmp_
     assert j.tentativas == 1
     primeiro = j.id_remoto
 
-    await orq.passo()
+    await ciclo(orq)
 
     assert len(t.geracoes) == 1                       # a segunda tentativa nao gerou
     assert repo.job(jid).id_remoto == primeiro
@@ -231,7 +246,7 @@ async def test_sessao_morta_durante_gerar_estorna_a_reserva(repo, tmp_path):
     t.saldo = sem_leitura   # navegador ja morreu: a reconciliacao nao salva o dia
 
     orq = Orquestrador(repo, t, raiz=tmp_path)
-    await orq.passo()
+    await ciclo(orq)
 
     assert repo.conta(cid).saldo == 50            # 50 - 20 reservados + 20 estornados
     assert repo.conta(cid).saude is SaudeSessao.EXPIRADA
@@ -254,7 +269,7 @@ async def test_recusa_de_saldo_seca_a_conta_com_prazo_e_adia_o_job(repo, tmp_pat
     t.gerar = recusa
 
     orq = Orquestrador(repo, t, raiz=tmp_path)
-    await orq.passo()
+    await ciclo(orq)
 
     conta = repo.conta(cid)
     agora = datetime.now(timezone.utc)
@@ -327,7 +342,7 @@ async def test_divergencia_acima_do_limiar_vira_evento_com_sinal(repo, tmp_path)
     t.saldo = cobrou_mais
 
     orq = Orquestrador(repo, t, raiz=tmp_path)
-    await orq.passo()
+    await ciclo(orq)
 
     div = [e for e in repo.eventos(jid) if e["tipo"] == "divergencia"]
     assert len(div) == 1
@@ -338,16 +353,19 @@ async def test_divergencia_acima_do_limiar_vira_evento_com_sinal(repo, tmp_path)
 
 
 async def test_workers_simultaneos_nao_pegam_o_mesmo_job(repo, tmp_path):
-    # dois jobs e tres workers com teto 1: tres geracoes seria pagar por um job duas
-    # vezes, com o perdedor sobrescrevendo o arquivo do vencedor
-    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
-    c = repo.conta(cid); c.saldo = 500; repo.salvar_conta(c)
+    # dois jobs e tres passos disparados juntos: tres geracoes seria pagar por um job
+    # duas vezes, com o perdedor sobrescrevendo o arquivo do vencedor
+    c1 = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c2 = repo.criar_conta("c@d.com", Tier.FREE, "p/2")
+    for cid in (c1, c2):
+        c = repo.conta(cid); c.saldo = 500; repo.salvar_conta(c)
     j1 = repo.criar_job(job_fast(nome="c1"))
     j2 = repo.criar_job(job_fast(nome="c2"))
 
-    t = TransporteFalso(saldos={cid: 500}, latencia=0.01)
-    orq = Orquestrador(repo, t, raiz=tmp_path, max_simultaneos=1)
+    t = TransporteFalso(saldos={c1: 500, c2: 500}, latencia=0.01)
+    orq = Orquestrador(repo, t, raiz=tmp_path, max_simultaneos=3)
     await asyncio.gather(orq.passo(), orq.passo(), orq.passo())
+    await orq.drenar()
 
     assert len(t.geracoes) == 2
     assert repo.job(j1).estado is EstadoJob.PRONTO
@@ -363,8 +381,8 @@ async def test_projeto_e_criado_na_primeira_geracao_e_reusado_na_segunda(repo, t
 
     t = TransporteFalso(saldos={cid: 500})
     orq = Orquestrador(repo, t, raiz=tmp_path)
-    await orq.passo()
-    await orq.passo()
+    await ciclo(orq)
+    await ciclo(orq)
 
     assert t.criacoes_projeto == 1
     assert len(repo.projetos(cid)) == 1
@@ -382,8 +400,8 @@ async def test_mesmo_produto_em_duas_contas_gera_dois_projetos(repo, tmp_path):
 
     t = TransporteFalso(saldos={g1: 20, g2: 20})
     orq = Orquestrador(repo, t, raiz=tmp_path)
-    await orq.passo()
-    await orq.passo()
+    await ciclo(orq)
+    await ciclo(orq)
 
     assert t.criacoes_projeto == 2
     remotos = {p.conta_id: p.id_remoto for p in repo.projetos()}
@@ -399,7 +417,7 @@ async def test_projeto_que_existe_no_remoto_e_adotado_sem_criar(repo, tmp_path):
 
     t = TransporteFalso(saldos={cid: 50}, projetos={cid: ["Moda"]})
     orq = Orquestrador(repo, t, raiz=tmp_path)
-    await orq.passo()
+    await ciclo(orq)
 
     assert t.criacoes_projeto == 0
     assert repo.projeto_de(cid, "Moda").id_remoto == "proj-1"
@@ -414,7 +432,7 @@ async def test_job_sem_produto_nao_mexe_em_projeto(repo, tmp_path):
 
     t = TransporteFalso(saldos={cid: 50})
     orq = Orquestrador(repo, t, raiz=tmp_path)
-    await orq.passo()
+    await ciclo(orq)
 
     assert repo.job(jid).estado is EstadoJob.PRONTO
     assert t.criacoes_projeto == 0
@@ -437,7 +455,7 @@ async def test_modelo_sem_custo_na_escolha_devolve_o_job_e_gasta_tentativa(
     monkeypatch.setattr(custos, "_CUSTO_IMAGEM", {})
 
     orq = Orquestrador(repo, TransporteFalso(saldos={cid: 50}), raiz=tmp_path)
-    assert await orq.passo() is True
+    assert await ciclo(orq) is True
 
     j = repo.job(jid)
     assert j.estado is EstadoJob.PENDENTE
@@ -456,7 +474,7 @@ async def test_lote_de_imagens_reserva_o_custo_multiplicado(repo, tmp_path):
                              prompt="p", destino="imgs", nome="i1", quantidade=4))
 
     orq = Orquestrador(repo, TransporteFalso(saldos={cid: 50}), raiz=tmp_path)
-    await orq.passo()
+    await ciclo(orq)
 
     j = repo.job(jid)
     assert j.estado is EstadoJob.PRONTO
@@ -479,7 +497,7 @@ async def test_lote_pula_a_conta_que_so_comporta_uma_geracao(repo, tmp_path):
 
     orq = Orquestrador(repo, TransporteFalso(saldos={magra: 10, gorda: 1000}),
                        raiz=tmp_path)
-    await orq.passo()
+    await ciclo(orq)
 
     j = repo.job(jid)
     assert j.estado is EstadoJob.PRONTO
@@ -503,7 +521,7 @@ async def test_pedido_leva_proporcao_e_quantidade_ao_transporte(repo, tmp_path):
         return await gerar_original(s, p)
 
     t.gerar = espiar
-    await Orquestrador(repo, t, raiz=tmp_path).passo()
+    await ciclo(Orquestrador(repo, t, raiz=tmp_path))
 
     assert vistos[0].proporcao == "1:1"
     assert vistos[0].quantidade == 3
@@ -527,7 +545,7 @@ async def test_proxy_morto_nao_marca_a_conta_expirada_nem_seca(repo, tmp_path):
         raise ErroTransporte("net::ERR_PROXY_CONNECTION_FAILED em http://1.2.3.4:8080")
 
     t.abrir_sessao = proxy_fora_do_ar
-    await Orquestrador(repo, t, raiz=tmp_path).passo()
+    await ciclo(Orquestrador(repo, t, raiz=tmp_path))
 
     conta = repo.conta(cid)
     assert conta.saude is SaudeSessao.VIVA
@@ -548,7 +566,7 @@ async def test_a_duracao_do_job_manda_no_credito_reservado(repo, tmp_path):
     jid = repo.criar_job(job_fast(modelo=Modelo.OMNI_FLASH, duracao="4s"))
 
     orq = Orquestrador(repo, TransporteFalso(saldos={cid: 50}), raiz=tmp_path)
-    await orq.passo()
+    await ciclo(orq)
 
     j = repo.job(jid)
     assert j.estado is EstadoJob.PRONTO
@@ -562,7 +580,7 @@ async def test_o_clipe_longo_reserva_mais_que_o_curto(repo, tmp_path):
     jid = repo.criar_job(job_fast(modelo=Modelo.OMNI_FLASH, duracao="8s"))
 
     orq = Orquestrador(repo, TransporteFalso(saldos={cid: 50}), raiz=tmp_path)
-    await orq.passo()
+    await ciclo(orq)
 
     assert repo.job(jid).custo_estimado == 12
     assert repo.conta(cid).saldo == 38
@@ -581,7 +599,7 @@ async def test_job_longo_pula_a_conta_que_so_paga_o_curto(repo, tmp_path):
 
     orq = Orquestrador(repo, TransporteFalso(saldos={magra: 10, gorda: 1000}),
                        raiz=tmp_path)
-    await orq.passo()
+    await ciclo(orq)
 
     j = repo.job(jid)
     assert j.estado is EstadoJob.PRONTO
@@ -604,7 +622,7 @@ async def test_pedido_leva_a_duracao_ao_transporte(repo, tmp_path):
         return await gerar_original(s, p)
 
     t.gerar = espiar
-    await Orquestrador(repo, t, raiz=tmp_path).passo()
+    await ciclo(Orquestrador(repo, t, raiz=tmp_path))
 
     assert [p.duracao for p in vistos] == ["10s"]
 
@@ -619,7 +637,7 @@ async def test_conta_recem_cadastrada_com_saldo_zero_nao_trava_a_fila(repo, tmp_
 
     orq = Orquestrador(repo, TransporteFalso(saldos={cid: 50}), raiz=tmp_path)
     for _ in range(3):
-        await orq.passo()
+        await ciclo(orq)
         if repo.job(jid).estado is EstadoJob.PRONTO:
             break
 
@@ -637,7 +655,7 @@ async def test_motor_semeia_uma_conta_por_passo(repo, tmp_path):
     repo.criar_job(job_fast())
 
     t = TransporteFalso(saldos={a: 50, b: 50})
-    await Orquestrador(repo, t, raiz=tmp_path).passo()
+    await ciclo(Orquestrador(repo, t, raiz=tmp_path))
 
     semeadas = [e for e in repo.eventos() if e["tipo"] == "saldo_semeado"]
     assert len(semeadas) == 1
@@ -654,7 +672,7 @@ async def test_semeadura_prefere_a_conta_de_leitura_mais_antiga(repo, tmp_path):
     repo.criar_job(job_fast())
 
     t = TransporteFalso(saldos={velha: 50, nunca: 50})
-    await Orquestrador(repo, t, raiz=tmp_path).passo()
+    await ciclo(Orquestrador(repo, t, raiz=tmp_path))
 
     semeadas = [e["conta_id"] for e in repo.eventos() if e["tipo"] == "saldo_semeado"]
     assert semeadas == [nunca]
@@ -672,7 +690,7 @@ async def test_pool_seco_de_verdade_nao_abre_navegador(repo, tmp_path):
     jid = repo.criar_job(job_fast())
 
     t = TransporteFalso(saldos={cid: 5})
-    await Orquestrador(repo, t, raiz=tmp_path).passo()
+    await ciclo(Orquestrador(repo, t, raiz=tmp_path))
 
     assert t.aberturas == 0
     assert repo.job(jid).estado is EstadoJob.PENDENTE
@@ -691,7 +709,7 @@ async def test_conta_seca_nao_e_relida_antes_do_prazo(repo, tmp_path):
     repo.criar_job(job_fast())
 
     t = TransporteFalso(saldos={cid: 50})
-    await Orquestrador(repo, t, raiz=tmp_path).passo()
+    await ciclo(Orquestrador(repo, t, raiz=tmp_path))
 
     assert t.aberturas == 0
 
@@ -703,7 +721,7 @@ async def test_semeadura_com_sessao_morta_expira_a_conta_e_nao_trava_o_laco(repo
     jid = repo.criar_job(job_fast())
 
     t = TransporteFalso(saldos={cid: 50}, mortas={cid})
-    assert await Orquestrador(repo, t, raiz=tmp_path).passo() is True
+    assert await ciclo(Orquestrador(repo, t, raiz=tmp_path)) is True
 
     assert repo.conta(cid).saude is SaudeSessao.EXPIRADA
     j = repo.job(jid)
@@ -720,7 +738,7 @@ async def test_semeadura_registra_o_que_leu(repo, tmp_path):
     repo.criar_job(job_fast())
 
     t = TransporteFalso(saldos={cid: 50})
-    await Orquestrador(repo, t, raiz=tmp_path).passo()
+    await ciclo(Orquestrador(repo, t, raiz=tmp_path))
 
     ev = next(e for e in repo.eventos() if e["tipo"] == "saldo_semeado")
     assert ev["conta_id"] == cid
@@ -739,3 +757,260 @@ async def test_semear_saldo_sozinho_nao_gera_nada(repo, tmp_path):
     assert repo.conta(cid).saldo == 50
     assert t.geracoes == {}
     assert t.saldos[cid] == 50
+
+
+# ============================================================== geracoes simultaneas
+#
+# A invariante: UM job por conta, UM navegador por conta. Nao e preferencia — dois
+# Chromes com o mesmo `--user-data-dir` nao coexistem. O que a limita nao e a tela
+# (medido: janela coberta continua `visible`, porque o Playwright sobe o Chrome com
+# `--disable-backgrounding-occluded-windows`) nem a RAM: e o numero de CONTAS LIVRES.
+
+
+def duas_contas(repo, saldo=500):
+    ids = [repo.criar_conta("a@b.com", Tier.FREE, "p/1"),
+           repo.criar_conta("c@d.com", Tier.FREE, "p/2")]
+    for cid in ids:
+        c = repo.conta(cid); c.saldo = saldo; repo.salvar_conta(c)
+    return ids
+
+
+async def test_dois_jobs_em_contas_diferentes_rodam_ao_mesmo_tempo(repo, tmp_path):
+    c1, c2 = duas_contas(repo)
+    j1 = repo.criar_job(job_fast(nome="c1"))
+    j2 = repo.criar_job(job_fast(nome="c2"))
+
+    t = TransporteFalso(saldos={c1: 500, c2: 500}, latencia=0.05)
+    orq = Orquestrador(repo, t, raiz=tmp_path, max_simultaneos=2)
+
+    assert await orq.passo() is True
+    assert await orq.passo() is True
+    await orq.drenar()
+
+    # o pico e a prova: as duas sessoes estiveram abertas ao MESMO tempo
+    assert t.pico_abertas == 2
+    assert t.colisoes == []
+    assert repo.job(j1).estado is EstadoJob.PRONTO
+    assert repo.job(j2).estado is EstadoJob.PRONTO
+    assert repo.job(j1).conta_id != repo.job(j2).conta_id
+
+
+async def test_com_uma_conta_livre_o_segundo_job_espera_e_nao_estoura(repo, tmp_path):
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 500; repo.salvar_conta(c)
+    j1 = repo.criar_job(job_fast(nome="c1"))
+    j2 = repo.criar_job(job_fast(nome="c2"))
+
+    t = TransporteFalso(saldos={cid: 500}, latencia=0.05)
+    orq = Orquestrador(repo, t, raiz=tmp_path, max_simultaneos=3)
+
+    assert await orq.passo() is True
+    # nao ha conta livre: o segundo passo nem reivindica. Reivindicar para depois
+    # empurrar o job trinta segundos a frente faria o motor arrastar a fila inteira
+    # por nada a cada volta do laco.
+    assert await orq.passo() is False
+    await orq.drenar()
+
+    assert t.pico_abertas == 1
+    assert t.colisoes == []
+    assert repo.job(j2).estado is EstadoJob.PENDENTE
+    assert repo.job(j2).tentativas == 0
+    assert repo.job(j2).reavaliar_em is None   # nao foi adiado, so nao foi puxado
+
+    # com a conta livre de novo, ele roda normalmente
+    assert await ciclo(orq) is True
+    assert repo.job(j1).estado is EstadoJob.PRONTO
+    assert repo.job(j2).estado is EstadoJob.PRONTO
+
+
+async def test_conta_ocupada_nao_e_escolhida_pelo_segundo_job(repo, tmp_path):
+    # a segunda conta e MUITO melhor pela regra normal de escolha (mesmo tier, saldo
+    # maior); o que a faz perder para a primeira e so estar ocupada
+    c1, c2 = duas_contas(repo)
+    rica = repo.conta(c2); rica.saldo = 900; repo.salvar_conta(rica)
+    repo.criar_job(job_fast(nome="c1"))
+    j2 = repo.criar_job(job_fast(nome="c2"))
+
+    t = TransporteFalso(saldos={c1: 500, c2: 900}, latencia=0.05)
+    orq = Orquestrador(repo, t, raiz=tmp_path, max_simultaneos=2)
+    await orq.passo()
+    await orq.passo()
+    await orq.drenar()
+
+    assert t.colisoes == []
+    assert repo.job(j2).conta_id == c1     # sobrou a magra, e esta bom
+
+
+async def test_o_teto_de_simultaneos_segura_o_terceiro_job(repo, tmp_path):
+    ids = [repo.criar_conta(f"c{i}@x.com", Tier.FREE, f"p/{i}") for i in range(3)]
+    for cid in ids:
+        c = repo.conta(cid); c.saldo = 500; repo.salvar_conta(c)
+    for i in range(3):
+        repo.criar_job(job_fast(nome=f"c{i}"))
+
+    t = TransporteFalso(saldos=dict.fromkeys(ids, 500), latencia=0.05)
+    orq = Orquestrador(repo, t, raiz=tmp_path, max_simultaneos=2)
+
+    assert await orq.passo() is True
+    assert await orq.passo() is True
+    assert await orq.passo() is False      # ha conta livre, mas nao ha vaga
+    await orq.drenar()
+
+    assert t.pico_abertas == 2
+    assert len(repo.jobs(EstadoJob.PENDENTE)) == 1
+
+
+async def test_a_conta_e_liberada_quando_o_job_falha(repo, tmp_path):
+    # falha do transporte nao pode deixar a conta marcada como ocupada para sempre:
+    # o pool encolheria a cada erro ate o motor parar sem ninguem entender por que
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 500; repo.salvar_conta(c)
+    repo.criar_job(job_fast(nome="c1"))
+
+    t = TransporteFalso(saldos={cid: 500}, falha_em={cid})
+    orq = Orquestrador(repo, t, raiz=tmp_path)
+    await ciclo(orq)
+
+    assert repo.jobs(EstadoJob.PENDENTE)      # voltou pra fila
+    assert orq.contas_ocupadas == 0
+    # e a prova de que soltou de verdade: o mesmo job roda de novo na mesma conta
+    assert await orq.passo() is True
+    await orq.drenar()
+
+
+async def test_a_conta_e_liberada_quando_a_sessao_morre(repo, tmp_path):
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 500; repo.salvar_conta(c)
+    repo.criar_job(job_fast(nome="c1"))
+
+    orq = Orquestrador(repo, TransporteFalso(saldos={cid: 500}, mortas={cid}),
+                       raiz=tmp_path)
+    await ciclo(orq)
+
+    assert repo.conta(cid).saude is SaudeSessao.EXPIRADA
+    assert orq.contas_ocupadas == 0
+
+
+async def test_job_de_imagem_roda_em_conta_com_saldo_zero(repo, tmp_path):
+    # imagem custa ZERO (medido tres vezes). Exigir saldo dela deixava o pool parado
+    # com contas perfeitamente capazes de gerar.
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 0; c.saldo_confiavel = True; repo.salvar_conta(c)
+    jid = repo.criar_job(Job(id=0, modo=Modo.IMAGEM, modelo=Modelo.NANO_BANANA,
+                             prompt="uma gata", destino="fotos", nome="f1"))
+
+    orq = Orquestrador(repo, TransporteFalso(saldos={cid: 0}), raiz=tmp_path)
+    await ciclo(orq)
+
+    assert repo.job(jid).estado is EstadoJob.PRONTO
+    assert repo.job(jid).conta_id == cid
+
+
+async def test_job_de_imagem_roda_em_conta_seca(repo, tmp_path):
+    # "seca" e o carimbo de "o Flow recusou gerar apesar do saldo". Isso e sobre
+    # credito, e imagem nao gasta credito.
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid)
+    c.saldo = 0
+    c.saldo_confiavel = True
+    c.seca_ate = datetime.now(timezone.utc) + timedelta(hours=1)
+    repo.salvar_conta(c)
+    jid = repo.criar_job(Job(id=0, modo=Modo.IMAGEM, modelo=Modelo.NANO_BANANA,
+                             prompt="uma gata", destino="fotos", nome="f1"))
+
+    orq = Orquestrador(repo, TransporteFalso(saldos={cid: 0}), raiz=tmp_path)
+    await ciclo(orq)
+
+    assert repo.job(jid).estado is EstadoJob.PRONTO
+
+
+async def test_job_de_video_nao_roda_em_conta_sem_saldo_nem_em_conta_seca(repo, tmp_path):
+    seca = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(seca)
+    c.saldo = 500
+    c.saldo_confiavel = True
+    c.seca_ate = datetime.now(timezone.utc) + timedelta(hours=1)
+    repo.salvar_conta(c)
+    pobre = repo.criar_conta("c@d.com", Tier.FREE, "p/2")
+    c2 = repo.conta(pobre); c2.saldo = 3; c2.saldo_confiavel = True
+    repo.salvar_conta(c2)
+    jid = repo.criar_job(job_fast(nome="c1"))
+
+    t = TransporteFalso(saldos={seca: 500, pobre: 3})
+    orq = Orquestrador(repo, t, raiz=tmp_path)
+    await ciclo(orq)
+
+    assert repo.job(jid).estado is EstadoJob.PENDENTE
+    assert t.geracoes == {}
+    assert [e["tipo"] for e in repo.eventos(jid)] == ["sem_conta_apta"]
+
+
+async def test_semeadura_nao_abre_navegador_em_conta_ocupada(repo, tmp_path):
+    # `semear_saldo` abre Chrome. Numa conta que ja esta gerando, isso e o segundo
+    # Chrome no mesmo `--user-data-dir` — o que nao existe.
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 500; repo.salvar_conta(c)
+    repo.criar_job(job_fast(nome="c1"))
+
+    t = TransporteFalso(saldos={cid: 500}, latencia=0.05)
+    orq = Orquestrador(repo, t, raiz=tmp_path)
+    assert await orq.passo() is True
+    await asyncio.sleep(0)          # deixa a tarefa de fundo abrir a sessao
+
+    assert await orq.semear_saldo(repo.conta(cid)) is False
+    await orq.drenar()
+
+    assert t.colisoes == []
+    assert any(e["tipo"] == "saldo_nao_semeado" for e in repo.eventos())
+
+
+async def test_retomada_espera_a_conta_em_vez_de_pagar_de_novo(repo, tmp_path):
+    # job com `id_remoto` tem geracao PAGA em curso, e so a conta que a criou consegue
+    # retoma-la. Se ela estiver ocupada, esperar custa tempo; trocar de conta custa
+    # credito — um Quality de 11 minutos custa 200 e nao entrega nada.
+    c1, c2 = duas_contas(repo)
+    repo.criar_job(job_fast(nome="c1"))
+    j2 = repo.criar_job(job_fast(nome="c2"))
+    preso = repo.job(j2)
+    preso.id_remoto = "card-0"
+    preso.conta_id = c1
+    repo.salvar_job(preso)
+
+    t = TransporteFalso(saldos={c1: 500, c2: 500}, latencia=0.05)
+    orq = Orquestrador(repo, t, raiz=tmp_path, max_simultaneos=2)
+
+    await orq.passo()          # o primeiro job pega a conta c1
+    await orq.passo()          # o segundo esbarra nela
+    await orq.drenar()
+
+    depois = repo.job(j2)
+    assert depois.estado is EstadoJob.PENDENTE
+    assert depois.id_remoto == "card-0"        # a geracao paga foi preservada
+    assert depois.conta_id == c1
+    assert depois.tentativas == 0
+    assert any(e["tipo"] == "retomada_espera_a_conta" for e in repo.eventos(j2))
+
+
+# --------------------------------------------------------------------- o teto
+
+
+def test_teto_padrao_e_cinco():
+    # decidido sobre a maquina do usuario: 62 GB, ~30 GB livres com o ComfyUI de pe,
+    # e cada Chrome custa entre 400 MB e 1 GB
+    assert MAX_SIMULTANEOS == 5
+    assert teto_do_ambiente() == 5
+
+
+def test_teto_sai_da_variavel_de_ambiente(monkeypatch):
+    # a saida de emergencia quando a maquina engasgar com o ComfyUI gerando junto
+    monkeypatch.setenv("FLOWPOOL_MAX_SIMULTANEOS", "2")
+    assert teto_do_ambiente() == 2
+
+
+def test_teto_invalido_nao_derruba_o_servico(monkeypatch):
+    # erro de digitacao numa variavel de ambiente nao pode impedir o app de subir;
+    # e zero pararia a fila em silencio, que e pior do que um teto errado
+    monkeypatch.setenv("FLOWPOOL_MAX_SIMULTANEOS", "abacaxi")
+    assert teto_do_ambiente() == MAX_SIMULTANEOS
+    monkeypatch.setenv("FLOWPOOL_MAX_SIMULTANEOS", "0")
+    assert teto_do_ambiente() == 1

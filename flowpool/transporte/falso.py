@@ -40,6 +40,19 @@ class TransporteFalso:
         # quantas sessoes foram abertas. E o contador que denuncia navegador aberto
         # sem necessidade — o laco de semeadura de saldo num pool legitimamente seco
         self.aberturas = 0
+        # Quantas sessoes estao abertas AGORA, e o maior numero que ja esteve aberto
+        # ao mesmo tempo. O pico e o que PROVA geracao simultanea: medir por tempo
+        # total e frouxo, porque duas geracoes sequenciais rapidas passariam.
+        self.abertas = 0
+        self.pico_abertas = 0
+        # Ids de conta que chegaram a ter DUAS sessoes abertas ao mesmo tempo. Tem que
+        # ficar vazia sempre: dois Chromes com o mesmo `--user-data-dir` nao coexistem
+        # — o segundo entrega a URL ao primeiro e morre, e o Playwright ve
+        # `TargetClosedError`. O falso registra em vez de levantar porque o
+        # orquestrador engole excecao de transporte como "job falhou", e a colisao
+        # ficaria escondida atras de uma mensagem de falha comum.
+        self.colisoes: list[int] = []
+        self._abertas_por_conta: dict[int, int] = {}
         self.geracoes: dict[str, tuple[int, Estado]] = {}
         self.consultas: dict[str, int] = {}
         self._seq = 0
@@ -57,7 +70,14 @@ class TransporteFalso:
     async def abrir_sessao(self, conta: Conta) -> Sessao:
         self.aberturas += 1
         if conta.id in self.mortas:
+            # sessao que nao abre nao conta como janela: ninguem vai chamar `fechar`
             raise SessaoMorta(f"sessao da conta {conta.email} expirou")
+        vivas = self._abertas_por_conta.get(conta.id, 0)
+        if vivas:
+            self.colisoes.append(conta.id)
+        self._abertas_por_conta[conta.id] = vivas + 1
+        self.abertas += 1
+        self.pico_abertas = max(self.pico_abertas, self.abertas)
         return Sessao(conta=conta)
 
     async def saldo(self, s: Sessao) -> int:
@@ -123,4 +143,7 @@ class TransporteFalso:
         return destino
 
     async def fechar(self, s: Sessao) -> None:
-        return None
+        vivas = self._abertas_por_conta.get(s.conta.id, 0)
+        if vivas:
+            self._abertas_por_conta[s.conta.id] = vivas - 1
+            self.abertas -= 1

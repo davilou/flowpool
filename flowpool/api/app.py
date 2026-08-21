@@ -22,7 +22,7 @@ from flowpool.api.esquemas import (
     Saude,
 )
 from flowpool.dados.repo import Repo
-from flowpool.motor.orquestrador import Orquestrador
+from flowpool.motor.orquestrador import MAX_SIMULTANEOS, Orquestrador
 from flowpool.nucleo.erros import ProxyInvalido
 from flowpool.nucleo.proxy import mascarar
 from flowpool.nucleo.tipos import Conta, EstadoJob, Job, SaudeSessao
@@ -80,10 +80,8 @@ def _resposta_conta(c: Conta) -> RespostaConta:
 
 
 def criar_app(repo: Repo, transporte: FlowTransport, raiz: Path | str,
-              rodar_motor: bool = False, max_simultaneos: int = 3) -> FastAPI:
-    # o default fica em 3 de proposito: baixa-lo aqui mudaria o comportamento dos testes
-    # da API, que rodam com transporte falso e nenhuma janela. Quem sabe do custo de
-    # tela e o `__main__`, e e ele que passa 1.
+              rodar_motor: bool = False,
+              max_simultaneos: int = MAX_SIMULTANEOS) -> FastAPI:
     orq = Orquestrador(repo, transporte, raiz, max_simultaneos=max_simultaneos)
 
     @asynccontextmanager

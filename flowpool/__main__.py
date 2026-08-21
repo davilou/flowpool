@@ -14,6 +14,7 @@ import uvicorn
 
 from flowpool.api.app import criar_app
 from flowpool.dados.repo import Repo
+from flowpool.motor.orquestrador import teto_do_ambiente
 from flowpool.transporte.pw.cura import ligar_no_banco
 from flowpool.transporte.pw.transporte import TransportePlaywright
 
@@ -22,17 +23,22 @@ BANCO = RAIZ / "flowpool" / "flowpool.db"
 
 PORTA = 8777
 
-# UM por enquanto, e o motivo nao e RAM.
+# Quantas geracoes ao mesmo tempo. Padrao 5, configuravel por
+# `FLOWPOOL_MAX_SIMULTANEOS` — ver `motor/orquestrador.py`, onde o numero mora.
 #
-# Cada worker precisa de uma janela de Chrome VISIVEL: o IntersectionObserver que
-# renderiza a lista de projetos e libera o aviso de privacidade nao dispara com
-# `visibilityState == 'hidden'`, e o Chrome no Windows marca como oculta a janela que
-# esta totalmente coberta por outra. Duas janelas empilhadas numa tela so sao uma
-# janela funcionando e outra travada sem erro nenhum.
+# CORRECAO de uma afirmacao que este arquivo carregou por semanas: dizia-se que a
+# janela COBERTA por outra congela, porque o Chrome no Windows a marcaria como oculta
+# e o IntersectionObserver nao dispararia com `visibilityState == 'hidden'`. E FALSO.
+# Medido na maquina do usuario em 2026-08-21: a janela ficou `visible` por 90 segundos
+# seguidos, coberta ou nao. O Playwright sobe o Chrome com
+# `--disable-backgrounding-occluded-windows`, que impede exatamente esse
+# comportamento. As janelas podem se sobrepor a vontade.
 #
-# Alem disso, duas sessoes no mesmo perfil sao impossiveis: dois Chromes com o mesmo
-# --user-data-dir fazem o segundo entregar para o primeiro e morrer.
-MAX_SIMULTANEOS = 1
+# O que continua verdadeiro e vale por dois: duas sessoes no mesmo perfil sao
+# impossiveis. Dois Chromes com o mesmo `--user-data-dir` fazem o segundo entregar a
+# URL ao primeiro e morrer. Por isso o teto de verdade e o numero de CONTAS LIVRES —
+# nao de janelas.
+MAX_SIMULTANEOS = teto_do_ambiente()
 
 
 def main() -> None:

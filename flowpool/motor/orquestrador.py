@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -20,24 +21,101 @@ ESPERA_RESET = timedelta(hours=1)
 TIMEOUT_GERACAO = timedelta(minutes=10)
 INTERVALO_POLLING = 5.0
 
+# Quanto um job espera quando a conta que ele precisa esta OCUPADA — nao seca, nao
+# expirada: ocupada. Sao coisas de escala diferente. Conta seca espera o reset diario
+# (`ESPERA_RESET`, uma hora); conta ocupada espera o vizinho terminar, o que leva
+# minutos. Adiar por uma hora um job que so esbarrou numa janela ocupada deixaria o
+# pool ocioso com a fila cheia.
+ESPERA_JANELA = timedelta(seconds=30)
+
+# Teto de geracoes ao mesmo tempo. Cada uma segura uma janela de Chrome e uma conta.
+#
+# 5 e o padrao decidido pelo usuario sobre a maquina dele: 62 GB de RAM, ~30 GB livres
+# com o ComfyUI residente, e cada Chrome custa entre 400 MB e 1 GB. Sobra folga.
+#
+# Este numero raramente e o limite de verdade. O teto REAL e o menor entre tres coisas,
+# e a que costuma mandar e a primeira:
+#   1. quantas CONTAS estao livres — uma geracao por conta, sempre;
+#   2. este teto;
+#   3. a memoria, compartilhada com o ComfyUI quando ele estiver gerando junto.
+# Se a maquina engasgar, baixar este numero e a primeira coisa a tentar, e a variavel
+# de ambiente existe para isso.
+MAX_SIMULTANEOS = 5
+
+
+def teto_do_ambiente(padrao: int = MAX_SIMULTANEOS) -> int:
+    """Le `FLOWPOOL_MAX_SIMULTANEOS`, caindo no padrao quando o valor nao serve.
+
+    Valor invalido nao derruba o servico: um erro de digitacao numa variavel de
+    ambiente nao pode impedir o app de subir, e um teto errado se percebe olhando o
+    painel. Minimo 1 — zero pararia a fila em silencio.
+    """
+    bruto = os.environ.get("FLOWPOOL_MAX_SIMULTANEOS", "").strip()
+    if not bruto:
+        return padrao
+    try:
+        return max(1, int(bruto))
+    except ValueError:
+        return padrao
+
 
 def _extensao(modo: Modo) -> str:
     return ".png" if modo is Modo.IMAGEM else ".mp4"
 
 
 class Orquestrador:
+    """Reivindica jobs e os despacha em paralelo, um por conta.
+
+    A INVARIANTE que organiza tudo aqui: um job por conta, um navegador por conta.
+    Nao e preferencia — dois Chromes com o mesmo `--user-data-dir` nao coexistem: o
+    segundo entrega a URL ao primeiro e morre, e o Playwright ve `TargetClosedError`.
+
+    Ela vale de graca uma segunda coisa: como dois trabalhadores nunca tocam a mesma
+    conta, nunca ha duas escritas concorrentes na mesma linha de `conta`. `salvar_conta`
+    grava a linha inteira a partir de uma copia carregada no comeco do passo, e sem a
+    exclusividade isso seria uma escrita perdida a cada cruzamento.
+
+    O rastro de contas ocupadas mora AQUI, em memoria, e nao no banco: e estado de
+    processo, nao dado do dominio. Um restart o limpa naturalmente, que e exatamente o
+    certo — depois de um restart nao ha navegador nenhum aberto.
+    """
+
     def __init__(self, repo: Repo, transporte: FlowTransport, raiz: Path | str,
-                 max_simultaneos: int = 3,
+                 max_simultaneos: int = MAX_SIMULTANEOS,
                  timeout_geracao: timedelta = TIMEOUT_GERACAO,
                  intervalo_polling: float = INTERVALO_POLLING) -> None:
         self.repo = repo
         self.transporte = transporte
         self.raiz = Path(raiz)
-        self.sem = asyncio.Semaphore(max_simultaneos)
+        self.max_simultaneos = max(1, int(max_simultaneos))
         # parametrizados para o teste nao ter que esperar dez minutos de verdade
         self.timeout_geracao = timeout_geracao
         self.intervalo_polling = intervalo_polling
         self._rodando = False
+        # ids de conta com navegador aberto agora — por geracao ou por leitura de saldo
+        self._ocupadas: set[int] = set()
+        self._tarefas: set[asyncio.Task] = set()
+
+    # ------------------------------------------------------------- o que o painel ve
+
+    @property
+    def gerando(self) -> int:
+        """Quantas geracoes estao em curso."""
+        return len(self._tarefas)
+
+    @property
+    def contas_ocupadas(self) -> int:
+        """Quantas contas tem navegador aberto agora.
+
+        Pode passar de `gerando` por um: a leitura de saldo tambem abre navegador e
+        tambem toma a conta, sem ser uma geracao.
+        """
+        return len(self._ocupadas)
+
+    def ocupada(self, conta_id: int) -> bool:
+        return conta_id in self._ocupadas
+
+    # ------------------------------------------------------------------- recuperacao
 
     def recuperar(self) -> int:
         """Resolve os jobs que um crash deixou presos em `rodando`. Roda no boot.
@@ -73,48 +151,128 @@ class Orquestrador:
                     json.dumps({"id_remoto": job.id_remoto}))
         return len(presos)
 
+    # ------------------------------------------------------------------------ o passo
+
     async def passo(self) -> bool:
-        """Puxa um job e leva ate o fim. Devolve False se nao havia job.
+        """Reivindica um job, reserva a conta dele e SOLTA a geracao em segundo plano.
 
-        O semaforo e adquirido ANTES de reivindicar. Reivindicar primeiro deixaria o
-        job puxado visivel como `pendente` enquanto o worker espera na fila do
-        semaforo — e outro worker o pegaria, gerando e pagando duas vezes pelo mesmo
-        job, com o perdedor sobrescrevendo o arquivo do vencedor.
+        Devolve False quando nao havia o que despachar — sem vaga, sem conta livre ou
+        sem job. Quem chama usa isso para saber se vale tentar de novo na hora ou
+        dormir um pouco.
+
+        NAO espera a geracao terminar: era isso que fazia a fila andar uma por vez.
+        Para esperar (testes, parada limpa) existe `drenar`.
+
+        A ORDEM aqui e o que torna o paralelismo seguro. Reservar a conta acontece
+        ANTES de `create_task`, sem nenhum `await` no meio: se a reserva ficasse dentro
+        da tarefa, dois passos seguidos reivindicariam dois jobs e escolheriam a MESMA
+        conta, porque a primeira tarefa ainda nao teria comecado a rodar. Dois Chromes
+        no mesmo perfil, e o segundo morre.
+
+        E reivindicar continua vindo depois do teto, pelo mesmo motivo de sempre: job
+        puxado e devolvido a fila e job que outro worker pega no meio do caminho.
         """
-        async with self.sem:
-            agora = datetime.now(timezone.utc)
-            job = self.repo.reivindicar(agora)
-            if job is None:
-                return False
+        if len(self._tarefas) >= self.max_simultaneos:
+            return False
+        if not self._ha_conta_livre():
+            return False
+        agora = datetime.now(timezone.utc)
+        job = self.repo.reivindicar(agora)
+        if job is None:
+            return False
 
-            try:
-                conta = self._conta_para(job, agora)
-                if conta is None and await self._semear_uma_conta(agora):
-                    # A leitura pode ter revelado credito que a escolha nao enxergava.
-                    # `agora` continua o mesmo de proposito: o relogio do passo nao
-                    # anda no meio dele, e a semeadura demora segundos, nao horas.
-                    conta = self._conta_para(job, agora)
-            except Exception as e:
-                # `reivindicar` ja marcou o job `rodando`. Deixar a excecao subir
-                # daqui o deixaria travado nesse estado ate o proximo boot — e
-                # `ModeloSemCusto`, que e erro de configuracao, e exatamente o caso
-                # que chega aqui. Gasta tentativa: reprocessar para sempre um modelo
-                # sem custo cadastrado nao conserta o cadastro.
-                erro = f"{type(e).__name__}: {e}"
-                self.repo.registrar_evento(job.id, None, "escolha_falhou",
-                                           json.dumps({"erro": erro}))
-                self._devolver(job, erro, gasta_tentativa=True)
-                return True
+        conta = await self._destinar(job, agora)
+        if conta is None:
+            # `_destinar` ja devolveu o job a fila com o evento certo. True porque
+            # algo ANDOU: o laco pode tentar o proximo job em vez de dormir.
+            return True
 
-            if conta is None:
-                job.estado = EstadoJob.PENDENTE
-                job.reavaliar_em = agora + ESPERA_RESET
-                self.repo.salvar_job(job)
-                self.repo.registrar_evento(job.id, None, "sem_conta_apta")
-                return True
-
-            await self._executar(job, conta)
+        tarefa = asyncio.create_task(self._conduzir(job, conta))
+        self._tarefas.add(tarefa)
+        tarefa.add_done_callback(self._tarefas.discard)
         return True
+
+    def _ha_conta_livre(self) -> bool:
+        """Se existe conta viva que nao esta com navegador aberto.
+
+        Serve para nao reivindicar job que nao teria onde rodar. Sem esta pergunta, com
+        as janelas cheias, cada volta do laco puxaria mais um job so para empurra-lo
+        trinta segundos a frente — a fila inteira remexida por nada.
+
+        Pool sem NENHUMA conta viva devolve True de proposito: ali o job PRECISA ser
+        reivindicado, porque e a recusa dele que vira o evento `sem_conta_apta` que o
+        painel usa para explicar por que nada anda.
+        """
+        vivas = [c for c in self.repo.contas()
+                 if c.ativa and c.saude is SaudeSessao.VIVA]
+        if not vivas:
+            return True
+        return any(c.id not in self._ocupadas for c in vivas)
+
+    async def _destinar(self, job: Job, agora: datetime) -> Conta | None:
+        """Reserva a conta em que o job vai rodar, ou o devolve a fila e retorna None.
+
+        A unica parte async e a semeadura de saldo, que abre navegador. O caminho
+        comum nao tem `await` nenhum, e e isso que deixa a reserva atomica.
+        """
+        if job.id_remoto is not None and job.conta_id in self._ocupadas:
+            # Existe geracao PAGA em curso, e so a conta que a criou consegue retoma-la.
+            # Trocar de conta aqui abandonaria o credito ja gasto e pagaria de novo: um
+            # Quality de 11 minutos custa 200 creditos e nao entrega nada. Esperar a
+            # janela vagar custa minutos; a troca custa dinheiro.
+            job.estado = EstadoJob.PENDENTE
+            job.reavaliar_em = agora + ESPERA_JANELA
+            self.repo.salvar_job(job)
+            self.repo.registrar_evento(job.id, job.conta_id, "retomada_espera_a_conta",
+                                       json.dumps({"id_remoto": job.id_remoto}))
+            return None
+
+        try:
+            conta = self._reservar_conta(job, agora)
+            if conta is None and await self._semear_uma_conta(agora):
+                # A leitura pode ter revelado credito que a escolha nao enxergava.
+                # `agora` continua o mesmo de proposito: o relogio do passo nao anda no
+                # meio dele, e a semeadura demora segundos, nao horas.
+                conta = self._reservar_conta(job, agora)
+        except Exception as e:
+            # `reivindicar` ja marcou o job `rodando`. Deixar a excecao subir daqui o
+            # deixaria travado nesse estado ate o proximo boot — e `ModeloSemCusto`,
+            # que e erro de configuracao, e exatamente o caso que chega aqui. Gasta
+            # tentativa: reprocessar para sempre um modelo sem custo cadastrado nao
+            # conserta o cadastro.
+            erro = f"{type(e).__name__}: {e}"
+            self.repo.registrar_evento(job.id, None, "escolha_falhou",
+                                       json.dumps({"erro": erro}))
+            self._devolver(job, erro, gasta_tentativa=True)
+            return None
+
+        if conta is not None:
+            return conta
+
+        # "nenhuma conta serve" e "as que servem estao ocupadas" sao coisas diferentes,
+        # e a espera de cada uma tambem: a primeira aguarda o reset diario, a segunda
+        # aguarda a janela do vizinho fechar.
+        contas = self.repo.contas()
+        cheio = escolher(contas, job.modelo, agora, job.quantidade,
+                         job.duracao) is not None
+        job.estado = EstadoJob.PENDENTE
+        job.reavaliar_em = agora + (ESPERA_JANELA if cheio else ESPERA_RESET)
+        self.repo.salvar_job(job)
+        self.repo.registrar_evento(
+            job.id, None, "sem_conta_livre" if cheio else "sem_conta_apta")
+        return None
+
+    def _reservar_conta(self, job: Job, agora: datetime) -> Conta | None:
+        """Escolhe a conta e JA a marca ocupada. Sem `await` no meio, de proposito.
+
+        Escolher e marcar precisam ser um passo so. Com um ponto de suspensao entre os
+        dois, dois trabalhadores leem o mesmo conjunto de contas livres, escolhem a
+        mesma e o segundo Chrome morre no `--user-data-dir` do primeiro.
+        """
+        escolhida = self._conta_para(job, agora)
+        if escolhida is not None:
+            self._ocupadas.add(escolhida.id)
+        return escolhida
 
     def _conta_para(self, job: Job, agora: datetime) -> Conta | None:
         """Conta em que este job deve rodar.
@@ -122,15 +280,48 @@ class Orquestrador:
         Job que volta a fila com `id_remoto` tem geracao paga em curso no Flow, e ela
         so pode ser retomada de dentro da conta que a criou — por isso aquela conta
         tem preferencia. Se ela nao servir mais, a escolha normal vale e o job gera do
-        zero.
+        zero. (O caso "ela serve mas esta ocupada" nem chega aqui: `_destinar` faz o
+        job esperar, porque trocar de conta ali jogaria credito fora.)
         """
         contas = self.repo.contas()
         if job.id_remoto is not None and job.conta_id is not None:
             anterior = next((c for c in contas if c.id == job.conta_id), None)
-            if anterior is not None and apta(anterior, job.modelo, agora,
-                                             job.quantidade, job.duracao):
+            if anterior is not None and anterior.id not in self._ocupadas \
+                    and apta(anterior, job.modelo, agora, job.quantidade, job.duracao):
                 return anterior
-        return escolher(contas, job.modelo, agora, job.quantidade, job.duracao)
+        return escolher(contas, job.modelo, agora, job.quantidade, job.duracao,
+                        ocupadas=self._ocupadas)
+
+    async def _conduzir(self, job: Job, conta: Conta) -> None:
+        """Leva o job ate o fim e SEMPRE devolve a conta ao pool.
+
+        O `finally` e a peca que impede o pool de encolher: conta que nao e liberada
+        depois de uma falha some da escolha para sempre, e o motor vai parando sem
+        ninguem entender por que.
+
+        O `except` largo existe porque isto roda como tarefa de fundo. `_executar` ja
+        trata o que sabe tratar; o que escapar dele morreria dentro da task, sem
+        ninguem observando — mesmo motivo do `try` de `rodar()`.
+        """
+        try:
+            await self._executar(job, conta)
+        except Exception as e:
+            self.repo.registrar_evento(
+                job.id, conta.id, "conduzir_falhou",
+                json.dumps({"erro": f"{type(e).__name__}: {e}"}))
+        finally:
+            self._ocupadas.discard(conta.id)
+
+    async def drenar(self) -> None:
+        """Espera as geracoes ja despachadas terminarem. Nao reivindica nada.
+
+        Em laco porque uma tarefa pode terminar enquanto outra ainda roda e o conjunto
+        muda embaixo do `gather`.
+        """
+        while self._tarefas:
+            await asyncio.gather(*tuple(self._tarefas), return_exceptions=True)
+
+    # -------------------------------------------------------------- saldo e semeadura
 
     async def _semear_uma_conta(self, agora: datetime) -> bool:
         """Le o saldo de UMA conta que ainda nao tem numero em que confiar.
@@ -150,23 +341,27 @@ class Orquestrador:
 
         Devolve True quando alguma leitura entrou no banco — e so entao vale reescolher.
         """
-        alvo = self._proxima_a_semear(self.repo.contas(), agora)
+        alvo = self._proxima_a_semear(self.repo.contas(), agora, self._ocupadas)
         if alvo is None:
             return False
         return await self.semear_saldo(alvo)
 
     @staticmethod
-    def _proxima_a_semear(contas: list[Conta], agora: datetime) -> Conta | None:
+    def _proxima_a_semear(contas: list[Conta], agora: datetime,
+                          ocupadas: frozenset[int] | set[int] = frozenset()
+                          ) -> Conta | None:
         """Conta cujo saldo mais precisa ser lido, ou None se nenhuma precisa.
 
         Fica de fora quem ja tem saldo confiavel: sem esse corte, um pool
         legitimamente seco viraria um laco de abrir e fechar navegador a cada volta.
         Fica de fora tambem a conta seca com prazo em aberto — o Flow ja recusou gerar
-        nela apesar do saldo, e reler o numero nao muda isso ate o reset.
+        nela apesar do saldo, e reler o numero nao muda isso ate o reset. E fica de
+        fora a conta OCUPADA: ler saldo abre navegador, e naquele perfil ja ha um.
         """
         candidatas = [
             c for c in contas
             if c.ativa and c.saude == SaudeSessao.VIVA and not c.saldo_confiavel
+            and c.id not in ocupadas
             and (c.seca_ate is None or c.seca_ate <= agora)
         ]
         if not candidatas:
@@ -181,15 +376,25 @@ class Orquestrador:
     async def semear_saldo(self, conta: Conta) -> bool:
         """Abre sessao SO para ler o saldo e reconciliar. Devolve True se leu.
 
-        Nao gasta credito: ler saldo e abrir o menu do avatar, nao gerar nada.
+        Nao gasta credito: ler saldo e abrir o menu do avatar. Mas ABRE NAVEGADOR, e e
+        por isso que toma a conta como qualquer geracao: numa conta que ja esta gerando
+        seria o segundo Chrome no mesmo `--user-data-dir`, e o segundo morre. As rotas
+        do painel chamam esta funcao direto — a trava precisa estar aqui dentro, e nao
+        so no caminho do motor.
 
-        Registra evento sempre, nos dois desfechos. Uma abertura de navegador sem job
+        Registra evento sempre, nos tres desfechos. Uma abertura de navegador sem job
         associado precisa ter explicacao no banco, senao quem for auditar depois vai
         procurar a geracao que a pagou e nao vai achar.
 
         Falha nao propaga: quem chama esta no meio de um passo do motor ou de uma rota
         de cadastro, e nos dois lugares travar seria pior do que ficar sem o numero.
         """
+        if conta.id in self._ocupadas:
+            self.repo.registrar_evento(
+                None, conta.id, "saldo_nao_semeado",
+                json.dumps({"erro": "conta ocupada por uma geracao em curso"}))
+            return False
+        self._ocupadas.add(conta.id)
         sessao = None
         try:
             sessao = await self.transporte.abrir_sessao(conta)
@@ -220,8 +425,19 @@ class Orquestrador:
                 except Exception as e:
                     self.repo.registrar_evento(None, conta.id, "fechar_falhou",
                                                json.dumps({"erro": str(e)}))
+            self._ocupadas.discard(conta.id)
+
+    # --------------------------------------------------------------------- a execucao
 
     async def _executar(self, job: Job, conta: Conta) -> None:
+        """O ciclo de uma geracao, do lado de dentro de uma conta ja reservada.
+
+        Nada aqui e compartilhado entre trabalhadores: `job` e `conta` sao objetos
+        proprios deste passo, e como a conta e exclusiva, `salvar_conta` nunca disputa
+        a mesma linha com ninguem. O que E compartilhado — `self.repo` e o transporte —
+        e serializado: a conexao do sqlite tem trava, e o transporte guarda o estado
+        por (conta, card).
+        """
         # retomada: a geracao ja existe e e da mesma conta. Gerar de novo pagaria duas
         # vezes e deixaria a primeira orfa, terminando no Flow sem ninguem para baixar.
         retomando = job.id_remoto is not None and job.conta_id == conta.id
@@ -446,6 +662,11 @@ class Orquestrador:
     async def rodar(self, intervalo: float = 2.0) -> None:
         """Laco eterno, usado pela API. Para com `parar()`.
 
+        Reivindica SEM PARAR enquanto `passo()` disser que despachou. E isso que enche
+        as janelas: com cinco contas livres e cinco jobs na fila, as cinco geracoes
+        comecam em cinco voltas seguidas do laco, sem esperar nenhuma terminar. Quando
+        `passo()` devolve False — sem vaga, sem conta livre ou sem job — o laco dorme.
+
         Tudo que escapa de `passo()` vira evento e o laco continua. Sem isso a task
         morre e ninguem observa: a API segue respondendo HTTP normalmente enquanto a
         fila nunca mais anda. Tres caminhos reais chegavam aqui — `fechar()` de um
@@ -462,6 +683,10 @@ class Orquestrador:
                     None, None, "passo_falhou",
                     json.dumps({"erro": f"{type(e).__name__}: {e}"}))
                 await asyncio.sleep(intervalo)
+        # parada limpa: as geracoes ja despachadas terminam e fecham seus navegadores.
+        # Sair sem isto deixaria Chrome orfao segurando o perfil, e o proximo boot
+        # esbarraria em `PerfilOcupado` numa conta que nao tem defeito nenhum.
+        await self.drenar()
 
     def parar(self) -> None:
         self._rodando = False
