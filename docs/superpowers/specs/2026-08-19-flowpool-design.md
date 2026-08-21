@@ -649,6 +649,18 @@ Verificado ao vivo no pior caso — três e quatro homônimos já no acervo, tod
 
 **Jobs suspeitos no banco**, pelo padrão "2+ referências com `tentativas > 1`": **#16, #20, #26 e #27** saíram `pronto` e podem ter referência trocada. O #27 é o caso confirmado. Vale conferir os arquivos antes de usá-los.
 
+### Projeto novo com acervo vazio é caso de teste **obrigatório**
+
+**Regra de processo, paga com um bloqueio total em produção.** Qualquer mudança que toque o seletor de mídia tem de ser verificada num **projeto recém-criado**, e não só num projeto que já tem acervo.
+
+O conserto da referência por id trouxe junto um critério de "o painel montou": `[role=option] > 0`. Parece o sinal natural e não é — num projeto novo o acervo está **vazio**, zero itens, legitimamente. O painel abria, o código respondia "não abriu", apertava Escape e desistia depois de três voltas: `o seletor de midia nao abriu depois de 3 cliques no anexar`. **Projeto novo nunca anexava a primeira referência.** Como o usuário trabalha com **um projeto por produto**, todo produto novo nascia travado — e o bloqueio era total, não intermitente. Projetos #8 e #9 e o job #38 morreram assim, enquanto os jobs #31–#37, em projetos com acervo, passavam.
+
+Por que passou pela verificação ao vivo: ela rodou num projeto com acervo cheio (três e quatro homônimos). **O acervo vazio aparece exatamente uma vez por projeto e some no primeiro upload** — é o estado mais comum do usuário no começo de um produto e o mais fácil de nunca ver de novo depois.
+
+A medição também descartou o candidato natural para o critério: o `input[type=file]` **não serve** — não é descendente do `[role=dialog]` e conta 1 na página inteira com o painel aberto *e* fechado; um sinal que vale 1 sempre não distingue estado. Servem as **abas** do painel: 7 com acervo cheio e vazio, 0 com o painel fechado.
+
+**Um resultado negativo que vale registrar:** baixar o teto da espera do painel de 20 s para 8 s — justificado por ele montar em ~100 ms — **quebrou ao vivo**, com a segunda referência voltando a morrer em 180 s. Os ~100 ms são o caminho rápido; generalizar deles para o lento é o mesmo engano que criou a regressão. Se um dia esse tempo interessar, o caminho é medir o caminho **lento**, não encurtar o teto e torcer.
+
 ### O app conta o que está fazendo — log de passo e traço
 
 **O silêncio prolongado é um defeito, não um detalhe de conforto.** Em 21/08 vários jobs de duas referências morreram com `TargetClosedError`, e três rodadas de investigação foram gastas atrás de crash, memória e vazamento de navegador. Não era nada disso: *"sobre o navegador fechando, fui eu que fechei. Por quê? Porque ele estava demorando muito para enviar as duas referências."* O app trabalhava calado por minutos, e olhar uma tela parada e concluir "travou" é a leitura razoável de quem está do lado de fora.
