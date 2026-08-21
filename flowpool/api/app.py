@@ -445,6 +445,13 @@ def criar_app(repo: Repo, transporte: FlowTransport, raiz: Path | str,
         c = repo.conta(id_)
         if c is None:
             raise HTTPException(404, "conta nao existe")
+        if orq.ocupada(c.id):
+            # revalidar abre um Chrome de LOGIN no mesmo `--user-data-dir` que a
+            # geracao em curso esta usando. O segundo Chrome entrega a URL ao primeiro
+            # e morre — o pedido nao falharia sozinho, derrubaria o job junto.
+            raise HTTPException(
+                409, f"{c.email} esta gerando agora; espere a geracao terminar para "
+                     "revalidar a sessao")
         # revalidar E cadastrar: mesmo perfil, mesmo Chrome, mesmas duas telas. A
         # sessao expira em ~48h medidas, entao isto vira rotina, nao excecao. E pelo
         # MESMO proxy: revalidar por outro IP e o unico jeito de a conta trocar de IP
@@ -471,6 +478,13 @@ def criar_app(repo: Repo, transporte: FlowTransport, raiz: Path | str,
         c = repo.conta(id_)
         if c is None:
             raise HTTPException(404, "conta nao existe")
+        if orq.ocupada(c.id):
+            # o motivo aqui e outro, e a mensagem precisa dizer qual: mandar revalidar
+            # uma conta que esta perfeitamente viva e so ocupada faria a pessoa passar
+            # por um login manual desnecessario
+            raise HTTPException(
+                409, f"{c.email} esta gerando agora; o saldo e relido sozinho no fim "
+                     "da geracao")
         if not await orq.semear_saldo(c):
             # 409 em vez de 200 com o numero velho: o botao existe justamente para
             # conferir, e devolver o valor antigo como se fosse fresco seria pior do
@@ -504,6 +518,9 @@ def criar_app(repo: Repo, transporte: FlowTransport, raiz: Path | str,
         vivas = [c for c in contas if c.ativa and c.saude is SaudeSessao.VIVA]
         return Saude(
             contas_vivas=len(vivas),
+            gerando=orq.gerando,
+            max_simultaneos=orq.max_simultaneos,
+            contas_ocupadas=orq.contas_ocupadas,
             credito_total=sum(c.saldo for c in vivas),
             fila_pendente=len(repo.jobs(EstadoJob.PENDENTE)),
             contas_expiradas=[c.email for c in contas if c.saude is SaudeSessao.EXPIRADA],

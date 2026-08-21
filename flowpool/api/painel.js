@@ -183,6 +183,13 @@ function pintarSaude(s) {
   $("contas-vivas").textContent = s.contas_vivas;
   $("fila-pendente").textContent = s.fila_pendente;
 
+  // "3 de 5" e nao "3": sozinho, o numero nao diz se o pool esta cheio ou ocioso, e
+  // e essa a pergunta de quem olha a faixa enquanto varias janelas geram. Quantas
+  // contas estao ocupadas e o que de fato limita — o teto de janelas quase nunca e
+  // quem manda.
+  $("ocupacao").textContent = `${s.contas_ocupadas} de ${s.contas_vivas}`;
+  $("gerando").textContent = `${s.gerando} de ${s.max_simultaneos}`;
+
   const faixa = $("faixa-expiradas");
   const expiradas = s.contas_expiradas || [];
   if (expiradas.length === 0) { esconder(faixa); return; }

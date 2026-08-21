@@ -823,3 +823,66 @@ def test_renomear_com_nome_em_branco_da_422(com_geracoes):
     c, _, job, _ = com_geracoes
     jid = job("provisorio", None)
     assert c.patch(f"/jobs/{jid}", json={"nome": "   "}).status_code == 422
+
+
+# --- o painel precisa enxergar a ocupacao do pool -----------------------
+
+
+def test_saude_mostra_o_pool_ocioso(cliente):
+    # "a fila esta parada" e "as janelas estao todas cheias" sao estados diferentes e
+    # eram indistinguiveis no painel
+    c, repo = cliente
+    repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    s = c.get("/saude").json()
+    assert s["gerando"] == 0
+    assert s["contas_ocupadas"] == 0
+    assert s["max_simultaneos"] >= 1
+
+
+def test_saude_conta_as_contas_ocupadas(cliente):
+    c, repo = cliente
+    a = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    repo.criar_conta("b@b.com", Tier.FREE, "p/2")
+    c.app.state.orq._ocupadas.add(a)
+
+    s = c.get("/saude").json()
+    assert s["contas_ocupadas"] == 1
+    assert s["contas_vivas"] == 2       # e o "1 de 2" que o painel mostra
+
+
+def test_reler_saldo_de_conta_ocupada_e_409_sem_falar_em_sessao(cliente):
+    # ler saldo abre navegador, e naquele perfil ja ha um. A mensagem NAO pode mandar
+    # revalidar: a sessao esta viva, e o login manual seria por nada
+    c, repo = cliente
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c.app.state.orq._ocupadas.add(cid)
+
+    r = c.post(f"/contas/{cid}/saldo")
+    assert r.status_code == 409
+    assert "gerando" in r.json()["detail"]
+    assert "revalide" not in r.json()["detail"]
+
+
+def test_revalidar_conta_ocupada_e_409(cliente):
+    # revalidar abre um Chrome de LOGIN no mesmo --user-data-dir da geracao em curso:
+    # o segundo entrega a URL ao primeiro e morre, derrubando o job junto
+    c, repo = cliente
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c.app.state.orq._ocupadas.add(cid)
+
+    r = c.post(f"/contas/{cid}/revalidar")
+    assert r.status_code == 409
+
+
+def test_a_lista_de_jobs_diz_em_qual_conta_cada_um_roda(cliente):
+    # com varias geracoes ao mesmo tempo, "qual job esta em qual conta" deixa de ser
+    # curiosidade e vira a unica forma de ler o painel
+    c, repo = cliente
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    r = c.post("/jobs", json={"modo": "t2v", "modelo": "veo-fast", "prompt": "p",
+                              "produto": "Moda", "nome": "n"})
+    jid = r.json()["id"]
+    j = repo.job(jid); j.conta_id = cid; repo.salvar_job(j)
+
+    achado = next(x for x in c.get("/jobs").json() if x["id"] == jid)
+    assert achado["conta_id"] == cid

@@ -316,6 +316,14 @@ class RespostaColagem(BaseModel):
 
 class Saude(BaseModel):
     contas_vivas: int
+    # Quantas geracoes estao em curso AGORA e qual e o teto. Com o pool rodando varias
+    # janelas, "a fila esta parada" e "as cinco janelas estao cheias" sao estados
+    # completamente diferentes e ate agora indistinguiveis no painel.
+    gerando: int
+    max_simultaneos: int
+    # Contas com navegador aberto. Passa de `gerando` por um quando alguma leitura de
+    # saldo esta acontecendo — ela tambem abre navegador e tambem toma a conta.
+    contas_ocupadas: int
     credito_total: int
     fila_pendente: int
     contas_expiradas: list[str]
