@@ -136,6 +136,34 @@ CHIP_CONFIG = 'button:has-text("crop_")'
 # ligadura), e o clique fecharia o painel em vez de escolher a proporcao.
 PAINEL_CHIP = '[role=dialog], [role=menu]'   # CONFIRMAR ao vivo
 
+# MEDIDO 2026-08-20: o painel do chip e um componente Radix, e ele monta um VEU sobre a
+# tela enquanto esta aberto — `<div data-state="open" aria-hidden="true">`. O veu nao
+# aparece (aria-hidden) mas INTERCEPTA clique: enquanto ele existir, nada fora do painel
+# recebe evento. E ha dois niveis, porque o dropdown de modelo abre por cima do painel,
+# entao um `Escape` so fecha o de cima.
+#
+# O sintoma e enganoso: o erro fala do elemento que se queria clicar ("Timeout ao clicar
+# no campo de prompt"), nunca do veu que o cobria.
+VEU_ABERTO = 'div[data-state="open"][aria-hidden="true"]'
+
+# --- aviso de direitos sobre o que se envia -----------------------------
+# MEDIDO 2026-08-20 (por PRINT, depois de duas tentativas perdidas deduzindo pelo DOM).
+# O Flow mostra um modal "Aviso" na PRIMEIRA vez que uma conta envia arquivo:
+#
+#   "Verifique se voce tem os direitos necessarios sobre as imagens ou os arquivos que
+#    enviar, incluindo imagens de menores de idade. Nao gere conteudo que viole os
+#    direitos de terceiros..."          [Cancelar]  [Concordo]
+#
+# Ele so aparece uma vez por conta, e por isso a verificacao tem que ser RAPIDA e NAO
+# bloqueante: procurar por 15s um aviso ja aceito faria toda geracao futura pagar o
+# preco de um pop-up que existiu no primeiro dia. Olha, nao achou, segue.
+#
+# Era ele que travava a geracao com referencia — o veu dele intercepta clique, e o erro
+# aparecia como "timeout ao clicar no campo de prompt", falando do elemento coberto e
+# nunca do que o cobria.
+AVISO_DIREITOS = 'text=/direitos necess[aá]rios/i'
+BOTAO_CONCORDO = 'button:has-text("Concordo")'
+
 # Modos: casar pela LIGADURA, nunca pelo rotulo. As chaves sao os valores de `Modo`
 # (nucleo/tipos.py) — este arquivo nao importa dominio, so espelha os nomes.
 MODO_ICONE = {

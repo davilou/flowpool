@@ -249,6 +249,58 @@ class TransportePlaywright:
             # cai no layout velho
             await pagina.wait_for_timeout(1200)
 
+    async def print_de_falha(self, pagina, motivo: str) -> Path | None:
+        """Salva um print quando alguma coisa da errado. Devolve o caminho.
+
+        Existe porque diagnosticar interface pelo DOM e adivinhar. Duas tentativas
+        foram perdidas deduzindo que um `<div data-state=open aria-hidden>` era o painel
+        do chip; era um modal de aviso do Google, e UM PRINT teria mostrado isso em dois
+        segundos. Quem diagnostica sem ver a tela conserta o elemento errado.
+
+        Nunca levanta: um print que falha nao pode virar o erro que se estava tentando
+        explicar.
+        """
+        try:
+            destino = Path("scratch/falhas")
+            destino.mkdir(parents=True, exist_ok=True)
+            # sem timestamp: o Playwright nao expoe relogio e importar `time` aqui so
+            # para nomear arquivo nao paga. O motivo ja distingue os casos, e o ultimo
+            # print de cada motivo e o que interessa.
+            limpo = re.sub(r"[^a-z0-9]+", "-", dom.sem_acento(motivo))[:50].strip("-")
+            caminho = destino / f"{limpo or 'falha'}.png"
+            await pagina.screenshot(path=str(caminho))
+            print(f"print da falha: {caminho}")
+            return caminho
+        except Exception:
+            return None
+
+    async def _fechar_painel(self, pagina, tentativas: int = 4) -> None:
+        """Fecha o painel do chip e ESPERA o veu sumir.
+
+        Um `Escape` so nao basta, e a razao e que ha DOIS niveis: o dropdown de modelo
+        abre por cima do painel. O primeiro Escape fecha o de cima e o painel continua
+        aberto — com um `<div data-state="open" aria-hidden="true">` cobrindo a tela.
+        Esse veu nao e visivel, mas intercepta clique: o passo seguinte (clicar no campo
+        de prompt) ficava 15s tentando e estourava, com a mensagem falando do campo e
+        nao do veu que o cobria.
+
+        Espera-se o ESTADO, nao o tempo. Foi por dormir 1200ms fixos aqui que o defeito
+        so aparecia as vezes.
+        """
+        for _ in range(tentativas):
+            if await pagina.locator(sel.VEU_ABERTO).count() == 0:
+                return
+            await pagina.keyboard.press("Escape")
+            try:
+                await pagina.locator(sel.VEU_ABERTO).first.wait_for(
+                    state="detached", timeout=2500)
+            except Exception:
+                continue
+        if await pagina.locator(sel.VEU_ABERTO).count() > 0:
+            raise GeracaoFalhou(
+                "o painel do chip nao fechou: o veu continua cobrindo a tela e nenhum "
+                "clique fora dele passaria")
+
     async def _configurar(self, pagina, p: Pedido) -> str:
         """Abre o chip, ajusta tudo e CONFERE. Devolve o texto final do chip.
 
@@ -298,8 +350,7 @@ class TransportePlaywright:
             await self._clicar_unico(painel, sel.DURACAO[duracao], "duracao")
         await self._clicar_unico(painel, sel.QUANTIDADE[p.quantidade], "quantidade")
 
-        await pagina.keyboard.press("Escape")
-        await pagina.wait_for_timeout(1200)
+        await self._fechar_painel(pagina)
 
         chip = await self._texto_do_chip(pagina)
         faltando = analise.faltando_no_chip(chip, modo, p.proporcao, p.quantidade, duracao)
@@ -315,7 +366,15 @@ class TransportePlaywright:
 
     # ------------------------------------------------------------------- gerar
     async def gerar(self, s: Sessao, p: Pedido) -> str:
+        """Envolvido em print-em-falha: interface so se diagnostica vendo a tela."""
         _, _, pagina = s.handle
+        try:
+            return await self._gerar(s, p, pagina)
+        except Exception as e:
+            await self.print_de_falha(pagina, f"gerar {p.modo.value} {type(e).__name__}")
+            raise
+
+    async def _gerar(self, s: Sessao, p: Pedido, pagina) -> str:
         # o que o modo nao aceita e recusado ANTES de qualquer coisa: nenhum clique
         # dado, nenhum credito gasto, e a reserva do orquestrador ainda estornavel.
         # Antes tambem da checagem de CARD_GRADE, para a mensagem falar do pedido
@@ -405,6 +464,29 @@ class TransportePlaywright:
             raise GeracaoFalhou(f"modo {p.modo.value} sem arquivo para anexar")
         await pagina.locator(sel.UPLOAD).first.set_input_files(arquivos)
         await pagina.wait_for_timeout(3000)
+        await self._dispensar_aviso_de_direitos(pagina)
+
+    async def _dispensar_aviso_de_direitos(self, pagina) -> None:
+        """Dispensa o modal "Aviso" que aparece na PRIMEIRA vez que a conta envia arquivo.
+
+        Autorizado pelo Davi em 2026-08-20, e a autorizacao e sobre o comportamento
+        permanente, nao sobre um clique: o aviso aparece uma vez em CADA conta do pool.
+        Ele declara que quem envia tem os direitos sobre as imagens — e quem pode
+        afirmar isso e o dono delas, por isso a decisao foi dele.
+
+        Verificacao curta e nao bloqueante DE PROPOSITO. O aviso so existe no primeiro
+        upload de cada conta; procurar por 15s um modal ja aceito faria todas as
+        geracoes seguintes pagarem o preco de um pop-up que existiu uma vez. Nao achou
+        em 2s, segue — a ausencia e o caso comum, nao a excecao.
+        """
+        try:
+            await pagina.locator(sel.AVISO_DIREITOS).first.wait_for(timeout=2000)
+        except Exception:
+            return
+        await self._clicar_unico(pagina, sel.BOTAO_CONCORDO, "aviso de direitos")
+        # o modal leva o veu junto; sem esperar, o clique seguinte bate nele
+        await self._fechar_painel(pagina)
+        print("aviso de direitos dispensado (primeira vez desta conta)")
 
     # --------------------------------------------------------------- consultar
     async def _card(self, pagina, id_remoto: str):
