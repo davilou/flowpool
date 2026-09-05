@@ -155,7 +155,30 @@ ITEM_MIDIA_POR_ID = '[role=option]:has([src*="{id}"])'
 PADRAO_ID_MIDIA = r"[?&]name=([0-9a-fA-F-]{8,})"
 
 ABAS_SELETOR_MIDIA = PENDENTE      # não medido na aplicação nova
-REFERENCIA_ANEXADA = PENDENTE      # a ficha na barra do prompt; não medida
+
+# MEDIDO: a ficha da referência já anexada é uma `img` dentro da barra do prompt,
+# apontando para `flow-content.google/<tipo>/<uuid>?expires=...`. É o MESMO id do item
+# do acervo, o que permite conferir QUAL entrou — e não só quantas.
+REFERENCIA_ANEXADA = 'flow-base-prompt-box img[src*="flow-content"]'
+
+# COMO SE INCLUI UMA REFERÊNCIA — e aqui a aplicação nova é MUITO mais simples.
+#
+# MEDIDO 2026-09-05, cronometrado: um clique no `[role=option]` INCLUI e FECHA o menu.
+#
+#     antes:  15 opções, menu aberto, 0 fichas
+#     +1s:     0 opções, menu fechado, 1 ficha com o id do arquivo clicado
+#
+# Não há mais o par "marcar item" + "Incluir no comando" que a aplicação antiga exigia.
+# E com ele somem, de uma vez, três defeitos que custaram caro lá: a seleção exclusiva
+# que desmarcava ao clicar de novo, o índice decorado numa lista que reordena, e o
+# homônimo velho do acervo passando por recém-enviado.
+#
+# `BOTAO_INCLUIR_NO_COMANDO` continua existindo no painel e NÃO é o caminho normal.
+CLIQUE_NO_ITEM_JA_INCLUI = True
+
+# MEDIDO: arquivo recém-enviado entra no TOPO da lista. Está registrado como fato, não
+# como forma de escolher: a escolha continua sendo por id (regra 1).
+ITENS_NOVOS_PRIMEIRO = True
 
 # ----------------------------------------------------------- painel de configuração
 #
@@ -273,9 +296,31 @@ HOTBAR_VIDEO = "flow-video-hotbar"
 HOTBAR_IMAGEM = "flow-image-hotbar"
 RODAPE_TILE = "flow-tile-hover-footer"
 
-# A miniatura pronta dentro do card. NÃO MEDIDO na aplicação nova: falta confirmar o
-# que distingue um card PRONTO de um card ainda gerando.
-CARD_MIDIA = PENDENTE
+# PRONTO vs GERANDO, MEDIDO numa geração de imagem ao vivo em 2026-09-05:
+#
+#   gerando: o texto do card traz a PORCENTAGEM
+#            ['image', '20%',  '<o prompt>']
+#            ['image', '86%',  '<o prompt>']
+#   pronto:  a porcentagem some, entra um `img`/`video` carregado, e o card ganha id
+#            ['<o prompt>', 'keyboard_return']
+#
+# A regra que vale é a mesma da aplicação antiga: PRONTO É TER MÍDIA CARREGADA. A
+# porcentagem não serve de sinal de conclusão — ela some antes da imagem aparecer, e
+# confiar nela devolveria um card vazio.
+CARD_MIDIA = f"{CARD_GRADE} img, {CARD_GRADE} video"
+PADRAO_PORCENTAGEM = r"(\d{1,3})\s*%"
+
+# O ID DO RESULTADO MUDOU DE FORMA. A aplicação antiga trazia
+# `...getMediaUrlRedirect?name=<uuid>`; a nova traz o conteúdo noutro domínio:
+#
+#     https://flow-content.google/image/b25a2e51-0d81-4d99-8c4b-47b35c5d882b
+#     https://flow-content.google/video/<uuid>
+#
+# O tipo vem no caminho, o que dá de graça a informação que a aplicação antiga
+# precisava guardar por fora (`_modo_do_card`) para saber que resolução pedir no
+# download.
+PADRAO_ID_RESULTADO = r"flow-content\.google/(image|video)/([0-9a-fA-F-]{36})"
+
 CARD_FALHA = PENDENTE
 CARD_FALHA_TITULO = PENDENTE
 BOTAO_REPETIR_CARD = PENDENTE

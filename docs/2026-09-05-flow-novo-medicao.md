@@ -127,3 +127,74 @@ conta Google — decisão e ação do dono das contas, não da automação.
 `transporte.saldo()` quebrou com `Execution context was destroyed, most likely because
 of a navigation`: ele avalia o DOM enquanto a página ainda navega. Vale uma espera de
 estado antes da leitura. Não foi consertado ainda.
+
+---
+
+# Segunda rodada: o caminho de geração, provado ao vivo
+
+Provas em `scratch/fumaca_novo.py` (imagem simples) e `scratch/fumaca_completa.py`
+(imagem com duas referências). Custo: **zero** — imagem não gasta crédito.
+
+## 8. Geração de imagem, ponta a ponta — FUNCIONA
+
+```
+[  12s] projeto aberto
+[  15s] marcado: ['image imagem', 'crop_9_16 9:16', 'x1']
+[  18s] acervo assentado: 15 itens
+[  29s] subiram 2 arquivos em 11.2s
+[  31s] referencia 1 incluida: 8ced8effebecb2f9.jpg
+[  32s] referencia 2 incluida: e511c628ec3c92a4.png
+[  32s] fichas: ['ff7d612b-...', '645b0be6-...']   -> conferencia por IDENTIDADE ok
+[  34s] enviado
+[  68s] PRONTO: 209c2d14-39fc-4fda-a720-f054b13a3cce
+```
+
+## 9. Como o resultado se identifica
+
+O card gerando traz a **porcentagem** no texto (`['image','20%',<prompt>]`); o pronto
+perde a porcentagem, ganha `img`/`video` carregado e um id:
+
+```
+https://flow-content.google/image/<uuid>?expires=...&keyname=...&signature=...
+https://flow-content.google/video/<uuid>?...
+```
+
+O **tipo vem no caminho**, o que dá de graça o que a aplicação antiga guardava por
+fora (`_modo_do_card`) para saber que resolução pedir no download.
+
+Card novo entra **no topo** da grade — registrado como fato, não como forma de
+escolher: a escolha continua por id.
+
+## 10. Anexar: mais simples, e com uma armadilha nova
+
+**O envio é por seletor nativo, e aceita vários arquivos numa tacada.** Dois arquivos
+subiram juntos em 11,2 s — não há laço por arquivo no envio.
+
+**Incluir é em dois passos:** clicar no item o SELECIONA e abre uma pré-visualização
+com o botão "Incluir no comando" ao lado; só então ele entra na barra. (Uma sonda viu
+o menu fechar sozinho num caso isolado, então o código trata o botão como opcional:
+se não estiver na tela, o clique já resolveu.)
+
+### A armadilha: retrato do antes com carregamento preguiçoso
+
+A primeira versão da sonda "achou" **6 arquivos novos tendo enviado 2**. Causa medida:
+dos 15 itens do acervo, só 8 tinham `src` no primeiro instante — os outros carregam a
+miniatura depois. Item sem id não entra no retrato, então quando a miniatura chega ele
+**parece recém-enviado**.
+
+É a regra 3 da skill vista de outro ângulo: o retrato do antes só vale com a lista
+assentada. O conserto é esperar a lista parar de mudar E não sobrar item sem id.
+
+### Homônimos continuam existindo
+
+O acervo mostrou `02a56f959156564b.png` e `0ac53d49dabaa6dd.jpg` **duas vezes cada**,
+de envios diferentes. Nome não identifica nada — a escolha por id continua sendo o que
+separa "a referência certa" de "uma que tem o mesmo nome".
+
+## 11. O painel do seletor de mídia
+
+Abas à esquerda: `Tudo · Imagens · Vídeos · Vozes · Personagens · Avatares · Envios`.
+Busca própria (`input[aria-label*="pesquisar recursos"]`) e "Enviar mídia" no rodapé.
+
+**Vozes e Avatares são categorias que a aplicação antiga não tinha** — ainda não
+medidas, e possivelmente modos de geração que o painel do FlowPool nem conhece.
