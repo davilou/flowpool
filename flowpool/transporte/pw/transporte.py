@@ -293,19 +293,46 @@ class TransportePlaywright:
         """
         _, _, pagina = s.handle
         await pagina.goto(sel.URL_FLOW, wait_until="domcontentloaded")
-        await pagina.locator(sel.BOTAO_NOVO_PROJETO).first.click(timeout=30_000)
+        await self._sem_veu(pagina)
+        await self._clicar_unico(pagina, sel.BOTAO_NOVO_PROJETO, "novo projeto")
         await pagina.wait_for_url(re.compile(re.escape(sel.PADRAO_PROJETO)), timeout=30_000)
         id_remoto = analise.id_do_href(pagina.url)
         if not id_remoto:
             raise GeracaoFalhou(f"projeto {nome!r} nao abriu depois de criado")
 
-        await pagina.locator(sel.BOTAO_MAIS_OPCOES).first.click(timeout=15_000)
-        await pagina.locator(sel.MENU_RENOMEAR).first.click(timeout=15_000)
+        # A SEGUNDA ETAPA — renomear. MEDIDO 2026-09-05: o `more_vert` do CABECALHO do
+        # projeto abre "renomear", "ver lixeira" e "excluir". Os dois ultimos sao
+        # destrutivos e estao em NAO_CURAVEIS; aqui so se usa o primeiro, escolhido
+        # por TEXTO, porque escolher por posicao num menu que tem "excluir" e o erro
+        # que ja apagou trabalho do usuario uma vez.
+        await self._sem_veu(pagina)
+        await self._clicar_unico(pagina, sel.BOTAO_MAIS_OPCOES, "mais opcoes do projeto")
+        await self._clicar_unico(pagina, sel.MENU_RENOMEAR, "renomear")
+
         campo = pagina.locator(sel.CAMPO_NOME_PROJETO).first
         await campo.wait_for(timeout=15_000)
         await campo.fill(nome)
-        await pagina.locator(sel.BOTAO_CONCLUIR_NOME).first.click(timeout=15_000)
-        await pagina.wait_for_timeout(1500)
+        # NAO HA BOTAO "Concluir" na aplicacao nova — o campo fecha com Enter. Chutar
+        # um botao aqui deixaria o nome escrito e nao confirmado, e a adocao por nome
+        # (que compara `job.produto` com o titulo) passaria a criar um projeto novo a
+        # cada geracao do mesmo produto.
+        await campo.press("Enter")
+
+        # CONFERE que o nome pegou, em vez de confiar no Enter. Sem isto, um projeto
+        # que ficasse "sem titulo" so apareceria como duplicacao silenciosa dias
+        # depois, com a conta cheia de projetos iguais.
+        async def renomeou() -> bool:
+            try:
+                atual = await pagina.locator(sel.CAMPO_NOME_PROJETO).first.input_value(
+                    timeout=3000)
+            except Exception:
+                return False
+            return dom.sem_acento(nome) in dom.sem_acento(atual)
+
+        if not await self._esperar(pagina, renomeou, self._diario(s.conta.id),
+                                   f"o titulo virar {nome!r}", teto_ms=20_000):
+            raise GeracaoFalhou(
+                f"projeto {id_remoto} criado, mas o titulo nao virou {nome!r}")
         return id_remoto
 
     async def abrir_projeto(self, s: Sessao, id_remoto: str) -> None:

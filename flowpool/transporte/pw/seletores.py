@@ -72,17 +72,42 @@ PADRAO_UUID = r"/project/([0-9a-fA-F-]{36})"
 CARD_PROJETO = 'flow-project-card a[href*="/project/"]'
 CARTAO_PROJETO = "flow-project-card"
 
-# CUIDADO MEDIDO: o botão `edit` do cartão NÃO abre o projeto — clicar nele não navegou.
-# Ele renomeia. Abrir é clicar no cartão (ou seguir o href).
+# CONFIRMADO 2026-09-05 pelo `aria-label`: o `edit` do cartão é "editar titulo do
+# projeto" e o `delete` é "excluir projeto". Nenhum dos dois abre o projeto — a
+# primeira medição já tinha visto que clicar em `edit` não navegava, e o rótulo
+# explica por quê. Abrir é clicar no cartão (ou seguir o href).
 BOTAO_EDITAR_CARTAO = 'flow-project-card button:has-text("edit")'
 # `delete` é vizinho de `edit` no mesmo cartão. Está aqui para ser RECONHECIDO e
 # evitado, nunca clicado por automação — mesma razão do menu de lixeira.
 BOTAO_APAGAR_CARTAO = 'flow-project-card button:has-text("delete")'
 
-BOTAO_NOVO_PROJETO = PENDENTE      # não medido na aplicação nova
-CAMPO_NOME_PROJETO = PENDENTE      # `flow-editable-text` existe; o campo interno, não
-BOTAO_CONCLUIR_NOME = PENDENTE
-MENU_RENOMEAR = PENDENTE
+# MEDIDO 2026-09-05: o botão da home traz a ligadura e o rótulo, "add novo projeto".
+# Clicar nele CRIA E ENTRA no projeto direto, sem pedir nome — mesma forma da aplicação
+# antiga, e por isso criar continua sendo DUAS etapas: criar-e-entrar, depois renomear.
+#
+# Quem tratar isso como uma etapa só acaba com uma conta cheia de projeto sem título, e
+# a adoção por nome para de funcionar: a geração seguinte do mesmo produto cria outro.
+BOTAO_NOVO_PROJETO = 'button:has-text("novo projeto")'
+
+# Dentro do projeto, o título é um `flow-editable-text` com um input dentro.
+#
+# SEM `aria-label` NO SELETOR, e de propósito. A primeira versão foi
+# `input[aria-label="texto editavel"]` e casou ZERO: o rótulo real tem maiúscula e
+# acento ("Texto editável"), e seletor de atributo CSS é sensível a caixa. O valor
+# saiu da saída de uma sonda, que passa tudo por `dom.seguro` — normalizado PARA
+# IMPRIMIR, nunca para virar seletor. Foi o TERCEIRO erro do mesmo tipo num dia.
+#
+# O escopo do elemento customizado resolve sem depender de rótulo: dentro de
+# `flow-editable-text` só existe o input do título. O outro input da tela (a busca)
+# fica fora dele.
+CAMPO_NOME_PROJETO = "flow-editable-text input"
+BOTAO_CONCLUIR_NOME = PENDENTE     # não há botão "Concluir"; fecha-se com Enter
+
+# O `more_vert` do CABEÇALHO do projeto abre: "edit renomear", "delete ver lixeira",
+# "delete excluir". Os dois últimos são destrutivos e estão em NAO_CURAVEIS.
+MENU_RENOMEAR = '[role=menuitem]:has-text("renomear")'
+MENU_VER_LIXEIRA = '[role=menuitem]:has-text("ver lixeira")'
+MENU_EXCLUIR_PROJETO = '[role=menuitem]:has-text("excluir")'
 
 # ------------------------------------------------------------------ barra do prompt
 #
@@ -512,7 +537,21 @@ BOTAO_CONCORDO = PENDENTE
 # que o aviso de direitos travou a geração na aplicação antiga.
 VEU_ABERTO = ".cdk-overlay-backdrop"
 
-BOTAO_MAIS_OPCOES = 'button[aria-label*="mais op"]'
+# O `more_vert` DO PROJETO, e nao qualquer um: MEDIDO 2026-09-05, a pagina tem DOIS,
+# e o do projeto e o unico com o atributo `more-options`.
+#
+#     button[more-options]              -> 1   (o do projeto)
+#     button:has-text("more_vert")      -> 2   (ambiguo, seria erro)
+#     button[aria-label*="mais op"]     -> 0   (!)
+#
+# O ZERO do `aria-label` e a armadilha, e ela ja me pegou duas vezes hoje: seletor de
+# atributo CSS e SENSIVEL A CAIXA, e o rotulo real tem maiuscula e acento. A saida da
+# sonda mostrava "mais opcoes" porque `dom.seguro` normaliza PARA IMPRIMIR — copiar
+# valor de seletor da saida de uma ferramenta de diagnostico e errar em silencio.
+#
+# O atributo `more-options` e melhor que o rotulo por outro motivo tambem: existe
+# porque o codigo do Google o usa, e nao muda com o idioma da interface.
+BOTAO_MAIS_OPCOES = "button[more-options]"
 
 # ----------------------------------------------------------------- portão de idade
 #
@@ -537,6 +576,7 @@ NAO_CURAVEIS = {
     "MENU_LIXEIRA_CARD", "MENU_LIXEIRA", "MENU_RENOMEAR", "MENU_EXCLUIR",
     # projetos: apagar e renomear pelo cartão
     "BOTAO_EXCLUIR_PROJETO", "BOTAO_APAGAR_CARTAO", "BOTAO_EDITAR_CARTAO",
+    "MENU_EXCLUIR_PROJETO", "MENU_VER_LIXEIRA",
     # aceite em nome do usuário
     "BOTAO_CONCORDO", "CAIXA_CONSENTIMENTO",
     # o interruptor do Agente — vizinho do botão de enviar
@@ -554,6 +594,10 @@ DESCRICAO = {
     "CAMPO_PROMPT": "o campo de texto onde se escreve o comando da geração",
     "CARD_GRADE": "o contêiner de UM resultado na grade, não a miniatura em si",
     "DROPDOWN_MODELO": "o seletor de família de modelos dentro do painel de opções",
+    "BOTAO_MAIS_OPCOES": "no cabeçalho do projeto aberto, o botão de três pontinhos "
+                         "que abre renomear / ver lixeira / excluir",
+    "BOTAO_NOVO_PROJETO": "na lista de projetos, o botão que cria um projeto novo",
+    "CAMPO_NOME_PROJETO": "o campo de texto do título do projeto, no cabeçalho",
     # --- uma entrada por OPCAO do painel. Sem descricao a cura nao acontece, e o
     # teste `test_os_seletores_que_o_transporte_clica_tem_descricao` guarda isso.
     "BOTAO_MODO[imagem]": "no painel de configuração, o botão do modo IMAGEM",
