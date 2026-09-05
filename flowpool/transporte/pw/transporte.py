@@ -22,6 +22,7 @@ from flowpool.transporte.pw import analise, dom
 from flowpool.transporte.pw.cura import AutoCura
 from flowpool.transporte.pw.diario import (
     Diario, descartar_traco, guardar_traco, iniciar_traco, proximo_traco,
+    traco_ligado,
 )
 from flowpool.transporte.pw import seletores as sel
 from flowpool.transporte.pw.sessao import abrir_contexto, interpretar_sessao
@@ -1760,6 +1761,9 @@ class TransportePlaywright:
         # ABA DE GUARDA: com a pagina principal fechando, ela e a unica coisa que
         # mantem o contexto persistente vivo pelo tempo de copiar o arquivo.
         guarda = await pagina.context.new_page()
+        # o estado que decide se o download sobrevive — ver a bisseccao acima
+        d.passo(f"guarda aberta (traco={traco_ligado()}, "
+                f"paginas={len(pagina.context.pages)})")
         async with pagina.expect_download(timeout=self.timeout_ms) as espera:
             await itens.nth(indice).click(timeout=15_000)
         download = await espera.value
