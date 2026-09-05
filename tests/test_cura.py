@@ -259,15 +259,15 @@ async def test_seletor_desconhecido_nao_e_curavel(tmp_path):
 async def test_teto_de_curas_por_execucao(tmp_path):
     """Interface quebrada em dez lugares nao e seletor obsoleto: e mudanca grande."""
     n1, n2 = 'button:has-text("a")', 'button:has-text("b")'
-    pagina = _Pagina({sel.DROPDOWN_MODELO: 0, sel.BOTAO_REPETIR_CARD: 0, n1: 1, n2: 1})
+    pagina = _Pagina({sel.DROPDOWN_MODELO: 0, sel.MENU_LIXEIRA: 0, n1: 1, n2: 1})
     falso = CuradorFalso(Proposta(seletores=[n1], porque="um"),
                          Proposta(seletores=[n2], porque="dois"))
     auto = AutoCura(curador=falso, teto=1, arquivo=tmp_path / "curados.json")
     transporte = _transporte(auto)
 
     await transporte._clicar_unico(pagina, sel.DROPDOWN_MODELO, "dropdown")
-    with pytest.raises(GeracaoFalhou, match="redo"):
-        await transporte._clicar_unico(pagina, sel.BOTAO_REPETIR_CARD, "repetir")
+    with pytest.raises(GeracaoFalhou, match="mover para a lixeira"):
+        await transporte._clicar_unico(pagina, sel.MENU_LIXEIRA, "repetir")
 
     assert len(falso.chamadas) == 1
     assert auto.curas == 1
@@ -339,7 +339,7 @@ def test_apagar_o_json_reverte(tmp_path, monkeypatch):
 
     arquivo.unlink()
     sel.recarregar_curados()
-    assert sel.BOTAO_ENVIAR == 'button:has-text("arrow_forward")'
+    assert sel.BOTAO_ENVIAR == "flow-generate-icon-button button"
 
 
 def test_json_ilegivel_nao_derruba_a_importacao(tmp_path, monkeypatch):
@@ -349,7 +349,7 @@ def test_json_ilegivel_nao_derruba_a_importacao(tmp_path, monkeypatch):
     monkeypatch.setattr(sel, "CURADOS", arquivo)
 
     assert sel.recarregar_curados() == []
-    assert sel.BOTAO_ENVIAR == 'button:has-text("arrow_forward")'
+    assert sel.BOTAO_ENVIAR == "flow-generate-icon-button button"
 
 
 def test_o_json_nao_consegue_sobrepor_seletor_destrutivo(tmp_path, monkeypatch):
@@ -367,7 +367,7 @@ def test_o_json_nao_consegue_sobrepor_seletor_destrutivo(tmp_path, monkeypatch):
     monkeypatch.setattr(sel, "CURADOS", arquivo)
 
     assert sel.recarregar_curados() == []
-    assert sel.MENU_LIXEIRA_CARD == '[role=menuitem]:has-text("Mover para a lixeira")'
+    assert sel.MENU_LIXEIRA_CARD == "flow-media-trash-context-menu"
 
 
 def test_o_json_nao_inventa_seletor_que_nao_existe(tmp_path, monkeypatch):

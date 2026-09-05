@@ -165,11 +165,25 @@ class TransportePlaywright:
         pagina = ctx.pages[0] if ctx.pages else await ctx.new_page()
         await pagina.goto(sel.URL_FLOW, wait_until="domcontentloaded")
         try:
-            # a prova de sessao viva e a API, nao a tela: deslogado o Flow devolve {}
-            # com HTTP 200, e a tela leva segundos para trocar para o botao de login
-            resposta = await pagina.request.get(sel.URL_BASE + sel.URL_SESSAO)
-            interpretar_sessao(await resposta.json())
-        except SessaoMorta:
+            # A PROVA DE SESSAO VIVA VOLTOU A SER A TELA. A aplicacao antiga tinha
+            # `/fx/api/auth/session`, e o comentario aqui dizia, com razao para
+            # aquele DOM, que a API era melhor que a tela — deslogado o Flow devolvia
+            # `{}` com HTTP 200 e a tela demorava a trocar.
+            #
+            # MEDIDO 2026-09-05: a rota nao existe na aplicacao nova; a autenticacao e
+            # cookie do Google. Enquanto `URL_SESSAO` ficou PENDENTE ("..."), esta
+            # linha pedia `https://flow.google.com...` — host invalido — e devolvia
+            # `getaddrinfo ENOTFOUND` em TODA conta, inclusive as logadas.
+            #
+            # O sinal e o AVATAR, e nao a lista de projetos: conta sem projeto nenhum
+            # tem lista vazia e continua viva. Ver `sessao.validar_perfil`.
+            await pagina.locator(sel.AVATAR_CONTA).first.wait_for(timeout=45_000)
+        except Exception:
+            motivo = (
+                f"{conta.email} caiu no portao de idade do Flow: a conta Google "
+                "precisa de verificacao de idade. Revalidar NAO resolve"
+                if sel.URL_PORTAO_IDADE in pagina.url else
+                f"nao achei o avatar em {pagina.url} - {conta.email} parece deslogada")
             # sessao caida NAO rende traco: nao e defeito de sequencia, e um login que
             # expirou, e o diagnostico e uma linha no evento. Guardar um zip de alguns
             # MB por conta expirada encheria o disco pelo motivo mais banal possivel.
@@ -178,7 +192,7 @@ class TransportePlaywright:
             await descartar_traco(ctx)
             await ctx.close()
             await pw.stop()
-            raise SessaoMorta(f"sessao de {conta.email} caiu")
+            raise SessaoMorta(motivo) from None
         d.passo("sessao aberta")
         return Sessao(conta=conta, handle=(pw, ctx, pagina))
 
@@ -202,7 +216,16 @@ class TransportePlaywright:
         job, na reconciliacao, e nao a cada volta do polling.
         """
         _, _, pagina = s.handle
-        await pagina.locator(sel.AVATAR_CONTA).first.click(timeout=15_000)
+        # O ALVO DO CLIQUE E O `[role=button]`, NAO A IMAGEM. MEDIDO 2026-09-05: o
+        # avatar da aplicacao nova e um `div[role=button][aria-label="detalhes da
+        # conta"]` com a `img` dentro. Clicar na imagem tambem funciona por
+        # propagacao, mas mirar no botao e o que sobrevive a ele trocar de icone.
+        #
+        # E preciso o VEU FORA antes: com qualquer overlay aberto, o Playwright recusa
+        # o clique dizendo "intercepts pointer events" e fala do elemento coberto,
+        # nunca do que o cobre.
+        await self._sem_veu(pagina)
+        await pagina.locator(sel.BOTAO_AVATAR).first.click(timeout=15_000)
         try:
             # ESPERA PELO CONTEUDO, nao por tempo. A versao anterior dormia 1200ms
             # fixos e falhava de forma intermitente — passava numa execucao e quebrava
@@ -322,6 +345,23 @@ class TransportePlaywright:
     # -------------------------------------------------------------------- chip
     def _painel(self, pagina):
         return pagina.locator(_medido("PAINEL_CHIP", sel.PAINEL_CHIP)).first
+
+    @staticmethod
+    async def _sem_veu(pagina, tentativas: int = 16) -> bool:
+        """Fecha o que estiver aberto ate o veu do overlay sair da tela.
+
+        MEDIDO 2026-09-05: com um menu aberto, o Playwright recusa o clique seguinte
+        com `<div class="cdk-overlay-backdrop ..."> intercepts pointer events`. O veu
+        bloqueia TUDO, e o erro nomeia o elemento coberto e nunca o que o cobre — foi
+        assim que o aviso de direitos travou a geracao na aplicacao antiga, e custou
+        horas antes de alguem olhar um print.
+        """
+        for _ in range(tentativas):
+            if await pagina.locator(sel.VEU_ABERTO).count() == 0:
+                return True
+            await pagina.keyboard.press("Escape")
+            await pagina.wait_for_timeout(400)
+        return False
 
     @staticmethod
     async def _painel_aberto(pagina) -> bool:

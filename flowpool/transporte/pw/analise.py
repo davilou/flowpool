@@ -337,13 +337,24 @@ def item_pronto(item: dict) -> bool:
 def id_da_midia(src: str | None) -> str:
     """O id da midia dentro do `src` da miniatura. `""` quando nao ha.
 
-    MEDIDO 2026-08-21:
-        /fx/api/trpc/media.getMediaUrlRedirect?name=166c3d5d-e7d7-45ad-8453-e9a9053dfd6a
-    e, em item de VIDEO, com um parametro colado no fim:
-        ...?name=c474ed85-...&mediaUrlType=MEDIA_URL_TYPE_THUMBNAIL
+    O src NUNCA se compara inteiro, e agora ha tres formas dele. MEDIDO 2026-09-05 na
+    aplicacao nova, acompanhando um item por 40 s depois do envio:
 
-    E por isso que se EXTRAI o `name` em vez de comparar o `src` inteiro: o src cru de
-    um video nunca casaria com o src da ficha do mesmo video.
+        recem-enviado : https://flow-content.google/image/1e56f02d-674c-...-7989f0bf5004
+        mais tarde    : https://lh3.googleusercontent.com/asb/ab-nouyx9lmdtwsg6qtt...
+
+    Sao HOSTS diferentes para a MESMA midia — o segundo e a miniatura em cache. E a
+    forma antiga (`?name=<uuid>`, da aplicacao Next) continua no padrao porque o
+    parametro tambem aparece em URL assinada.
+
+    A assinatura muda a cada leitura (`?expires=...&signature=...`), e o item de video
+    trazia parametro colado no fim — os dois motivos pelos quais se EXTRAI o id em vez
+    de comparar a URL crua.
+
+    CONSEQUENCIA PRATICA: este id serve DENTRO de uma operacao curta (o anexo leva ~12 s
+    medidos) e NAO serve para comparar entre sessoes, porque o host troca. Quem depende
+    dele para achar o recem-enviado confere TAMBEM o nome do arquivo — ver
+    `escolher_novo_item`.
 
     `""` para o que nao tem id — item ainda sem miniatura, por exemplo. Quem chama
     trata isso como "ainda nao da para identificar", nunca como um id valido; ids
@@ -351,7 +362,10 @@ def id_da_midia(src: str | None) -> str:
     que e exatamente a classe de erro que este id existe para fechar.
     """
     achado = re.search(sel.PADRAO_ID_MIDIA, src or "")
-    return achado.group(1) if achado else ""
+    if not achado:
+        return ""
+    # o padrao tem tres alternativas; vale a que casou
+    return next((g for g in achado.groups() if g), "")
 
 
 def ids_dos_itens(itens: list[dict]) -> set[str]:

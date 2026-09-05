@@ -156,7 +156,27 @@ UPLOAD_MULTIPLO = True
 # onde nome de arquivo NÃO identificava item (dois envios do mesmo arquivo geram dois
 # itens de mesmo nome e ids diferentes). Ver `analise.escolher_novo_item`.
 ITEM_MIDIA_POR_ID = '[role=option]:has([src*="{id}"])'
-PADRAO_ID_MIDIA = r"[?&]name=([0-9a-fA-F-]{8,})"
+
+# O `src` DA MINIATURA MUDA AO LONGO DA VIDA DO ITEM. Medido 2026-09-05 enviando um
+# arquivo e acompanhando o item por 40 s:
+#
+#     recém-enviado : https://flow-content.google/image/1e56f02d-674c-49c9-...
+#     depois de um tempo : https://lh3.googleusercontent.com/asb/ab-nouyx9lmd...
+#
+# São HOSTS diferentes para a mesma mídia — o segundo é a miniatura em cache. Isso tem
+# uma consequência prática: `src` identifica bem DENTRO de uma operação curta (que é o
+# caso do anexo, medido em ~12 s), e NÃO serve para comparar entre sessões.
+#
+# Por isso o retrato antes/depois do anexo não confia só nele: o item novo tem que
+# estar fora do retrato E casar o nome do arquivo enviado. Duas condições erram menos
+# que uma — e a que sobra sozinha aqui seria justamente a instável.
+# PERMISSIVO de propósito, como era na aplicação antiga: o id é OPACO. Exigir formato
+# (hexadecimal, 36 caracteres) não protege de nada — o id vem do Google, não é validado
+# aqui — e quebraria no dia em que ele mudar de forma, que é justamente o dia em que se
+# precisa que a leitura continue funcionando.
+PADRAO_ID_MIDIA = (r"(?:flow-content\.google/(?:image|video)/([^?&#/]+)"
+                   r"|googleusercontent\.com/[^/]+/([^?&#/]+)"
+                   r"|[?&]name=([^&#]+))")
 
 ABAS_SELETOR_MIDIA = PENDENTE      # não medido na aplicação nova
 
@@ -396,7 +416,16 @@ MENU_LIXEIRA_CARD = "flow-media-trash-context-menu"
 # MEDIDO: o avatar fica em `flow-header-user-icon`; a foto vem de `lh3.google.com`,
 # e não mais de `googleusercontent`.
 AVATAR_CONTA = "flow-header-user-icon img"
-BOTAO_AVATAR = "flow-header-user-icon button"
+
+# NÃO É UM `button`, e o chute custou uma medição. MEDIDO 2026-09-05: o alvo é um
+#     <div role="button" tabindex="0" aria-label="detalhes da conta" class="header-...">
+# dentro de `flow-header-user-icon`. `flow-header-user-icon button` casa ZERO, e o
+# sintoma é um timeout que fala do avatar sem dizer que ele não é botão.
+BOTAO_AVATAR = 'flow-header-user-icon [role=button]'
+
+# MEDIDO no menu que esse clique abre:
+#     "50 créditos do Google Flow"
+#     "os créditos são atualizados diariamente"
 PADRAO_CREDITOS = r"(?i)(\d[\d.,]*)\s+cr[ée]ditos"
 
 # NÃO MEDIDO na aplicação nova. `flow-credit-banner` existe no projeto, mas não trouxe
@@ -456,6 +485,31 @@ DESCRICAO = {
     "CAMPO_PROMPT": "o campo de texto onde se escreve o comando da geração",
     "CARD_GRADE": "o contêiner de UM resultado na grade, não a miniatura em si",
     "DROPDOWN_MODELO": "o seletor de família de modelos dentro do painel de opções",
+    # --- uma entrada por OPCAO do painel. Sem descricao a cura nao acontece, e o
+    # teste `test_os_seletores_que_o_transporte_clica_tem_descricao` guarda isso.
+    "BOTAO_MODO[imagem]": "no painel de configuração, o botão do modo IMAGEM",
+    "BOTAO_MODO[t2v]": "no painel de configuração, o botão do modo VÍDEO",
+    "BOTAO_MODO[frames2v]": "no painel de configuração já em vídeo, o botão do submodo "
+                            "FRAMES (primeiro e último quadro)",
+    "BOTAO_MODO[ingredients2v]": "no painel de configuração já em vídeo, o botão do "
+                                 "submodo ELEMENTOS (referências de personagem/produto)",
+    "PROPORCAO[16:9]": "no painel de configuração, o botão da proporção 16:9 (deitado)",
+    "PROPORCAO[4:3]": "no painel de configuração, o botão da proporção 4:3",
+    "PROPORCAO[1:1]": "no painel de configuração, o botão da proporção 1:1 (quadrado)",
+    "PROPORCAO[3:4]": "no painel de configuração, o botão da proporção 3:4",
+    "PROPORCAO[9:16]": "no painel de configuração, o botão da proporção 9:16 (em pé)",
+    "DURACAO[4s]": "no painel de configuração em vídeo, o botão da duração 4s",
+    "DURACAO[6s]": "no painel de configuração em vídeo, o botão da duração 6s",
+    "DURACAO[8s]": "no painel de configuração em vídeo, o botão da duração 8s",
+    "DURACAO[10s]": "no painel de configuração em vídeo, o botão da duração 10s",
+    "RESOLUCAO[360p]": "no painel de configuração em vídeo, o botão da resolução 360p",
+    "RESOLUCAO[720p]": "no painel de configuração em vídeo, o botão da resolução 720p",
+    "QUANTIDADE[1]": "no painel de configuração, o botão de quantidade x1",
+    "QUANTIDADE[2]": "no painel de configuração, o botão de quantidade x2",
+    "QUANTIDADE[3]": "no painel de configuração, o botão de quantidade x3",
+    "QUANTIDADE[4]": "no painel de configuração, o botão de quantidade x4",
+    "BOTAO_ENVIAR": "o botão que dispara a geração, no canto direito da barra do "
+                    "prompt — a seta para a direita",
 }
 
 
@@ -466,6 +520,7 @@ DESCRICAO = {
 # tem que tratar como pendente.
 BOTAO_EXCLUIR_PROJETO = PENDENTE
 BOTAO_PERSONAGENS = PENDENTE
+BOTAO_VER_CENAS = PENDENTE
 MENU_EXCLUIR = PENDENTE
 CONFIG_SEM_AUDIO = PENDENTE
 
