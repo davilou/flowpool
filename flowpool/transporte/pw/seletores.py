@@ -436,12 +436,34 @@ MENU_REUTILIZAR = '[role=menuitem]:has-text("reutilizar comando")'
 # O valor é a PRIMEIRA PALAVRA do rótulo, não um seletor: os rótulos têm duas linhas
 # ("1k" e "tamanho original"), e rótulo inteiro estoura o parser de seletor CSS. Quem
 # escolhe é `analise.escolher_opcao`, que trata empate como erro.
+# MEDIDO nos dois tipos de resultado, em 2026-09-05:
+#
+#   imagem : "1k / tamanho original"  "2k / aprimorada"   "4k / aprimorada"
+#   vídeo  : "270p / gif animado"     "720p / tamanho original"
+#            "1080p / aprimorada"     "4k / aprimorada"
+#
+# O valor é a PRIMEIRA PALAVRA do rótulo, não um seletor: os rótulos têm duas linhas e
+# rótulo inteiro estoura o parser de seletor CSS. Quem escolhe é `analise.escolher_opcao`,
+# que trata empate como erro.
+#
+# Note que "270p" é GIF, não vídeo pequeno — pedir a resolução mais barata ali traria
+# outro formato. E "4k" existe nos dois, mas exige plano pago; fica fora do que o
+# transporte pede por padrão.
 BAIXAR = {
     "1k": "1k",
     "2k": "2k",
+    "270p": "270p",
+    "720p": "720p",
+    "1080p": "1080p",
     "4k": "4k",
 }
-BAIXAR_VIDEO = {}                  # não medido
+
+# O menu do card de VÍDEO tem itens que o de imagem não tem — medido:
+#     play_movies   / adicionar ao cenario
+#     video_library / publicar no youtube
+# (no de imagem, o lugar deles é ocupado por `motion_blur / animar`)
+MENU_ADICIONAR_AO_CENARIO = '[role=menuitem]:has-text("adicionar ao cenario")'
+MENU_PUBLICAR_YOUTUBE = '[role=menuitem]:has-text("publicar no youtube")'
 
 # ARMADILHA MEDIDA: ao abrir o submenu, DOIS panes ficam abertos ao mesmo tempo — o
 # menu pai e o submenu. `.last` entre eles é tão frágil quanto índice em lista que
