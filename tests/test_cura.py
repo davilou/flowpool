@@ -133,7 +133,7 @@ async def test_proposta_que_casa_um_elemento_e_gravada_e_a_acao_repete(tmp_path)
     # gravou fora de `seletores.py`, com o que a auditoria precisa
     entrada = json.loads(arquivo.read_text(encoding="utf-8"))["DROPDOWN_MODELO"]
     assert entrada["valor"] == novo
-    assert entrada["antigo"] == '.cdk-overlay-pane button:has-text("arrow_drop_down")'
+    assert entrada["antigo"] == 'button:has-text("arrow_drop_down")'
     assert entrada["porque"] == "o icone virou expand_more"
     assert entrada["em"]
     # e passou a valer na leitura, sem reiniciar o processo
@@ -193,7 +193,7 @@ async def test_proposta_que_nao_casa_exatamente_um_e_recusada(tmp_path, quantos)
     # o erro que sobe e o ORIGINAL: fala do seletor que quebrou, nao da cura
     assert "arrow_drop_down" in str(erro.value)
     assert not arquivo.exists()
-    assert sel.DROPDOWN_MODELO == '.cdk-overlay-pane button:has-text("arrow_drop_down")'
+    assert sel.DROPDOWN_MODELO == 'button:has-text("arrow_drop_down")'
     assert pagina.locator(novo).clicado is False
 
 

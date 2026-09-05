@@ -919,18 +919,29 @@ class TransportePlaywright:
             raise GeracaoFalhou(f"modo {p.modo.value} sem arquivo para anexar")
 
         await self._limpar_referencias(pagina)
+
+        # O ENVIO VIRA UMA TACADA SO. Na aplicacao antiga havia uma volta completa do
+        # seletor por arquivo, porque so dava para enviar um. MEDIDO 2026-09-05: o
+        # input criado pelo "enviar midia" tem `multiple`, e dois arquivos subiram
+        # juntos em 11,2 s.
+        #
+        # Isso encurta o caminho onde moravam tres defeitos da aplicacao antiga — o
+        # homonimo velho passando por recem-enviado, o `+` fechando quando devia abrir,
+        # e o indice decorado numa lista que reordena. Nenhum deles some por magica: o
+        # que some e a repeticao do trecho onde eles aconteciam.
+        d.passo(f"enviando {len(arquivos)} arquivo(s) de uma vez")
+        quanto = d.cronometro()
+        novos = await self._enviar_arquivos(pagina, arquivos, d)
+        d.passo(f"{len(novos)} arquivo(s) prontos no acervo em {quanto():.1f}s")
+
         esperados: list[str] = []
-        for n, arquivo in enumerate(arquivos, 1):
+        for n, item in enumerate(novos, 1):
             # o numero DENTRO do total e o que fecha o caso das duas referencias: com
             # ele, "parou na 2 de 2" e "nem chegou na 2" deixam de ser a mesma linha
-            d.passo(f"anexando referencia {n} de {len(arquivos)}: {Path(arquivo).name}")
+            d.passo(f"incluindo referencia {n} de {len(novos)}: {item['nome']}")
             quanto = d.cronometro()
-            esperados.append(await self._incluir_referencia(pagina, arquivo, d))
-            # o tempo POR REFERENCIA e a medicao que hoje falta: a lentidao com duas e
-            # real e irregular ("as vezes demora, as vezes envia rapidamente") e
-            # ninguem sabe por que. Com dezenas de jobs por dia, esta linha vira a
-            # distribuicao real em vez de impressao — e sem custo nenhum.
-            d.passo(f"referencia {n} incluida no comando em {quanto():.1f}s")
+            esperados.append(await self._incluir_do_acervo(pagina, item, d))
+            d.passo(f"referencia {n} incluida em {quanto():.1f}s")
 
         # CONFERE QUAIS, nao quantas. A versao por contagem aprovava DUAS FICHAS
         # IGUAIS — foi assim que um job real saiu com a mesma foto duas vezes, sem
@@ -942,19 +953,158 @@ class TransportePlaywright:
     async def _limpar_referencias(self, pagina) -> None:
         """Zera o rascunho antes de anexar. Referencia herdada e geracao errada.
 
-        Uma tentativa que morreu no meio deixa a miniatura na barra do prompt, e o
-        Flow SOMA a proxima em vez de trocar (medido: 1 -> 2 -> 3). Sem limpar, a
-        segunda tentativa do mesmo job geraria com o dobro das referencias.
+        Uma tentativa que morreu no meio deixa a ficha na barra do prompt, e o Flow
+        SOMA a proxima em vez de trocar (medido na aplicacao antiga: 1 -> 2 -> 3). Sem
+        limpar, a segunda tentativa do mesmo job geraria com o dobro das referencias.
+
+        TIRA UMA A UMA, pelo `cancel` de cada ficha. Existe tambem um botao `close` na
+        barra, e ele NAO e usado: o efeito dele nao foi medido, e "fechar" tanto pode
+        limpar so as referencias quanto apagar o prompt inteiro. Limpar o rascunho
+        errado destroi o comando do usuario — e o `cancel` da ficha tem efeito
+        conhecido e verificavel, que e a ficha sumir.
         """
-        if await pagina.locator(sel.REFERENCIA_ANEXADA).count() == 0:
-            return
-        await self._clicar_unico(pagina, sel.BOTAO_APAGAR_COMANDO, "apagar comando")
-        for _ in range(20):
-            await pagina.wait_for_timeout(250)
-            if await pagina.locator(sel.REFERENCIA_ANEXADA).count() == 0:
+        for _ in range(12):
+            quantas = await pagina.locator(sel.REFERENCIA_ANEXADA).count()
+            if quantas == 0:
                 return
+            botoes = pagina.locator(sel.BOTAO_TIRAR_REFERENCIA)
+            if await botoes.count() == 0:
+                raise GeracaoFalhou(
+                    f"ha {quantas} referencia(s) na barra e nenhum botao de tirar")
+            await botoes.first.click(timeout=15_000)
+            # espera a ficha SUMIR, nao um tempo fixo: sem isso a volta seguinte conta
+            # a mesma ficha e clica de novo, e o laco vira uma corrida com a animacao
+            for _ in range(24):
+                await pagina.wait_for_timeout(250)
+                if await pagina.locator(sel.REFERENCIA_ANEXADA).count() < quantas:
+                    break
         raise GeracaoFalhou(
             "as referencias de uma tentativa anterior nao sairam da barra do prompt")
+
+    async def _enviar_arquivos(self, pagina, arquivos: list[str],
+                               d: Diario) -> list[dict]:
+        """Envia TODOS os arquivos de uma vez e devolve os itens novos do acervo.
+
+        Cada item devolvido tem `id` (do `src` da miniatura) e `nome` (o do arquivo).
+        SAO AS DUAS CONDICOES, e nenhuma sozinha basta:
+
+          * so o id: o `src` troca de host ao longo da vida do item (medido —
+            `flow-content.google` vira `lh3.googleusercontent.com`), entao um item
+            VELHO que troque de host durante a operacao pareceria novo
+          * so o nome: nome nao identifica nada. O acervo tem homonimos de sobra —
+            medido, tres itens chamados `02a56f959156564b.png` —, e foi exatamente
+            isso que fez duas referencias virarem a mesma foto na aplicacao antiga
+        """
+        await self._abrir_seletor_midia(pagina, d)
+
+        antes = await self._acervo_assentado(pagina, d)
+        ids_antes = {i for i in (analise.id_da_midia(x.get("src")) for x in antes) if i}
+        nomes = {Path(a).name for a in arquivos}
+
+        async with pagina.expect_file_chooser(timeout=30_000) as espera:
+            await self._clicar_unico(pagina, sel.BOTAO_ENVIAR_MIDIA, "enviar midia")
+        seletor = await espera.value
+        await seletor.set_files(arquivos)
+
+        novos: list[dict] = []
+
+        async def subiram() -> bool:
+            nonlocal novos
+            achados = []
+            for x in await self._itens_da_lista(pagina):
+                ident = analise.id_da_midia(x.get("src"))
+                nome = analise.nome_do_item(x.get("texto", ""))
+                # `miniaturas` e a chave que `dom.ITENS_DE_MIDIA` devolve. As sondas
+                # de scratch usavam `midias`, e copiar dali fez o filtro nunca dar
+                # verdadeiro: "so 0 de 2 arquivos ficaram prontos" depois de 250 s
+                # esperando dois arquivos que ja estavam la.
+                if (ident and ident not in ids_antes and nome in nomes
+                        and x.get("miniaturas")):
+                    achados.append({"id": ident, "nome": nome, "src": x.get("src", "")})
+            novos = achados
+            return len(novos) >= len(arquivos)
+
+        if not await self._esperar(pagina, subiram, d, "as miniaturas do envio",
+                                   teto_ms=240_000, cada=1000):
+            raise GeracaoFalhou(
+                f"so {len(novos)} de {len(arquivos)} arquivo(s) ficaram prontos "
+                "no acervo")
+        if len({i["id"] for i in novos}) != len(novos):
+            raise GeracaoFalhou(f"os itens enviados repetem id: {[i['id'] for i in novos]}")
+        return novos[:len(arquivos)]
+
+    @staticmethod
+    async def _esperar(pagina, condicao, d: Diario, o_que: str,
+                       teto_ms: int = 60_000, cada: int = 500) -> bool:
+        """Gira ate a condicao valer, dando sinal de vida. Devolve se valeu.
+
+        Devolve `bool` em vez de levantar porque a ausencia significa coisas
+        diferentes em cada ponto, e a mensagem certa e a de quem chama.
+        """
+        gasto = 0
+        while gasto < teto_ms:
+            if await condicao():
+                return True
+            await pagina.wait_for_timeout(cada)
+            gasto += cada
+            d.esperando(o_que)
+        return False
+
+    async def _acervo_assentado(self, pagina, d: Diario) -> list[dict]:
+        """O retrato do acervo, SO depois de a lista parar de mudar.
+
+        MEDIDO na propria sonda, que na primeira versao "achou" 6 arquivos novos tendo
+        enviado 2: dos 15 itens do acervo, so 8 tinham `src` no primeiro instante — os
+        outros carregam a miniatura preguicosamente. Item sem id nao entra no retrato,
+        entao quando a miniatura chega ele PARECE recem-enviado.
+
+        E a regra do retrato vista de outro angulo: comparar contra um retrato que
+        ainda estava sendo tirado nao compara nada.
+        """
+        antes: list[dict] = []
+        estavel = 0
+        for _ in range(80):
+            agora = await self._itens_da_lista(pagina)
+            if agora == antes and not [i for i in agora if not i.get("src")]:
+                estavel += 1
+                if estavel >= 3:
+                    break
+            else:
+                estavel = 0
+            antes = agora
+            await pagina.wait_for_timeout(500)
+        d.passo(f"acervo assentado: {len(antes)} itens")
+        return antes
+
+    async def _incluir_do_acervo(self, pagina, item: dict, d: Diario) -> str:
+        """Poe UM item do acervo no comando. Devolve o id incluido.
+
+        SAO DOIS PASSOS, medidos por print: o clique no item o SELECIONA e abre uma
+        pre-visualizacao com "Incluir no comando" ao lado; e esse botao que inclui.
+        (Uma sonda viu o menu fechar sozinho num caso isolado, entao o botao e tratado
+        como opcional — se ele nao estiver na tela, o clique ja resolveu, e insistir
+        seria clicar no vazio.)
+        """
+        await self._abrir_seletor_midia(pagina, d)
+
+        alvo = pagina.locator(sel.ITEM_MIDIA_POR_ID.format(id=item["id"]))
+        analise.exigir_unico(await alvo.count(), f"item {item['id']}", "item do acervo")
+
+        antes = len(await self._ids_anexados(pagina))
+        await alvo.first.click(timeout=15_000)
+        await pagina.wait_for_timeout(1200)
+        incluir = pagina.locator(sel.BOTAO_INCLUIR_NO_COMANDO)
+        if await incluir.count() == 1:
+            await incluir.first.click(timeout=15_000)
+
+        async def entrou() -> bool:
+            return len(await self._ids_anexados(pagina)) > antes
+
+        if not await self._esperar(pagina, entrou, d,
+                                   f"a ficha de {item['nome']}", teto_ms=30_000):
+            raise GeracaoFalhou(
+                f"{item['nome']} nao entrou na barra do prompt depois de incluido")
+        return item["id"]
 
     async def _abrir_seletor_midia(self, pagina, d: Diario, tentativas: int = 3):
         """Abre o seletor de midia pelo `+`, tentando de novo se ele nao vier.
@@ -1290,8 +1440,20 @@ class TransportePlaywright:
         Reconhecer pela ESTRUTURA e nao pela frase e o que impede a proxima redacao do
         Google de reabrir o mesmo buraco.
         """
-        return (await card.locator(sel.CARD_FALHA).count() > 0
-                or await card.locator(sel.CARD_FALHA_TITULO).count() > 0)
+        # SELETOR PENDENTE NAO VAI PARA O PLAYWRIGHT. `sel.PENDENTE` vale "...", que
+        # o Playwright interpreta como XPath e recusa com "not a valid XPath
+        # expression" — um erro que fala de sintaxe quando o problema e que ninguem
+        # mediu o card de falha na aplicacao nova ainda.
+        #
+        # Sem medicao, a resposta e FALSE: "nao sei dizer que falhou". O custo disso e
+        # um card realmente falho parecer RODANDO ate o teto do polling — que era o
+        # comportamento antes de alguem medir a frase, e e melhor que dar por falha uma
+        # geracao que esta so demorando.
+        for seletor in (sel.CARD_FALHA, sel.CARD_FALHA_TITULO):
+            if seletor and seletor != sel.PENDENTE:
+                if await card.locator(seletor).count() > 0:
+                    return True
+        return False
 
     async def _esperar_sair_da_falha(self, pagina, id_remoto: str, d: Diario,
                                      teto_ms: int = 45_000) -> bool:

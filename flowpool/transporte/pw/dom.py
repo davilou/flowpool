@@ -81,9 +81,14 @@ ITENS_DE_MIDIA = r"""
 # E isso que torna possivel conferir QUAL arquivo entrou no comando, e nao so quantos.
 # A conferencia por contagem aprovava duas fichas iguais — o defeito de 21/08, em que
 # as duas referencias viraram a mesma foto, sem erro, com o credito gasto.
+# O ELEMENTO PODE SER A PROPRIA IMAGEM. Na aplicacao antiga a ficha era um
+# `button[data-card-open]` com a `img` DENTRO; na nova ela E a `img`
+# (`flow-base-prompt-box img[src*="flow-content"]`). Procurar so o filho devolvia ''
+# para toda ficha, e a conferencia de identidade acusava "anexo REPETIDO: ['', '']" —
+# um erro que fala do anexo quando o defeito era da leitura.
 SRC_DAS_REFERENCIAS = r"""
 (seletor) => [...document.querySelectorAll(seletor)].map(e => {
-  const m = e.querySelector('img, video');
+  const m = (e.tagName === 'IMG' || e.tagName === 'VIDEO') ? e : e.querySelector('img, video');
   return m ? (m.getAttribute('src') || '') : '';
 })
 """

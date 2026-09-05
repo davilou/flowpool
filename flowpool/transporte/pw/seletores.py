@@ -106,7 +106,18 @@ ATRIBUTO_AGENTE = "aria-pressed"
 AGENTE_LIGADO = "true"
 AGENTE_DESLIGADO = "false"
 
-BOTAO_APAGAR_COMANDO = PENDENTE    # não reencontrado; ver `_limpar_referencias`
+# MEDIDO 2026-09-05 comparando a barra vazia com a barra com uma referência. Com
+# referência anexada aparecem três coisas que não existiam:
+#
+#     button "cancel"  aria-label="element…"   -> tira AQUELA referência
+#     img    alt="imagem do elemento"          -> a ficha
+#     button "close"                           -> some quando não há nada
+#
+# `_limpar_referencias` usa o `cancel` de cada ficha, e não o `close`: o primeiro tem
+# efeito conhecido e verificável (a ficha some), enquanto o segundo é uma suposição
+# sobre o que "fechar" significa ali. Limpar rascunho errado apaga o prompt do usuário.
+BOTAO_TIRAR_REFERENCIA = f'{BARRA_PROMPT} button:has-text("cancel")'
+BOTAO_APAGAR_COMANDO = PENDENTE    # o `close` existe, mas o efeito dele não foi medido
 
 # ----------------------------------------------------------------- anexar / mídia
 #
@@ -178,7 +189,29 @@ PADRAO_ID_MIDIA = (r"(?:flow-content\.google/(?:image|video)/([^?&#/]+)"
                    r"|googleusercontent\.com/[^/]+/([^?&#/]+)"
                    r"|[?&]name=([^&#]+))")
 
-ABAS_SELETOR_MIDIA = PENDENTE      # não medido na aplicação nova
+# AS ABAS SÃO O SINAL DE "O PAINEL MONTOU", e a escolha é medida contra o caso que
+# causou a regressão de agosto.
+#
+# MEDIDO 2026-09-05, o MESMO painel em dois projetos:
+#
+#                          projeto VAZIO   projeto cheio
+#     [role=option]              0              15
+#     [role=tab]                 7               7
+#     "enviar mídia"             1               1
+#
+# "A lista tem itens" parece prova de que o painel montou e NÃO É: num projeto novo o
+# acervo está legitimamente vazio, e usar isso como critério travou todo projeto novo
+# do usuário — como ele tem um projeto por produto, todo produto novo nascia sem
+# conseguir anexar. As abas existem com acervo cheio E vazio.
+#
+# As sete: tudo · imagens · vídeos · vozes · avatares · (rolagem) · enviar mídia.
+ABAS_SELETOR_MIDIA = f"{OVERLAY} [role=tab]"
+
+# VOZES e AVATARES são categorias que a aplicação antiga não tinha. Não foram medidas,
+# e podem ser modos de geração que o painel do FlowPool ainda não conhece.
+ABA_VOZES = f'{OVERLAY} [role=tab]:has-text("vozes")'
+ABA_AVATARES = f'{OVERLAY} [role=tab]:has-text("avatares")'
+
 
 # MEDIDO: a ficha da referência já anexada é uma `img` dentro da barra do prompt,
 # apontando para `flow-content.google/<tipo>/<uuid>?expires=...`. É o MESMO id do item
@@ -231,7 +264,9 @@ MODO_ICONE = {
     "frames2v": "crop_free",
     "ingredients2v": "chrome_extension",
 }
-BOTAO_MODO = {k: f'{OVERLAY} button:has-text("{lig}")' for k, lig in MODO_ICONE.items()}
+# RELATIVOS ao painel: quem clica escopa em `_painel(...)`. Prefixar aqui
+# produziria `.cdk-overlay-pane .cdk-overlay-pane ...` e casaria ZERO.
+BOTAO_MODO = {k: f'button:has-text("{lig}")' for k, lig in MODO_ICONE.items()}
 
 # MEDIDO: `frames` e `elementos` agora ficam SEMPRE VISÍVEIS sob vídeo, e um dos dois
 # está sempre marcado. Na aplicação antiga eles só apareciam depois de entrar em vídeo,
@@ -251,11 +286,11 @@ MODO_PAI = {
 T2V_TEM_SUBMODO_PROPRIO = PENDENTE
 
 PROPORCAO = {
-    "16:9": f'{OVERLAY} button:has-text("crop_16_9")',
-    "4:3": f'{OVERLAY} button:has-text("crop_landscape")',
-    "1:1": f'{OVERLAY} button:has-text("crop_square")',
-    "3:4": f'{OVERLAY} button:has-text("crop_portrait")',
-    "9:16": f'{OVERLAY} button:has-text("crop_9_16")',
+    "16:9": 'button:has-text("crop_16_9")',
+    "4:3": 'button:has-text("crop_landscape")',
+    "1:1": 'button:has-text("crop_square")',
+    "3:4": 'button:has-text("crop_portrait")',
+    "9:16": 'button:has-text("crop_9_16")',
 }
 LIGADURA_PROPORCAO = {
     "16:9": "crop_16_9", "4:3": "crop_landscape", "1:1": "crop_square",
@@ -272,8 +307,8 @@ PROPORCOES_POR_MODO = {
 # GRUPO NOVO. Não existia na aplicação antiga, e o PADRÃO É 360p — a antiga era 720p.
 # Sem tratar isto, todo vídeo sai na resolução baixa sem ninguém pedir.
 RESOLUCAO = {
-    "360p": f'{OVERLAY} button:has-text("360p")',
-    "720p": f'{OVERLAY} button:has-text("720p")',
+    "360p": 'button:has-text("360p")',
+    "720p": 'button:has-text("720p")',
 }
 RESOLUCOES = ("360p", "720p")
 RESOLUCAO_PADRAO_DO_FLOW = "360p"
@@ -281,12 +316,12 @@ RESOLUCAO_PADRAO_DO_FLOW = "360p"
 # MEDIDO: os quatro valores existem em TODOS os modos de vídeo, inclusive `frames`.
 # Isto DERRUBA a medição de 2026-08-21, que dizia que o painel em Frames não tinha
 # grupo de duração — aquilo valia para a aplicação antiga e morreu com ela.
-DURACAO = {d: f'{OVERLAY} button:has-text("{d}")' for d in ("4s", "6s", "8s", "10s")}
+DURACAO = {d: f'button:has-text("{d}")' for d in ("4s", "6s", "8s", "10s")}
 
-QUANTIDADE = {n: f'{OVERLAY} button:has-text("x{n}")' for n in (1, 2, 3, 4)}
+QUANTIDADE = {n: f'button:has-text("x{n}")' for n in (1, 2, 3, 4)}
 
 # O dropdown de família de modelos, dentro do painel.
-DROPDOWN_MODELO = f'{OVERLAY} button:has-text("arrow_drop_down")'
+DROPDOWN_MODELO = 'button:has-text("arrow_drop_down")'
 
 # MEDIDO nas opções do dropdown, já normalizado (`dom.sem_acento`). Os de vídeo vêm
 # com a ligadura `volume_up` na frente; a comparação é por SUBSTRING do rótulo.
@@ -294,12 +329,22 @@ DROPDOWN_MODELO = f'{OVERLAY} button:has-text("arrow_drop_down")'
 # ATENÇÃO ao prefixo: "veo 3.1 - lite" NÃO é prefixo de "veo 3.1 - fast", mas
 # "omni 1.1 flash" pode virar prefixo de um "omni 1.1 flash pro" amanhã. Quem escolhe
 # usa `analise.escolher_opcao`, que trata empate como erro.
+# CAIXA IMPORTA, e isto ja custou uma execucao. `indice_por_sufixo` compara com
+# `endswith` SEM normalizar, entao o rotulo aqui tem que ter as maiusculas exatas do
+# DOM. A primeira versao deste dicionario saiu em minusculas porque foi assim que a
+# SONDA imprimiu — e a sonda passa tudo por `dom.seguro`, que baixa a caixa e tira o
+# acento SO PARA IMPRIMIR. Ler a saida de uma ferramenta de diagnostico como se fosse o
+# DOM e um jeito silencioso de errar.
+#
+# MEDIDO no dropdown, texto cru:
+#   imagem : "<emoji> Nano Banana Pro", "<emoji> Nano Banana 2", "<emoji> Nano Banana 2 Lite"
+#   video  : "volume_up" + quebra de linha + "Omni 1.1 Flash" (idem para os tres Veo)
 ROTULO_MODELO = {
-    "omni-flash": "omni 1.1 flash",
-    "veo-lite": "veo 3.1 - lite",
-    "veo-fast": "veo 3.1 - fast",
-    "veo-quality": "veo 3.1 - quality",
-    "nano-banana": "nano banana pro",
+    "omni-flash": "Omni 1.1 Flash",
+    "veo-lite": "Veo 3.1 - Lite",
+    "veo-fast": "Veo 3.1 - Fast",
+    "veo-quality": "Veo 3.1 - Quality",
+    "nano-banana": "Nano Banana Pro",
 }
 OPCAO_MODELO = f"{OVERLAY} [role=menuitem], {OVERLAY} [role=option]"
 
@@ -331,7 +376,9 @@ RODAPE_TILE = "flow-tile-hover-footer"
 # A regra que vale é a mesma da aplicação antiga: PRONTO É TER MÍDIA CARREGADA. A
 # porcentagem não serve de sinal de conclusão — ela some antes da imagem aparecer, e
 # confiar nela devolveria um card vazio.
-CARD_MIDIA = f"{CARD_GRADE} img, {CARD_GRADE} video"
+# RELATIVO ao card: quem usa faz `card.locator(...)`. Absoluto aqui viraria
+# `flow-tile-container flow-tile-container img` e casaria zero.
+CARD_MIDIA = "img, video"
 PADRAO_PORCENTAGEM = r"(\d{1,3})\s*%"
 
 # O ID DO RESULTADO MUDOU DE FORMA. A aplicação antiga trazia

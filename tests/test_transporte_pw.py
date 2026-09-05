@@ -947,28 +947,47 @@ class _CardFalso:
         return 1 if seletor in self.presentes else 0
 
 
-async def test_a_falha_antiga_continua_reconhecida():
-    assert await TransportePlaywright()._card_falhou(
-        _CardFalso({sel.CARD_FALHA})) is True
+async def test_as_duas_frases_de_falha_sao_reconhecidas(monkeypatch):
+    """Duas frases, nao uma — e a licao sobrevive a troca de aplicacao.
 
+    VISTO EM PRODUCAO 2026-08-21: "Falha ao gerar audio. Tente usar outro comando ou
+    envie feedback." nao casava `text="Ops! Algo deu errado"`, e `consultar` devolvia
+    RODANDO ate o timeout de dez minutos. Para o usuario, "travado".
 
-async def test_a_falha_de_audio_tambem_e_reconhecida():
-    # VISTO EM PRODUCAO 2026-08-21: "Falha ao gerar audio. Tente usar outro comando ou
-    # envie feedback." nao casava `text="Ops! Algo deu errado"`, e `consultar` devolvia
-    # RODANDO ate o timeout de dez minutos. Para o usuario, "travado".
-    assert await TransportePlaywright()._card_falhou(
-        _CardFalso({sel.CARD_FALHA_TITULO})) is True
+    Os VALORES daqueles seletores morreram com a aplicacao antiga e ainda nao foram
+    remedidos na nova (ficaram PENDENTE). O que este teste guarda e a LOGICA: com dois
+    seletores validos, QUALQUER um deles reconhece a falha.
+    """
+    monkeypatch.setattr(sel, "CARD_FALHA", 'text="Ops! Algo deu errado"')
+    monkeypatch.setattr(sel, "CARD_FALHA_TITULO", r"text=/^\s*Falha\s*$/")
+    t = TransportePlaywright()
+    assert await t._card_falhou(_CardFalso({sel.CARD_FALHA})) is True
+    assert await t._card_falhou(_CardFalso({sel.CARD_FALHA_TITULO})) is True
+    assert await t._card_falhou(_CardFalso(set())) is False
 
 
 async def test_card_normal_nao_e_falha():
     assert await TransportePlaywright()._card_falhou(_CardFalso(set())) is False
 
 
-def test_o_titulo_da_falha_e_ancorado():
-    # sem a ancora, "Falha ao gerar audio" no CORPO do card — ou qualquer "falhou"
-    # perdido na tela — viraria falso positivo e mataria geracao boa
-    assert sel.CARD_FALHA_TITULO.startswith("text=/^")
-    assert sel.CARD_FALHA_TITULO.endswith("$/")
+async def test_seletor_pendente_nao_vira_falha_nem_vai_para_o_playwright():
+    """PENDENTE vale "...", e o Playwright le isso como XPath.
+
+    MEDIDO 2026-09-05 numa geracao real: `consultar` estourou com
+    `SyntaxError: The string '...' is not a valid XPath expression` — um erro que fala
+    de sintaxe quando o fato e que ninguem mediu o card de falha na aplicacao nova.
+
+    Sem medicao, a resposta certa e FALSE: "nao sei dizer que falhou". O custo e um
+    card realmente falho parecer RODANDO ate o teto do polling; o custo do contrario
+    seria dar por falha uma geracao que esta so demorando.
+    """
+    class _Explode:
+        def locator(self, seletor):
+            raise AssertionError(
+                f"seletor pendente chegou ao Playwright: {seletor!r}")
+
+    assert sel.CARD_FALHA == sel.PENDENTE          # enquanto nao for medido
+    assert await TransportePlaywright()._card_falhou(_Explode()) is False
 
 
 def test_desligar_o_audio_continua_por_medir():
@@ -1403,9 +1422,17 @@ async def test_ultimo_credito_gera_o_video_e_o_aviso_nao_pode_recusar():
     assert apareceu is True
 
 
-async def test_sem_credito_de_verdade_nao_espera_o_teto_inteiro():
+async def test_sem_credito_de_verdade_nao_espera_o_teto_inteiro(monkeypatch):
     # com o aviso na tela e NENHUM card, insistir os 120 s seria desperdicio: o aviso
     # nao decide, mas encurta o prazo
+    #
+    # O VALOR do aviso morreu com a aplicacao antiga e ainda nao foi remedido; o que
+    # este teste guarda e a REGRA, e por isso ele injeta um seletor valido. Com
+    # `AVISO_SEM_CREDITO` em PENDENTE, `_sem_credito` responde "nao sei" e a graca
+    # nunca comeca — que e o comportamento certo para um sinal nao medido, e nao o que
+    # se quer exercitar aqui.
+    monkeypatch.setattr(sel, "AVISO_SEM_CREDITO",
+                        "text=/Seus cr[ee]ditos do Google Flow acabaram/")
     pagina = _PaginaDoEnvio(aviso_na_volta=0, card_na_volta=None)
 
     apareceu = await TransportePlaywright()._esperar_card_novo(
