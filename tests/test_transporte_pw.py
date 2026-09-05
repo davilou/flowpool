@@ -145,38 +145,38 @@ MENU_IMAGEM = ["1K\nTamanho original", "2K\nAumentada", "4K"]
 
 
 def test_escolhe_a_resolucao_de_video_pela_primeira_linha():
-    assert escolher_opcao(MENU_VIDEO, sel.BAIXAR["720p"]) == 1
+    assert escolher_opcao(MENU_VIDEO, "720p") == 1
 
 
 def test_rotulo_com_quebra_de_linha_casa_pela_primeira_linha():
     # passar "270p\nGIF animado" inteiro para um seletor CSS estoura o parser
-    assert escolher_opcao(MENU_VIDEO, sel.BAIXAR["270p"]) == 0
+    assert escolher_opcao(MENU_VIDEO, "270p") == 0
 
 
 def test_escolhe_o_tamanho_original_no_menu_de_imagem():
-    assert escolher_opcao(MENU_IMAGEM, sel.BAIXAR["1k"]) == 0
+    assert escolher_opcao(MENU_IMAGEM, "1k") == 0
 
 
 def test_rotulo_com_ligadura_de_icone_na_frente_ainda_casa():
     # varios itens deste app trazem a ligadura como primeira linha ("download\nBaixar")
     assert escolher_opcao(["download\n1K\nTamanho original", "2K\nAumentada"],
-                          sel.BAIXAR["1k"]) == 0
+                          "1k") == 0
 
 
 def test_resolucao_de_video_pedida_num_menu_de_imagem_e_erro():
     # o default seguro: pedir 720p num menu de imagem GRITA, em vez de baixar o item
     # errado em silencio
     with pytest.raises(GeracaoFalhou):
-        escolher_opcao(MENU_IMAGEM, sel.BAIXAR["720p"])
+        escolher_opcao(MENU_IMAGEM, "720p")
 
 
 def test_dois_itens_com_o_mesmo_rotulo_sao_erro():
     with pytest.raises(GeracaoFalhou, match="esperava 1 candidato"):
-        escolher_opcao(["720p", "720p\nsegunda copia"], sel.BAIXAR["720p"])
+        escolher_opcao(["720p", "720p\nsegunda copia"], "720p")
 
 
 def test_1080p_nao_e_confundido_com_1k():
-    assert escolher_opcao(MENU_VIDEO, sel.BAIXAR["1080p"]) == 2
+    assert escolher_opcao(MENU_VIDEO, "1080p") == 2
 
 
 # --- caminho de destino: quem escolhe a extensao e o Flow ---------------
@@ -1219,35 +1219,35 @@ MENU_PAI = ["motion_blur\nAnimar", "download\nBaixar", "share\nCompartilhar",
 def test_submenu_que_ainda_nao_veio_e_espere_mais_e_nao_achei_zero():
     # ESTE E O TESTE QUE REPRODUZ O DEFEITO. So o menu PAI esta na tela; o submenu de
     # resolucao ainda nao montou. "Achei 0" mandava o job morrer; o certo e esperar.
-    assert achar_no_submenu([MENU_PAI], sel.BAIXAR["720p"]) is None
+    assert achar_no_submenu([MENU_PAI], "720p") is None
 
 
 def test_acha_a_resolucao_no_submenu_certo_mesmo_com_dois_menus_abertos():
     # identifica pelo CONTEUDO, e nao por ser o ultimo: `.last` com dois menus abertos
     # e tao fragil quanto indice em lista que reordena
     menus = [MENU_PAI, MENU_VIDEO]
-    assert achar_no_submenu(menus, sel.BAIXAR["720p"]) == (1, 1)
+    assert achar_no_submenu(menus, "720p") == (1, 1)
 
 
 def test_a_ordem_dos_menus_na_tela_nao_decide():
     menus = [MENU_VIDEO, MENU_PAI]
-    assert achar_no_submenu(menus, sel.BAIXAR["1080p"]) == (0, 2)
+    assert achar_no_submenu(menus, "1080p") == (0, 2)
 
 
 def test_menu_de_imagem_nao_tem_720p_e_isso_e_espere_mais():
     # e quem estoura o teto e o transporte, com um erro que LISTA os rotulos achados
-    assert achar_no_submenu([MENU_IMAGEM], sel.BAIXAR["720p"]) is None
+    assert achar_no_submenu([MENU_IMAGEM], "720p") is None
 
 
 def test_a_mesma_resolucao_em_dois_menus_e_erro_e_nao_escolha():
     # a regra dura: quando o texto casa com mais de um candidato, ERRO. No menu do card
     # o vizinho errado e "Mover para a lixeira".
     with pytest.raises(GeracaoFalhou, match="esperava 1 candidato"):
-        achar_no_submenu([MENU_VIDEO, MENU_VIDEO], sel.BAIXAR["720p"])
+        achar_no_submenu([MENU_VIDEO, MENU_VIDEO], "720p")
 
 
 def test_sem_menu_nenhum_e_espere_mais():
-    assert achar_no_submenu([], sel.BAIXAR["720p"]) is None
+    assert achar_no_submenu([], "720p") is None
 
 
 # --- o painel montou? A REGRESSAO do acervo vazio -----------------------

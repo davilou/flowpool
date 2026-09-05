@@ -30,7 +30,7 @@ E o teto de curas por execucao (padrao 3): interface que quebrou em dez lugares 
 seletor obsoleto, e mudanca grande — e ai a pessoa precisa olhar.
 
 O CLIENTE E TROCAVEL, e o padrao e LOCAL. `Curador` e um Protocol de um metodo so;
-`CuradorOllama` fala com o Ollama da propria maquina (padrao) e `CuradorAnthropic`
+`CuradorLocal` fala com o llama.cpp da propria maquina (padrao) e `CuradorAnthropic`
 existe para quem tiver credencial. Sem nenhum dos dois respondendo, a cura se desliga
 sozinha e o comportamento e o de hoje: erro claro com print. Nada de estourar por
 falta de modelo.
@@ -54,8 +54,14 @@ from flowpool.transporte.pw import seletores as sel
 # --- configuracao -------------------------------------------------------
 # Modelo e URL saem do ambiente: a maquina tem outros modelos instalados e trocar nao
 # pode exigir editar codigo.
-PADRAO_URL = "http://localhost:11434"
-PADRAO_MODELO = "qwen3-vl:32b"          # o unico com visao entre os instalados
+# Dialeto OpenAI, com o `/v1`. Aponta para o llama-swap, que proxia o `llama-server`
+# do llama.cpp e sobe o modelo sob demanda (o Ollama foi desinstalado em 2026-08-25).
+PADRAO_URL = "http://127.0.0.1:9090/v1"
+# PRECISA TER VISAO. No llama.cpp isso exige subir o modelo com `--mmproj` (a torre de
+# visao vem em GGUF separado): sem ele o servidor sobe normal e IGNORA a imagem em
+# silencio — a cura continua respondendo, so que adivinhando pelo DOM.
+# A entrada `qwen3.8:27b` do llama-swap ja carrega o mmproj; a `-leve` NAO.
+PADRAO_MODELO = "qwen3.8:27b"
 MODELO_ANTHROPIC = "claude-opus-5"
 
 # GENEROSO DE PROPOSITO. O modelo tem 20 GB e a placa tem 24, e o ComfyUI da mesma
@@ -163,38 +169,59 @@ def proposta_do_json(bruto: str) -> Proposta | None:
 # --- clientes -----------------------------------------------------------
 
 
-class CuradorOllama:
+class CuradorLocal:
     """O padrao: um modelo de visao rodando na propria maquina, de graca.
 
-    Endpoint nativo `POST /api/chat`, que aceita a imagem em base64 direto na mensagem
-    (`images`, sem o prefixo `data:`) e aceita JSON Schema em `format`, o que dispensa
-    extrair seletor de prosa. A resposta vem em `message.content` como texto JSON.
+    Fala o dialeto **OpenAI** (`POST /v1/chat/completions`), que e o que o `llama-server`
+    do llama.cpp expoe. A imagem vai como `image_url` com data-URI (o Ollama nativo
+    queria `images` em base64 puro; nao e o caso aqui). O JSON Schema vai em
+    `response_format`, o que dispensa extrair seletor de prosa. A resposta vem em
+    `choices[0].message.content` como texto JSON.
+
+    Como o dialeto e o padrao da industria, dá para apontar `FLOWPOOL_CURA_URL` /
+    `FLOWPOOL_CURA_MODELO` / `FLOWPOOL_CURA_CHAVE` para um provedor de fronteira sem
+    tocar em codigo.
     """
 
     def __init__(self, url: str | None = None, modelo: str | None = None,
-                 timeout_s: float = TIMEOUT_S) -> None:
-        self.url = (url or os.environ.get("FLOWPOOL_OLLAMA_URL") or PADRAO_URL).rstrip("/")
+                 chave: str | None = None, timeout_s: float = TIMEOUT_S) -> None:
+        # FLOWPOOL_OLLAMA_URL segue aceito para nao quebrar ambiente antigo.
+        self.url = (url or os.environ.get("FLOWPOOL_CURA_URL")
+                    or os.environ.get("FLOWPOOL_OLLAMA_URL") or PADRAO_URL).rstrip("/")
         self.modelo = modelo or os.environ.get("FLOWPOOL_CURA_MODELO") or PADRAO_MODELO
+        self.chave = chave or os.environ.get("FLOWPOOL_CURA_CHAVE") or ""
         self.timeout_s = timeout_s
 
     async def propor(self, descricao, imagem, resumo):
-        mensagem = {"role": "user", "content": pergunta(descricao, resumo)}
+        conteudo: list[dict] = [{"type": "text", "text": pergunta(descricao, resumo)}]
         if imagem:
             # ver a tela vale mais que ler o DOM: foi olhando o print que dois
             # diagnosticos desta interface se resolveram em segundos
-            mensagem["images"] = [base64.b64encode(imagem).decode("ascii")]
+            b64 = base64.b64encode(imagem).decode("ascii")
+            conteudo.append({"type": "image_url",
+                             "image_url": {"url": f"data:image/png;base64,{b64}"}})
         corpo = {
             "model": self.modelo,
             "stream": False,
-            "format": ESQUEMA,
-            "options": {"temperature": 0},   # nao e criatividade, e identificacao
-            "messages": [mensagem],
+            "temperature": 0,                # nao e criatividade, e identificacao
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "proposta", "schema": ESQUEMA},
+            },
+            "messages": [{"role": "user", "content": conteudo}],
         }
+        cabecalhos = {"Authorization": f"Bearer {self.chave}"} if self.chave else {}
         async with httpx.AsyncClient(timeout=self.timeout_s) as cliente:
-            resposta = await cliente.post(f"{self.url}/api/chat", json=corpo)
+            resposta = await cliente.post(f"{self.url}/chat/completions",
+                                          json=corpo, headers=cabecalhos)
             resposta.raise_for_status()
             dados = resposta.json()
-        return proposta_do_json((dados.get("message") or {}).get("content", ""))
+        escolhas = dados.get("choices") or [{}]
+        return proposta_do_json((escolhas[0].get("message") or {}).get("content", ""))
+
+
+# Nome antigo mantido para nao quebrar import de fora.
+CuradorOllama = CuradorLocal
 
 
 class CuradorAnthropic:
@@ -246,7 +273,7 @@ def curador_padrao() -> Curador | None:
     escolha = (os.environ.get("FLOWPOOL_CURA_CLIENTE") or "ollama").strip().lower()
     if escolha == "anthropic":
         return CuradorAnthropic()
-    return CuradorOllama()
+    return CuradorLocal()
 
 
 # --- do seletor quebrado para o nome dele -------------------------------

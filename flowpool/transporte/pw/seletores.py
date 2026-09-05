@@ -39,6 +39,10 @@ AS SEIS REGRAS DURAS DESTE ARQUIVO
 
 from __future__ import annotations
 
+import json
+import re
+from pathlib import Path
+
 # Valor de constante ainda NÃO MEDIDA na aplicação nova. Quem consome tem que tratar
 # como "não sei fazer isso" e falhar claro — nunca chutar.
 PENDENTE = "..."
@@ -425,10 +429,22 @@ TEXTO_PORTAO_IDADE = "text=/18 anos ou mais/i"
 # A REGRA: se um seletor curado errado dispara ação irreversível ou gasta dinheiro, ele
 # não é curável. Zero candidatos ali significa que a tela mudou de verdade, e a resposta
 # certa é erro claro com print — não um modelo de visão chutando naquela barra.
+# `BOTAO_ENVIAR` ficou DE FORA, como estava na aplicação antiga, e a razão importa:
+# um seletor de envio curado errado clica em algo que NÃO envia — dá erro claro, não
+# gasta crédito. Já `BOTAO_AGENTE` está dentro justamente porque o vizinho dele na
+# barra é o de enviar, e ali um chute custa uma geração cobrada.
 NAO_CURAVEIS = {
-    "MENU_LIXEIRA_CARD", "BOTAO_APAGAR_CARTAO", "BOTAO_EDITAR_CARTAO",
-    "BOTAO_ENVIAR", "BOTAO_AGENTE", "BOTAO_CONCORDO", "MENU_ITEM",
-    "BOTAO_INCLUIR_NO_COMANDO",
+    # menus do resultado: o último item é "mover para a lixeira"
+    "MENU_CARD", "MENU_ITEM", "MENU_ANIMAR", "MENU_BAIXAR", "MENU_REUTILIZAR",
+    "MENU_LIXEIRA_CARD", "MENU_LIXEIRA", "MENU_RENOMEAR", "MENU_EXCLUIR",
+    # projetos: apagar e renomear pelo cartão
+    "BOTAO_EXCLUIR_PROJETO", "BOTAO_APAGAR_CARTAO", "BOTAO_EDITAR_CARTAO",
+    # aceite em nome do usuário
+    "BOTAO_CONCORDO", "CAIXA_CONSENTIMENTO",
+    # o interruptor do Agente — vizinho do botão de enviar
+    "BOTAO_AGENTE",
+    # repetir mora numa fila de botões dentro do card de falha, e um deles apaga
+    "BOTAO_REPETIR_CARD",
 }
 
 # O que a auto-cura mostra ao modelo sobre cada seletor. Só entra aqui o que for
@@ -441,3 +457,146 @@ DESCRICAO = {
     "CARD_GRADE": "o contêiner de UM resultado na grade, não a miniatura em si",
     "DROPDOWN_MODELO": "o seletor de família de modelos dentro do painel de opções",
 }
+
+
+# --- constantes herdadas, ainda NAO remedidas na aplicacao nova ---------
+#
+# Estavam no arquivo antigo e continuam sendo consumidas por codigo e por teste. Ficam
+# aqui marcadas pelo que sao: NAO conferidas contra o Flow de hoje. Quem depender delas
+# tem que tratar como pendente.
+BOTAO_EXCLUIR_PROJETO = PENDENTE
+BOTAO_PERSONAGENS = PENDENTE
+MENU_EXCLUIR = PENDENTE
+CONFIG_SEM_AUDIO = PENDENTE
+
+# O numero dentro de "A geracao vai usar N creditos", no rodape do painel. O TEXTO foi
+# reencontrado na aplicacao nova (`CUSTO_DA_GERACAO` casa 1 elemento); o padrao segue
+# valendo porque a frase e a mesma.
+PADRAO_CUSTO = r"(?i)vai usar\s+(\d[\d.,]*)\s+cr[eé]dito"
+
+# O que o CHIP escreve para cada modo, ja normalizado. Na aplicacao nova o chip diz
+# "video . 360p . 8s crop_16_9 x2" em video e o nome do modelo em imagem — mesma forma
+# de antes. Continua sendo tolerancia, e nao verificacao: quem confere de verdade agora
+# e `aria-checked`.
+ROTULO_MODO_NO_CHIP = {
+    "imagem": (), "t2v": ("video",),
+    "frames2v": ("frames", "video"), "ingredients2v": ("elementos", "video"),
+}
+
+# --- os curados: arquivo a parte, sobreposto na leitura -----------------
+# O que a IA curou NAO volta para dentro deste arquivo. Motivos:
+#   * `seletores.py` continua sendo autoria humana, com os comentarios que explicam
+#     cada armadilha medida — e um `sed` de robo apagaria justamente isso
+#   * o que a IA mexeu fica visivel, auditavel e REVERSIVEL: apagar o JSON volta ao
+#     original, sem git, sem merge, sem conflito
+#
+# Cada entrada guarda valor novo, valor antigo, data e a justificativa que o modelo deu.
+CURADOS = Path(__file__).with_name("curados.json")
+
+# `NOME` ou `NOME[chave]` — nada mais entra. Um nome fora desta forma e ignorado em vez
+# de virar `setattr` de coisa nenhuma.
+_ALVO = re.compile(r"^([A-Z][A-Z0-9_]*)(?:\[([^\]]+)\])?$")
+
+# Valor original de cada nome sobreposto, para `restaurar_originais` poder desfazer sem
+# reimportar o modulo — e o que faz "apagar o JSON reverte" valer tambem em processo
+# que ja esta de pe.
+_ORIGINAIS: dict[str, str] = {}
+
+
+def _chave_de(mapa: dict, chave: str):
+    """A chave REAL do mapa a partir do texto do nome, ou None.
+
+    `QUANTIDADE` tem chaves inteiras (1..4) e o nome do curado e texto
+    ("QUANTIDADE[1]"). Comparar por `str()` cobre os dois tipos sem obrigar o arquivo
+    de curados — que uma pessoa pode editar — a saber o tipo de cada mapa daqui.
+    """
+    for real in mapa:
+        if str(real) == chave:
+            return real
+    return None
+
+
+def _ler_curados() -> dict:
+    """O JSON, ou vazio. NUNCA levanta: isto roda na importacao do modulo.
+
+    Um arquivo corrompido nao pode derrubar o app inteiro — o comportamento correto e
+    seguir com `seletores.py` puro, que e exatamente o estado anterior a cura.
+    """
+    try:
+        dados = json.loads(CURADOS.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except Exception as e:                      # JSON quebrado, permissao, encoding
+        print(f"curados.json ilegivel ({type(e).__name__}) - "
+              f"seguindo com os seletores originais")
+        return {}
+    return dados if isinstance(dados, dict) else {}
+
+
+def aplicar_curados(dados: dict | None = None) -> list[str]:
+    """Sobrepoe os curados sobre este modulo. Devolve os nomes que valeram.
+
+    Recusa em silencio o que nao devia estar la: nome destrutivo (segunda barreira da
+    regra de seguranca), nome que nao existe no modulo, e valor que nao e texto. O
+    arquivo e escrito por codigo mas pode ser editado a mao, e a leitura tem que
+    tratar isso como entrada nao confiavel.
+    """
+    dados = _ler_curados() if dados is None else dados
+    aqui = globals()
+    aplicados: list[str] = []
+    for nome, entrada in dados.items():
+        valor = entrada.get("valor") if isinstance(entrada, dict) else entrada
+        if not isinstance(valor, str) or not valor:
+            continue
+        casado = _ALVO.match(nome)
+        if not casado:
+            continue
+        base, chave = casado.group(1), casado.group(2)
+        if base in NAO_CURAVEIS or nome in NAO_CURAVEIS:
+            print(f"curados.json: {nome} e destrutivo e NAO foi aplicado")
+            continue
+        atual = aqui.get(base)
+        if chave is None:
+            if not isinstance(atual, str):
+                continue                        # nome inexistente ou nao e seletor
+            _ORIGINAIS.setdefault(nome, atual)
+            aqui[base] = valor
+        else:
+            if not isinstance(atual, dict):
+                continue
+            real = _chave_de(atual, chave)
+            if real is None or not isinstance(atual[real], str):
+                continue
+            _ORIGINAIS.setdefault(nome, atual[real])
+            atual[real] = valor
+        aplicados.append(nome)
+    return aplicados
+
+
+def restaurar_originais() -> None:
+    """Desfaz toda sobreposicao, em memoria. E o "apagar o JSON" sem reiniciar."""
+    aqui = globals()
+    for nome, valor in _ORIGINAIS.items():
+        casado = _ALVO.match(nome)
+        if not casado:
+            continue
+        base, chave = casado.group(1), casado.group(2)
+        if chave is None:
+            aqui[base] = valor
+        elif isinstance(aqui.get(base), dict):
+            real = _chave_de(aqui[base], chave)
+            if real is not None:
+                aqui[base][real] = valor
+    _ORIGINAIS.clear()
+
+
+def recarregar_curados(dados: dict | None = None) -> list[str]:
+    """Volta ao original e aplica de novo. E o que a cura chama depois de gravar."""
+    restaurar_originais()
+    return aplicar_curados(dados)
+
+
+_APLICADOS = aplicar_curados()
+if _APLICADOS:
+    print(f"seletores curados em uso ({len(_APLICADOS)}): {', '.join(_APLICADOS)} "
+          f"- apague {CURADOS.name} para voltar ao original")

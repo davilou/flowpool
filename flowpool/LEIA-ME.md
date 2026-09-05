@@ -109,30 +109,40 @@ um resumo do DOM e pergunta a um **modelo de visão local** qual é o seletor no
 a resposta (tem que casar com **exatamente 1** elemento), grava em
 `flowpool/transporte/pw/curados.json` e **repete a ação**. O job segue em vez de falhar.
 
-**Para ligar, basta ter o Ollama rodando com um modelo de visão** — é o padrão, não
-precisa configurar nada:
+**Para ligar, basta ter o llama-swap de pé** — é o padrão, não precisa configurar nada.
+Ele sobe com o Windows (atalho em `shell:startup`) e carrega o modelo sob demanda:
 
 ```bash
-ollama serve            # se ainda não estiver de pé
-ollama pull qwen3-vl:32b
+curl http://127.0.0.1:9090/v1/models     # confere que está no ar
 ```
 
-Sem o Ollama respondendo, a cura **se desliga sozinha** e o comportamento é o de sempre:
+Se não estiver, suba com `C:\Users\User\llamaswap\iniciar-llamaswap.cmd`.
+
+Sem ninguém respondendo, a cura **se desliga sozinha** e o comportamento é o de sempre:
 erro claro e print em `scratch/falhas/`. Nada estoura por falta de modelo.
+
+> **O Ollama foi desinstalado em 2026-08-25** e o `qwen3-vl:32b` foi apagado junto.
+> Hoje quem serve os modelos é o `llama-server` do llama.cpp, atrás do llama-swap,
+> falando o dialeto OpenAI (`/v1/chat/completions`).
 
 Dá para ajustar por variável de ambiente:
 
 | variável | padrão | para quê |
 |---|---|---|
 | `FLOWPOOL_CURA` | ligada | `0`, `off` ou `nao` desliga a cura por completo |
-| `FLOWPOOL_CURA_MODELO` | `qwen3-vl:32b` | trocar de modelo (precisa ter **visão**) |
-| `FLOWPOOL_OLLAMA_URL` | `http://localhost:11434` | Ollama em outra máquina |
-| `FLOWPOOL_CURA_CLIENTE` | `ollama` | `anthropic` usa a API da Anthropic (exige `pip install anthropic` e credencial — o SDK não é dependência do projeto) |
+| `FLOWPOOL_CURA_MODELO` | `qwen3.8:27b` | trocar de modelo (precisa ter **visão**) |
+| `FLOWPOOL_CURA_URL` | `http://127.0.0.1:9090/v1` | outro endpoint OpenAI-compatível |
+| `FLOWPOOL_CURA_CHAVE` | vazia | `Authorization: Bearer` para provedor pago |
+| `FLOWPOOL_CURA_CLIENTE` | `local` | `anthropic` usa a API da Anthropic (exige `pip install anthropic` e credencial — o SDK não é dependência do projeto) |
 
-**Sobre a GPU:** `qwen3-vl:32b` ocupa ~20 GB e a placa tem 24. Com o ComfyUI carregado
-os dois não cabem juntos, e a cura passa a rodar parte na CPU — fica lenta, não quebra
-(o prazo é de 5 minutos). Se isso incomodar, aponte `FLOWPOOL_CURA_MODELO` para um
-modelo de visão menor.
+**A armadilha da visão:** só a entrada `qwen3.8:27b` do llama-swap sobe com `--mmproj`
+(a torre de visão vem num GGUF separado). A entrada `qwen3.8:27b-leve` **não** — e sem
+o projetor o servidor sobe normal e **ignora a imagem em silêncio**. A cura continua
+respondendo, só que adivinhando pelo DOM. O sintoma é cura piorando sem explicação.
+
+**Sobre a GPU:** o modelo ocupa ~22 GB numa placa de 24, e sobram ~1,9 GB. Com o
+ComfyUI carregado os dois não cabem, e a cura passa a rodar parte na CPU — fica lenta,
+não quebra (o prazo é de 5 minutos).
 
 ### Como reverter uma cura
 

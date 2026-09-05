@@ -25,13 +25,24 @@ from flowpool.transporte.pw.diario import (
 from flowpool.transporte.pw import seletores as sel
 from flowpool.transporte.pw.sessao import abrir_contexto, interpretar_sessao
 
-# Chave de `sel.BAIXAR` por modo. 4K fica de fora dos dois: exige plano pago.
+# Chave de `sel.BAIXAR` por modo — a resolucao pedida no menu de DOWNLOAD.
+# Medido 2026-09-05 num resultado de imagem: 1k / 2k / 4k. O de video falta medir.
 RESOLUCAO = {
-    Modo.IMAGEM: "1k",          # "1K Tamanho original"
-    Modo.T2V: "720p",
+    Modo.IMAGEM: "1k",          # "1k / tamanho original"
+    Modo.T2V: "720p",           # NAO MEDIDO na aplicacao nova
     Modo.FRAMES2V: "720p",
     Modo.INGREDIENTS2V: "720p",
 }
+
+# A resolucao de GERACAO de video, no painel do chip. Grupo novo em 2026-09-05.
+#
+# O padrao do Flow virou 360p. A aplicacao antiga sempre entregou 720p porque era o
+# unico valor que existia — entao NAO tocar aqui rebaixaria em silencio todo video do
+# usuario. 720p mantem o que ele ja tinha.
+#
+# Isto e uma constante e nao um campo do pedido porque `Job` ainda nao tem a coluna.
+# Vira escolha por job quando a API expuser o campo — a lista esta em `sel.RESOLUCOES`.
+RESOLUCAO_VIDEO = "720p"
 # Quantas vezes repetir um card falho pelo proprio botao `redo`, que NAO cobra de novo.
 #
 # MEDIDO 2026-08-21: um caso real (falha ao gerar audio no Omni Flash) precisou de 2
@@ -216,22 +227,21 @@ class TransportePlaywright:
     async def listar_projetos(self, s: Sessao) -> list[ProjetoRemoto]:
         _, _, pagina = s.handle
         await pagina.goto(sel.URL_FLOW, wait_until="domcontentloaded")
-        await pagina.locator(sel.CARD_PROJETO).first.wait_for(timeout=30_000)
-        # MEDIDO: o proprio <a> do card NAO tem texto — `inner_text()` volta vazio e
-        # qualquer `.splitlines()[0]` estoura. O nome mora num ancestral. Sobe-se ate o
-        # ultimo ancestral que ainda contem UM SO link de projeto: acima disso vem o
-        # container da grade, cujo texto junta todos os projetos num so.
+        await pagina.locator(sel.CARTAO_PROJETO).first.wait_for(timeout=30_000)
+        # SIMPLIFICOU NA APLICACAO NOVA. A antiga exigia subir ancestrais porque o <a>
+        # do card nao tinha texto; aqui `flow-project-card` traz o nome e o link
+        # juntos, e o texto vem como ["<nome>", "edit", "delete"].
+        #
+        # MEDIDO 2026-09-05:
+        #   texto = ['tiktok shop', 'edit', 'delete']
+        #   href  = /project/9d985620-ea36-4136-9562-735fdcaf24dd
         pares = await pagina.evaluate(
-            """(seletor) => [...document.querySelectorAll(seletor)].map(a => {
-                 let no = a, card = a;
-                 for (let i = 0; i < 6 && no.parentElement; i++) {
-                   no = no.parentElement;
-                   if (no.querySelectorAll(seletor).length === 1) card = no; else break;
-                 }
-                 return {href: a.getAttribute('href'),
+            """(seletor) => [...document.querySelectorAll(seletor)].map(card => {
+                 const a = card.querySelector('a[href*="/project/"]');
+                 return {href: a ? a.getAttribute('href') : '',
                          texto: (card.innerText || '').trim()};
                })""",
-            sel.CARD_PROJETO,
+            sel.CARTAO_PROJETO,
         )
         achados: list[ProjetoRemoto] = []
         for par in pares:
@@ -241,7 +251,10 @@ class TransportePlaywright:
             # `sem_segredo` e nao `seguro`: o nome e comparado com `job.produto`, entao
             # tirar o acento aqui faria "Panelas Monaco" deixar de casar consigo mesmo e
             # a adocao criaria um projeto novo a cada geracao.
-            linhas = dom.sem_segredo(par["texto"]).splitlines()
+            # o texto do cartao vem como "<nome>\nedit\ndelete": o nome e a primeira
+            # linha, e as duas ligaduras do fim sao botoes, nao parte do nome
+            linhas = [l for l in dom.sem_segredo(par["texto"]).splitlines()
+                      if l.strip() and l.strip() not in ("edit", "delete")]
             if not linhas:
                 # card sem nome legivel: ignorar e melhor que adotar o projeto errado
                 continue
@@ -273,34 +286,93 @@ class TransportePlaywright:
         return id_remoto
 
     async def abrir_projeto(self, s: Sessao, id_remoto: str) -> None:
-        """NUNCA por goto. Deep link derruba a app com "Application error".
+        """Por URL DIRETA — e isto e uma inversao em relacao a aplicacao antiga.
 
-        O Next espera chegar por navegacao interna. Vai-se a lista e CLICA-SE no card.
+        A versao Next quebrava em deep link com "Application error", e por isso o
+        codigo antigo ia a lista e CLICAVA no card. MEDIDO 2026-09-05 na aplicacao
+        Angular: `https://flow.google.com/project/<uuid>` abre o projeto direto, em
+        todas as sondas. E o UUID de agosto continua valendo — os projetos antigos
+        abrem no endereco novo.
+
+        Ir direto e melhor que clicar na lista por um motivo pratico: a lista e
+        preguicosa e paginada, e um projeto antigo pode simplesmente nao estar
+        carregado nela.
+
+        O PORTAO DE IDADE e checado aqui porque o sintoma sem isso e enganoso: a conta
+        bloqueada nao mostra projeto nenhum, e a mensagem viraria "o projeto nao e
+        desta conta" — mandando investigar o lugar errado.
         """
         _, _, pagina = s.handle
-        if sel.PADRAO_PROJETO + id_remoto in pagina.url:
+        alvo = f"{sel.URL_BASE}{sel.PADRAO_PROJETO}{id_remoto}"
+        if id_remoto in pagina.url:
             return
-        await pagina.goto(sel.URL_FLOW, wait_until="domcontentloaded")
-        # A lista e preguicosa (IntersectionObserver). Contar antes de ela carregar da
-        # zero e produz a mensagem errada: "nao e da conta" quando na verdade a pagina
-        # ainda estava vazia. Espera-se o card especifico; se ele nunca aparecer, ai sim
-        # a conclusao vale.
-        card = pagina.locator(f'a[href*="{id_remoto}"]')
+        await pagina.goto(alvo, wait_until="domcontentloaded")
         try:
-            await card.first.wait_for(timeout=30_000)
+            await pagina.locator(sel.CAMPO_PROMPT).first.wait_for(timeout=45_000)
         except Exception:
-            pass
-        if await card.count() == 0:
-            # projeto de outra conta simplesmente nao aparece na lista. Seguir daqui
-            # geraria no projeto errado — ou em nenhum.
+            if sel.URL_PORTAO_IDADE in pagina.url:
+                raise SessaoMorta(
+                    f"{s.conta.email} caiu no portao de idade do Flow "
+                    f"({sel.URL_PORTAO_IDADE}): a conta precisa de verificacao de "
+                    "idade no Google") from None
             raise GeracaoFalhou(
-                f"projeto {id_remoto} nao esta na lista de {s.conta.email}")
-        await card.first.click()
-        await pagina.locator(sel.CAMPO_PROMPT).first.wait_for(timeout=30_000)
+                f"projeto {id_remoto} nao abriu em {s.conta.email} "
+                f"(url final: {pagina.url})") from None
 
     # -------------------------------------------------------------------- chip
     def _painel(self, pagina):
         return pagina.locator(_medido("PAINEL_CHIP", sel.PAINEL_CHIP)).first
+
+    @staticmethod
+    async def _painel_aberto(pagina) -> bool:
+        """O painel de configuracao esta na tela AGORA.
+
+        Conta os botoes em vez de so procurar o contorno: o overlay do Angular existe
+        na pagina mesmo vazio, e `.cdk-overlay-pane` sozinho casaria um pane sem
+        conteudo — foi exatamente isso que fez a primeira sonda achar o painel vazio.
+        """
+        return await pagina.evaluate(
+            "() => [...document.querySelectorAll('.cdk-overlay-pane')]"
+            ".some(x => x.querySelectorAll('button').length > 3)")
+
+    async def _garantir_painel(self, pagina, d: Diario, tentativas: int = 3) -> bool:
+        """Deixa o painel aberto, e devolve se conseguiu.
+
+        O CHIP E UM INTERRUPTOR — clicar com ele aberto FECHA. Por isso a primeira
+        coisa e perguntar se ja esta aberto, nunca clicar de saida. E por isso esta
+        funcao e chamada ENTRE cada opcao: no Flow novo o painel se fecha ao escolher,
+        e a opcao seguinte cairia no vazio.
+        """
+        for volta in range(tentativas):
+            if await self._painel_aberto(pagina):
+                return True
+            try:
+                await pagina.locator(sel.CHIP_CONFIG).first.click(timeout=10_000)
+            except Exception:
+                pass
+            gasto = 0
+            while gasto < 20_000:
+                await pagina.wait_for_timeout(250)
+                gasto += 250
+                if await self._painel_aberto(pagina):
+                    return True
+            d.passo(f"o painel de configuracao nao abriu (volta {volta + 1} de "
+                    f"{tentativas})")
+        return False
+
+    @staticmethod
+    async def _marcados_no_painel(pagina) -> list[str]:
+        """O que o painel declara SELECIONADO agora, por `aria-checked`.
+
+        E a novidade da aplicacao nova, e ela fecha uma classe de defeito: antes, a
+        unica forma de saber se a configuracao pegou era ler o texto do chip, que
+        omite o modelo e resume o resto.
+        """
+        bruto = await pagina.evaluate(
+            "() => [...document.querySelectorAll('.cdk-overlay-pane [aria-checked=true]')]"
+            ".map(e => (e.innerText||'').trim().split(String.fromCharCode(10))"
+            ".map(s => s.trim()).filter(Boolean).join(' '))")
+        return [dom.seguro(t) for t in bruto]
 
     async def _texto_do_chip(self, pagina) -> str:
         bruto = await pagina.locator(sel.CHIP_CONFIG).first.inner_text(timeout=15_000)
@@ -532,13 +604,14 @@ class TransportePlaywright:
         # timeout que fala do chip e nunca da causa.
         await self._exigir_agente_desligado(pagina)
 
-        await pagina.locator(sel.CHIP_CONFIG).first.click(timeout=15_000)
+        if not await self._garantir_painel(pagina, d):
+            raise GeracaoFalhou("o painel de configuracao nao abriu")
         painel = self._painel(pagina)
-        await painel.wait_for(timeout=15_000)
 
         # ordem importa: o modo redefine as listas de proporcao, duracao e modelo — e
         # tambem a propria lista de MODOS, o que faz dos submodos duas etapas
         await self._escolher_modo(pagina, painel, modo)
+        await self._garantir_painel(pagina, d)
 
         await self._clicar_unico(painel, sel.DROPDOWN_MODELO, "dropdown de modelo")
         # A escolha do modelo NAO sai por seletor CSS. Medido: o rotulo tem prefixo que
@@ -560,7 +633,22 @@ class TransportePlaywright:
             raise GeracaoFalhou(f"modelo nao trocou: dropdown diz {rotulo!r}, "
                                 f"esperado {esperado!r}")
 
+        await self._garantir_painel(pagina, d)
         await self._clicar_unico(painel, sel.PROPORCAO[p.proporcao], "proporcao")
+        await self._garantir_painel(pagina, d)
+
+        # RESOLUCAO — grupo que a aplicacao antiga nao tinha.
+        #
+        # MEDIDO 2026-09-05: o painel de video ganhou [360p] [720p], e o padrao do Flow
+        # e 360p. A aplicacao antiga sempre entregou 720p porque era o unico valor que
+        # existia. Sem tocar aqui, TODO video passaria a sair em 360p sem ninguem pedir
+        # — uma piora silenciosa de qualidade, que e o pior tipo.
+        #
+        # Imagem nao tem o grupo.
+        if p.modo is not Modo.IMAGEM:
+            await self._clicar_unico(
+                painel, sel.RESOLUCAO[RESOLUCAO_VIDEO], "resolucao")
+            await self._garantir_painel(pagina, d)
         # `None` nos modos SEM grupo de duracao no painel, onde procurar o botao
         # derrubaria a geracao inteira. Eram so imagem; FRAMES2V entrou em 2026-08-21.
         #
@@ -573,10 +661,27 @@ class TransportePlaywright:
         #
         # Nos demais modos de video vale a duracao DO PEDIDO — ate a Task 15 era uma
         # constante de 8s aqui, e todo video saia 70% mais caro do que o de 4s.
-        duracao = None if p.modo in tipos.SEM_DURACAO else p.duracao
+        #
+        # 2026-09-05: NA APLICACAO NOVA, FRAMES TEM DURACAO. Os quatro valores estao no
+        # painel em todos os modos de video, `frames` inclusive — medido. A conclusao
+        # de 21/08 valia para a aplicacao antiga e morreu com ela; `tipos.SEM_DURACAO`
+        # continua valendo so para IMAGEM.
+        duracao = None if p.modo is Modo.IMAGEM else p.duracao
         if duracao:
+            await self._garantir_painel(pagina, d)
             await self._clicar_unico(painel, sel.DURACAO[duracao], "duracao")
+        await self._garantir_painel(pagina, d)
         await self._clicar_unico(painel, sel.QUANTIDADE[p.quantidade], "quantidade")
+        await self._garantir_painel(pagina, d)
+
+        # A CONFERENCIA MUDOU DE FONTE, e melhorou.
+        #
+        # A aplicacao antiga nao marcava a opcao escolhida, e a unica forma de saber se
+        # a configuracao pegou era ler o texto do chip — que nomeia umas coisas e omite
+        # outras (o modelo nunca aparecia la). A nova marca TUDO com `aria-checked`,
+        # entao da para perguntar diretamente o que esta selecionado.
+        marcados = await self._marcados_no_painel(pagina)
+        d.passo(f"marcado no painel: {marcados}")
 
         # O CUSTO ESTA NA TELA. Le-se aqui porque o painel ja esta aberto e a leitura
         # nao custa clique nenhum — ao contrario do saldo, que paga dois. Hoje isto e
@@ -585,17 +690,26 @@ class TransportePlaywright:
 
         await self._fechar_painel(pagina)
 
-        chip = await self._texto_do_chip(pagina)
-        faltando = analise.faltando_no_chip(chip, modo, p.proporcao, p.quantidade, duracao)
+        # A CONFERENCIA E CONTRA O QUE ESTA MARCADO, nao contra o texto do chip.
+        #
+        # Cada item pedido tem que aparecer entre os `aria-checked=true`. O chip
+        # continua sendo lido, mas como LOG: ele resume bem para o humano e omite
+        # coisas para a maquina (o modelo nunca aparece la).
+        exigidos = [sel.MODO_ICONE[modo], sel.LIGADURA_PROPORCAO[p.proporcao],
+                    f"x{p.quantidade}"]
+        if duracao:
+            exigidos.append(duracao)
+        if p.modo is not Modo.IMAGEM:
+            exigidos.append(RESOLUCAO_VIDEO)
+        juntos = " | ".join(marcados)
+        faltando = [e for e in exigidos if e not in juntos]
         if faltando:
             raise GeracaoFalhou(
-                f"chip nao confirma a configuracao: diz {chip!r}, faltou {faltando}")
-        # a tolerancia do rotulo de submodo nao pode ser calada: esta linha e a medicao
-        # que falta sobre o que o chip escreve em `frames2v` e `ingredients2v`
-        aviso = analise.confirmacao_fraca(chip, modo)
-        if aviso:
-            print("chip:", aviso)
-        d.passo(f"chip confirmado: {chip}")
+                f"o painel nao confirma a configuracao: marcado {marcados}, "
+                f"faltou {faltando}")
+
+        chip = await self._texto_do_chip(pagina)
+        d.passo(f"configuracao confirmada; chip diz: {chip}")
         return chip
 
     async def _custo_anunciado(self, pagina) -> int | None:
