@@ -18,7 +18,7 @@ import hashlib
 import re
 import subprocess
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from playwright.async_api import async_playwright
@@ -56,6 +56,18 @@ para o primeiro e morre, e a validacao falharia com TargetClosedError.
 
 class ChromeAusente(RuntimeError):
     """O Google recusa o Chromium empacotado do Playwright; precisa do Chrome instalado."""
+
+
+# Quanto tempo se considera uma sessao valida DEPOIS de ela ter sido vista viva.
+#
+# E ESTIMATIVA, e a mudanca de natureza importa: a aplicacao antiga LIA a data de
+# expiracao de `/fx/api/auth/session`; a nova nao expoe nada equivalente, entao aqui se
+# arbitra um prazo. As ~48h vem do que foi observado em agosto com o valor real.
+#
+# Estimar para MENOS e o lado seguro: quando o prazo vence, o pior que acontece e uma
+# revalidacao a mais. Estimar para mais faria o pool insistir com uma sessao morta e
+# gastar tentativa de job para descobrir.
+VALIDADE_ESTIMADA = timedelta(hours=40)
 
 
 class PerfilOcupado(RuntimeError):
@@ -199,6 +211,22 @@ async def abrir_contexto(perfil: Path, proxy: str | None = None,
 async def validar_perfil(perfil: Path, proxy: str | None = None) -> datetime:
     """Abre o perfil com Playwright e prova que a sessao esta viva.
 
+    VALIDA PELA TELA, e nao mais por API. A aplicacao antiga tinha
+    `/fx/api/auth/session`, que devolvia `access_token` e `expires`; a nova NAO TEM
+    rota equivalente — MEDIDO 2026-09-05 observando as 42 requisicoes do carregamento,
+    onde a autenticacao aparece so como cookie do Google
+    (`accounts.google.com/rotatecookies`).
+
+    O SINAL DE LOGIN E O AVATAR, e essa escolha tem motivo. O candidato obvio seria
+    "tem cartao de projeto na home", e ele esta ERRADO pelo mesmo motivo que ja travou
+    todo projeto novo em agosto: conta recem-criada, ou conta que teve os projetos
+    apagados, tem ZERO cartoes — e reprovaria uma sessao perfeitamente viva. Lista
+    vazia e estado legitimo. O avatar existe sempre que ha login.
+
+    O PORTAO DE IDADE tem erro proprio. Sem isso, conta bloqueada vira "sessao morta",
+    o painel manda revalidar, o usuario faz um login inteiro e cai no mesmo portao —
+    que foi exatamente o que aconteceu.
+
     Valida pelo MESMO proxy por que a conta vai operar. Validar pelo IP de casa e
     depois gerar por outro IP e a divergencia que este campo existe para nao criar.
     """
@@ -206,8 +234,18 @@ async def validar_perfil(perfil: Path, proxy: str | None = None) -> datetime:
     try:
         pagina = ctx.pages[0] if ctx.pages else await ctx.new_page()
         await pagina.goto(sel.URL_FLOW, wait_until="domcontentloaded")
-        resposta = await pagina.request.get(sel.URL_BASE + sel.URL_SESSAO)
-        return interpretar_sessao(await resposta.json())
+        try:
+            await pagina.locator(sel.AVATAR_CONTA).first.wait_for(timeout=45_000)
+        except Exception:
+            if sel.URL_PORTAO_IDADE in pagina.url:
+                raise SessaoMorta(
+                    "o Flow bloqueou esta conta no portao de idade "
+                    f"({sel.URL_PORTAO_IDADE}). Revalidar NAO resolve: a conta Google "
+                    "precisa ter a idade verificada") from None
+            raise SessaoMorta(
+                f"nao achei o avatar em {pagina.url} - a conta parece deslogada"
+            ) from None
+        return datetime.now(timezone.utc) + VALIDADE_ESTIMADA
     finally:
         await ctx.close()
         await pw.stop()
