@@ -525,6 +525,25 @@ PADRAO_CREDITOS = r"(?i)(\d[\d.,]*)\s+cr[ée]ditos"
 # NÃO MEDIDO na aplicação nova. `flow-credit-banner` existe no projeto, mas não trouxe
 # texto de crédito na medição — pode aparecer só quando o saldo está baixo.
 BANNER_CREDITO = "flow-credit-banner"
+# SALDO INSUFICIENTE SE RECONHECE ANTES DE CLICAR, e isto e melhor que o aviso da
+# aplicação antiga.
+#
+# MEDIDO 2026-09-05, sem gastar nada: numa conta com ~36 créditos, configurar
+# "Veo 3.1 - Quality" (que o painel anuncia como 100 créditos) faz o BOTÃO DE ENVIAR
+# DESAPARECER, e um botão `info` toma o lugar dele na barra:
+#
+#     saldo suficiente : add · agente · <chip> · arrow_forward
+#     saldo curto      : add · agente · <chip> · info
+#
+# `flow-generate-icon-button button` passa a casar ZERO.
+#
+# A aplicação antiga só avisava DEPOIS do clique, com "Seus créditos do Google Flow
+# acabaram" — e foi por ler esse aviso antes do card que um job voltava para a fila
+# com o vídeo já gerado. Aqui não há esse risco: se não há botão, nada foi enviado.
+#
+# O texto do aviso pós-clique continua NÃO MEDIDO na aplicação nova, e continua
+# PENDENTE abaixo. Ele deixou de ser o caminho principal.
+BOTAO_INFO_BARRA = f'{BARRA_PROMPT} button:has-text("info")'
 AVISO_SEM_CREDITO = PENDENTE
 AVISO_ALTA_DEMANDA = PENDENTE
 AVISO_DIREITOS = PENDENTE

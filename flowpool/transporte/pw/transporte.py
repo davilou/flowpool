@@ -120,6 +120,8 @@ class TransportePlaywright:
         self._repeticoes: dict[tuple[int, str], int] = {}
         # leituras seguidas sem sinal de progresso, por card
         self._parado: dict[tuple[int, str], int] = {}
+        # o custo que o painel anunciou na ultima configuracao
+        self._ultimo_custo: int | None = None
         # `baixar` recebe so o id_remoto, e o menu de resolucao e diferente entre
         # imagem e video. Guardar o modo no momento de gerar e mais barato do que
         # adivinhar pelo DOM — e adivinhar errado baixaria a resolucao errada calado.
@@ -558,6 +560,31 @@ class TransportePlaywright:
             return False
         return await pagina.locator(sel.VEU_ABERTO).count() == 0
 
+    async def _exigir_botao_de_enviar(self, pagina, email: str) -> None:
+        """Recusa gerar quando o botao de enviar nao esta na barra.
+
+        MEDIDO 2026-09-05, sem gastar nada: numa conta com ~36 creditos, configurar um
+        modelo que o painel anuncia por 100 faz o BOTAO DE ENVIAR DESAPARECER, e um
+        `info` toma o lugar dele. `BOTAO_ENVIAR` passa a casar ZERO.
+
+        A aplicacao antiga so avisava DEPOIS do clique, e foi por ler aquele aviso
+        antes do card que um job voltou para a fila com o video ja gerado e pago. Aqui
+        nao ha essa corrida: sem botao, nada foi enviado, e a reserva continua
+        estornavel.
+
+        `SaldoInsuficiente` e o erro certo — ele faz o orquestrador trocar de conta em
+        vez de gastar as tres tentativas do job na mesma conta seca.
+        """
+        if await pagina.locator(sel.BOTAO_ENVIAR).count() > 0:
+            return
+        tem_info = await pagina.locator(sel.BOTAO_INFO_BARRA).count() > 0
+        raise SaldoInsuficiente(
+            f"{email}: o botao de enviar nao esta na barra"
+            + (" (no lugar dele ha um `info`, que e como o Flow mostra saldo "
+               "insuficiente)" if tem_info else "")
+            + (f" - o painel anunciou {self._ultimo_custo} creditos"
+               if self._ultimo_custo is not None else ""))
+
     async def _escrever_prompt(self, pagina, prompt: str) -> None:
         """Escreve o prompt SEM que a quebra de linha vire envio.
 
@@ -764,7 +791,9 @@ class TransportePlaywright:
         # O CUSTO ESTA NA TELA. Le-se aqui porque o painel ja esta aberto e a leitura
         # nao custa clique nenhum — ao contrario do saldo, que paga dois. Hoje isto e
         # log; ligar na reserva do orquestrador e passo proprio (ver seletores.py).
-        await self._custo_anunciado(pagina)
+        # guardado porque a mensagem de saldo curto, la em `_gerar`, acontece com o
+        # painel JA FECHADO — e o numero so existe enquanto ele esta aberto
+        self._ultimo_custo = await self._custo_anunciado(pagina)
 
         await self._fechar_painel(pagina)
 
@@ -847,6 +876,21 @@ class TransportePlaywright:
         await campo.click(timeout=15_000)
         await campo.fill("")
         await self._escrever_prompt(pagina, p.prompt)
+
+        # SALDO CURTO SE RECONHECE AQUI, ANTES DO CLIQUE — e isso e melhor do que era.
+        #
+        # MEDIDO 2026-09-05, sem gastar nada: numa conta com ~36 creditos, configurar
+        # um modelo que o painel anuncia por 100 faz o BOTAO DE ENVIAR DESAPARECER, e
+        # um `info` toma o lugar dele. `BOTAO_ENVIAR` passa a casar ZERO.
+        #
+        # A aplicacao antiga so avisava DEPOIS do clique, e foi por ler aquele aviso
+        # antes do card que um job voltou para a fila com o video ja gerado e pago.
+        # Aqui nao ha essa corrida: sem botao, nada foi enviado, e a reserva continua
+        # estornavel.
+        #
+        # `SaldoInsuficiente` e o erro certo: ele faz o orquestrador trocar de conta em
+        # vez de gastar as tres tentativas do job na mesma conta seca.
+        await self._exigir_botao_de_enviar(pagina, s.conta.email)
 
         # dois botoes contem a palavra "Criar": anexar e enviar. So a ligadura separa.
         d.passo(f"enviando o comando ({len(p.prompt)} caracteres)")

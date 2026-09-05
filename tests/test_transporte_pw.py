@@ -1556,3 +1556,54 @@ async def test_progresso_no_meio_zera_a_paciencia():
     for _ in range(VOLTAS_SEM_PROGRESSO - 1):
         assert await _consultar(t, vazio) is Estado.RODANDO
     assert await _consultar(t, vazio) is Estado.FALHOU
+
+
+# --- saldo curto se reconhece ANTES do clique --------------------------------
+
+
+class _BarraSemEnviar:
+    """A barra do prompt quando o custo passa do saldo.
+
+    MEDIDO 2026-09-05 numa conta com ~36 creditos e o modelo de 100: o botao de
+    enviar SOME e um `info` toma o lugar dele.
+    """
+
+    def __init__(self, tem_info=True):
+        self.tem_info = tem_info
+
+    def locator(self, seletor):
+        return _LocatorContado(self, seletor)
+
+    def quantos(self, seletor):
+        if seletor == sel.BOTAO_ENVIAR:
+            return 0
+        if seletor == sel.BOTAO_INFO_BARRA:
+            return 1 if self.tem_info else 0
+        return 0
+
+
+async def test_sem_botao_de_enviar_e_saldo_insuficiente():
+    """Sem botao, NADA foi enviado — e essa e a diferenca que importa.
+
+    A aplicacao antiga so avisava depois do clique, e foi por ler aquele aviso antes
+    do card que um job voltou para a fila com o video ja gerado e pago. Reconhecer
+    antes do clique deixa a reserva estornavel.
+    """
+    from flowpool.transporte.base import SaldoInsuficiente
+    t = TransportePlaywright()
+    t._ultimo_custo = 100
+    with pytest.raises(SaldoInsuficiente) as erro:
+        await t._exigir_botao_de_enviar(_BarraSemEnviar(), "a@b.com")
+    assert "100" in str(erro.value)
+    assert "info" in str(erro.value)
+
+
+async def test_com_botao_de_enviar_segue_em_frente():
+    class _Ok:
+        def locator(self, seletor):
+            return _LocatorContado(self, seletor)
+
+        def quantos(self, seletor):
+            return 1 if seletor == sel.BOTAO_ENVIAR else 0
+
+    await TransportePlaywright()._exigir_botao_de_enviar(_Ok(), "a@b.com")
