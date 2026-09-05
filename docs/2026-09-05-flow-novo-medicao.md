@@ -267,3 +267,97 @@ outro *formato*, e o arquivo pareceria certo até alguém abrir.
 
 Nenhum deles está chutado: todos estão como `PENDENTE` em `seletores.py`, e o
 transporte trata pendente como "não sei" em vez de mandar `"..."` ao Playwright.
+
+---
+
+# Quarta rodada: o que faltava
+
+## 15. Criar e renomear projeto — portado
+
+Duas etapas, como na aplicação antiga: `add novo projeto` **cria e entra**, e renomear
+vem depois pelo `more_vert` do cabeçalho. Não há botão "Concluir" — fecha com Enter, e
+o código **confere** que o título virou o pedido.
+
+Verificado ao vivo: criou, renomeou, e o nome apareceu na lista.
+
+### O erro que mais se repetiu no dia
+
+```
+button[aria-label*="mais op"]          -> 0
+input[aria-label="texto editavel"]     -> 0
+```
+
+Seletor de atributo CSS é **sensível a caixa**, e os rótulos reais têm maiúscula e
+acento. Os valores errados saíram da saída das **minhas próprias sondas**, que passam
+tudo por `dom.seguro` — normalizado *para imprimir*, nunca para virar seletor.
+
+O conserto não foi acertar a caixa; foi **parar de depender do rótulo**:
+
+```
+BOTAO_MAIS_OPCOES  = "button[more-options]"      (há DOIS more_vert na tela)
+CAMPO_NOME_PROJETO = "flow-editable-text input"
+```
+
+Atributo que o código do Google usa não muda com o idioma; rótulo traduzido muda.
+
+## 16. Card de falha: não medível hoje, resolvido por estrutura
+
+Varri os oito projetos das cinco contas vivas: **não há um único card falho guardado**.
+O Flow não os mantém. Sem provocar uma falha de propósito, não há texto para casar.
+
+Então a detecção não usa texto. Usa o progresso, que **foi** medido: card gerando traz a
+**porcentagem** no texto; card pronto tem mídia. Ausência das duas, sustentada por
+`VOLTAS_SEM_PROGRESSO` leituras (~1 min), é sinal estrutural de card parado.
+
+Não depende de frase — sobrevive à próxima tradução do Google, que foi exatamente o que
+quebrou o reconhecimento em agosto.
+
+## 17. Saldo curto: reconhecido ANTES do clique
+
+MEDIDO **sem gastar um crédito**: numa conta com ~36, escolher um modelo que o painel
+anuncia por 100 faz o **botão de enviar desaparecer**, e um `info` toma o lugar dele.
+
+```
+saldo suficiente : add · agente · <chip> · arrow_forward
+saldo curto      : add · agente · <chip> · info
+```
+
+O truque de medição vale registrar: para ver o estado "sem crédito" não foi preciso
+drenar uma conta — bastou escolher um modelo mais caro que o saldo.
+
+E é melhor do que era: a aplicação antiga só avisava **depois** do clique, e foi por ler
+aquele aviso antes de conferir o card que um job voltou para a fila com o vídeo já
+gerado e pago. Sem botão, nada foi enviado.
+
+## 18. Projeto novo e vazio — o caso que quebrou tudo em agosto
+
+```
+acervo assentado: 0 itens
+referência 1 incluída em 1,4 s
+PRONTO em 20 s → 454 KB baixados
+```
+
+Funciona. E a referência entrou em 1,4 s em vez de 13,4 s: a espera pelo `+` declarar
+fechado, com o painel já aberto, custava ~12 s por geração.
+
+## 19. Abas novas do seletor de mídia
+
+```
+tudo · imagens · vídeos · vozes · personagens · avatares · envios
+```
+
+* **Vozes** — 15 opções, vozes nomeadas (`achernar`, …)
+* **Avatares** — vazio, com o texto *"seu rosto, sua voz, sua história… gere um avatar
+  (recurso experimental) para aparecer em qualquer vídeo"*
+* **Personagens** — categoria própria
+
+São **categorias de acervo**, não modos de geração do chip. O FlowPool não as usa hoje;
+podem virar referência como qualquer outra mídia.
+
+## 20. O que continua sem medir
+
+| o quê | por quê | efeito |
+|---|---|---|
+| texto do card de falha | não há card falho para olhar | nenhum — a detecção por progresso cobre |
+| aviso de direitos | só aparece no 1º envio de uma conta, e as cinco já enviaram | apareceria numa conta nova |
+| aviso pós-clique de crédito | deixou de ser o caminho | nenhum — o botão ausente cobre antes |
