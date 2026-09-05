@@ -63,6 +63,15 @@ RESOLUCAO_VIDEO = "720p"
 # e problema de verdade, e ai o job tem que falhar de vez e aparecer para a pessoa.
 MAX_REPETICOES = 4
 
+# Quantas leituras seguidas SEM midia e SEM porcentagem antes de dar um card por
+# parado. Com o polling do orquestrador a cada ~4 s, 15 voltas sao ~1 minuto.
+#
+# O numero e assimetrico de proposito. Desistir cedo mata geracao boa — um card
+# recem-criado passa alguns instantes sem sinal nenhum, e o proprio Flow leva uns
+# segundos para comecar a contar a porcentagem. Desistir tarde custa so tempo de
+# polling, e o teto de dez minutos do orquestrador continua atras como rede.
+VOLTAS_SEM_PROGRESSO = 15
+
 
 def _medido(nome: str, seletor: str) -> str:
     """Recusa usar um seletor que ainda nao foi medido ao vivo.
@@ -109,6 +118,8 @@ class TransportePlaywright:
         # e as tres chamadas que precisam disso — `gerar`, `consultar`, `baixar` —
         # recebem a sessao, entao o id da conta esta sempre a mao.
         self._repeticoes: dict[tuple[int, str], int] = {}
+        # leituras seguidas sem sinal de progresso, por card
+        self._parado: dict[tuple[int, str], int] = {}
         # `baixar` recebe so o id_remoto, e o menu de resolucao e diferente entre
         # imagem e video. Guardar o modo no momento de gerar e mais barato do que
         # adivinhar pelo DOM — e adivinhar errado baixaria a resolucao errada calado.
@@ -1585,8 +1596,44 @@ class TransportePlaywright:
             return Estado.FALHOU
 
         if await card.locator(sel.CARD_MIDIA).count() > 0:
+            self._parado.pop((s.conta.id, id_remoto), None)
             return Estado.PRONTO
-        return Estado.RODANDO
+
+        # SEM MIDIA E SEM PORCENTAGEM = PAROU DE PROGREDIR.
+        #
+        # O texto do card de falha da aplicacao NOVA ainda nao foi medido: varri os
+        # oito projetos das cinco contas vivas e nao ha um unico card falho guardado —
+        # o Flow nao os mantem. Sem esse texto, `_card_falhou` responde "nao sei", e
+        # uma geracao que falhasse ficaria parecendo RODANDO ate o teto de dez minutos.
+        # Na aplicacao antiga isso custava o job inteiro e o usuario descrevia como
+        # "travado".
+        #
+        # O que DA para medir e o progresso: MEDIDO 2026-09-05 numa geracao real, o
+        # card em andamento traz a PORCENTAGEM no proprio texto —
+        # `['image', '20%', <prompt>]`, depois `'86%'` — e some quando a midia entra.
+        # Entao a ausencia das DUAS coisas, sustentada, e sinal estrutural de que aquele
+        # card nao esta indo a lugar nenhum. Nao depende de frase nenhuma, e por isso
+        # sobrevive a proxima traducao do Google.
+        #
+        # A PACIENCIA E O QUE TORNA ISSO SEGURO. Um card recem-criado passa alguns
+        # instantes sem midia e sem porcentagem — declarar falha ali mataria geracao
+        # boa, que e pior do que esperar. So depois de `VOLTAS_SEM_PROGRESSO` leituras
+        # seguidas sem sinal nenhum e que se desiste.
+        texto = dom.seguro(await card.inner_text(timeout=10_000))
+        if re.search(sel.PADRAO_PORCENTAGEM, texto):
+            self._parado.pop((s.conta.id, id_remoto), None)
+            return Estado.RODANDO
+
+        chave = (s.conta.id, id_remoto)
+        self._parado[chave] = vezes = self._parado.get(chave, 0) + 1
+        if vezes < VOLTAS_SEM_PROGRESSO:
+            return Estado.RODANDO
+        self._parado.pop(chave, None)
+        self._diario(s.conta.id).passo(
+            f"{id_remoto}: {vezes} leituras sem midia e sem porcentagem — o card "
+            f"parou de progredir. Texto: {texto[:120]!r}")
+        await self._traco_da_falha(s)
+        return Estado.FALHOU
 
     # ------------------------------------------------------------------ baixar
     async def baixar(self, s: Sessao, id_remoto: str, destino: Path) -> Path:

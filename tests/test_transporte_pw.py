@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from flowpool.nucleo.tipos import Conta, Modelo, Modo, Tier
-from flowpool.transporte.base import GeracaoFalhou, Pedido, Sessao
+from flowpool.transporte.base import Estado, GeracaoFalhou, Pedido, Sessao
 from flowpool.transporte.pw import seletores as sel
 from flowpool.transporte.pw.diario import (
     Diario, descartar_traco, guardar_traco, iniciar_traco, proximo_traco,
@@ -1461,3 +1461,98 @@ async def test_nem_card_nem_aviso_devolve_falso_no_teto():
         pagina, pagina.antes, Diario(1), teto_ms=6_000)
 
     assert apareceu is False
+
+
+# --- card que parou de progredir: falha SEM depender de frase -----------------
+
+
+class _CardDaGrade:
+    """Um card da grade, com ou sem midia e com ou sem porcentagem."""
+
+    def __init__(self, midia=False, texto=""):
+        self.midia = midia
+        self.texto = texto
+
+    def locator(self, seletor):
+        return _LocatorContado(self, seletor)
+
+    def quantos(self, seletor):
+        return 1 if (self.midia and seletor == sel.CARD_MIDIA) else 0
+
+    async def inner_text(self, timeout=None):
+        return self.texto
+
+
+class _PaginaDaGrade:
+    def __init__(self, card):
+        self.card = card
+        self.clicados = []
+
+    def locator(self, seletor):
+        return _ListaDeCards(self.card)
+
+
+class _ListaDeCards:
+    def __init__(self, card):
+        self.card = card
+
+    async def count(self):
+        return 1
+
+    def nth(self, i):
+        return self.card
+
+
+class _SessaoFalsa:
+    def __init__(self, card):
+        self.conta = type("C", (), {"id": 1, "email": "a@b.com"})()
+        self.handle = (None, None, _PaginaDaGrade(card))
+
+
+async def _consultar(transporte, card):
+    return await transporte.consultar(_SessaoFalsa(card), "card-0")
+
+
+async def test_card_com_porcentagem_esta_rodando():
+    # MEDIDO 2026-09-05 numa geracao real: o card em andamento traz a porcentagem no
+    # proprio texto — ['image', '20%', <prompt>] — e ela some quando a midia entra
+    t = TransportePlaywright()
+    assert await _consultar(t, _CardDaGrade(texto="image 20% um gato")) is Estado.RODANDO
+    assert await _consultar(t, _CardDaGrade(texto="image 86% um gato")) is Estado.RODANDO
+
+
+async def test_card_com_midia_esta_pronto():
+    t = TransportePlaywright()
+    assert await _consultar(t, _CardDaGrade(midia=True, texto="um gato")) is Estado.PRONTO
+
+
+async def test_card_sem_progresso_so_falha_depois_de_insistir():
+    """Paciencia antes de desistir: card recem-criado passa instantes sem sinal.
+
+    Declarar falha na primeira leitura mataria geracao boa, que e pior do que esperar.
+    """
+    from flowpool.transporte.pw.transporte import VOLTAS_SEM_PROGRESSO
+    t = TransportePlaywright()
+    parado = _CardDaGrade(midia=False, texto="um gato")
+    for _ in range(VOLTAS_SEM_PROGRESSO - 1):
+        assert await _consultar(t, parado) is Estado.RODANDO
+    assert await _consultar(t, parado) is Estado.FALHOU
+
+
+async def test_progresso_no_meio_zera_a_paciencia():
+    """Uma porcentagem que aparece depois de leituras vazias RECOMECA a contagem.
+
+    Sem isso, um card que demora a comecar acumularia leituras vazias e seria dado por
+    falho ja gerando — falha inventada com credito gasto.
+    """
+    from flowpool.transporte.pw.transporte import VOLTAS_SEM_PROGRESSO
+    t = TransportePlaywright()
+    vazio = _CardDaGrade(midia=False, texto="um gato")
+    andando = _CardDaGrade(midia=False, texto="image 12% um gato")
+    for _ in range(VOLTAS_SEM_PROGRESSO - 1):
+        await _consultar(t, vazio)
+    assert await _consultar(t, andando) is Estado.RODANDO
+    # a contagem zerou: agora precisa das voltas todas de novo
+    for _ in range(VOLTAS_SEM_PROGRESSO - 1):
+        assert await _consultar(t, vazio) is Estado.RODANDO
+    assert await _consultar(t, vazio) is Estado.FALHOU
