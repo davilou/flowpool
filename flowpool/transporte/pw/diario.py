@@ -51,8 +51,8 @@ REGRAS QUE ESTE MODULO EXISTE PARA CUMPRIR:
    livre olhando a pasta. Nao usa `datetime.now()` — relogio dentro do transporte
    torna o teste dependente da hora, e o que importa aqui e so nao perder o traco
    anterior.
-4. DA PARA DESLIGAR. `FLOWPOOL_TRACO=0` no ambiente. A gravacao tem custo por acao, e
-   quem estiver medindo tempo precisa poder tirar o instrumento do caminho.
+4. VEM DESLIGADO; `FLOWPOOL_TRACO=1` liga. Ver `traco_ligado` — com ele ligado o
+   download de video se perde, e por isso o instrumento deixou de ser o padrao.
 """
 
 from __future__ import annotations
@@ -71,13 +71,34 @@ CADA_S = 15.0
 
 
 def traco_ligado() -> bool:
-    """Ligado por padrao; `FLOWPOOL_TRACO=0` desliga.
+    """DESLIGADO por padrao; `FLOWPOOL_TRACO=1` liga.
+
+    O PADRAO SE INVERTEU EM 2026-09-05, e a medicao que o justifica e uma bisseccao:
+
+        traco  guarda   download de video
+        -----  ------   -----------------
+        on     sim      FALHA
+        off    nao      FALHA
+        off    sim      FUNCIONA
+
+    O Flow navega a PROPRIA pagina para a URL do arquivo, e o Chrome fecha a pagina ao
+    transformar aquilo num download. Com traco ligado, o Playwright captura snapshot no
+    fechamento, e essa maquina derruba o CONTEXTO antes de `path()`/`save_as` — que
+    dependem do navegador vivo. Parar o traco antes do download NAO resolve: uma vez
+    iniciado, o efeito persiste.
+
+    E nao da para buscar o arquivo por fora: a URL do download e `blob:`, montada
+    dentro da pagina.
+
+    Ou seja, com traco ligado TODO VIDEO gerado se perde no download — gerado, pago e
+    sem arquivo. O traco existe para diagnosticar; ele nao pode ser a causa. Fica
+    disponivel para investigacao (`FLOWPOOL_TRACO=1`), com o custo conhecido.
 
     Lido a cada chamada, e nao uma vez na importacao: o servico fica de pe por dias, e
     uma constante de modulo obrigaria a reiniciar para trocar o instrumento — que e
     justamente o que nao se pode fazer com o usuario no meio de uma geracao.
     """
-    return os.environ.get("FLOWPOOL_TRACO", "1") != "0"
+    return os.environ.get("FLOWPOOL_TRACO", "0") == "1"
 
 
 def proximo_traco(conta_id: int, raiz: Path | str = RAIZ_TRACOS) -> Path:

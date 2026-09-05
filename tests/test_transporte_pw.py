@@ -1087,8 +1087,26 @@ async def test_desligavel_por_ambiente(monkeypatch):
     assert ctx.tracing.iniciado is False
 
 
-async def test_ligado_por_padrao(monkeypatch):
+async def test_desligado_por_padrao(monkeypatch):
+    """O padrao se INVERTEU em 2026-09-05, e a razao e medida.
+
+    Bisseccao do download de video no Flow novo:
+
+        traco  aba de guarda   resultado
+        on     sim             FALHA
+        off    nao             FALHA
+        off    sim             FUNCIONA
+
+    Com traco ligado, TODO video gerado se perde no download — gerado, pago e sem
+    arquivo. O traco existe para diagnosticar; ele nao pode ser a causa.
+    """
     monkeypatch.delenv("FLOWPOOL_TRACO", raising=False)
+    assert traco_ligado() is False
+
+
+async def test_traco_liga_por_variavel_de_ambiente(monkeypatch):
+    # continua disponivel para investigacao, com o custo conhecido
+    monkeypatch.setenv("FLOWPOOL_TRACO", "1")
     assert traco_ligado() is True
 
 

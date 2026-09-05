@@ -10,6 +10,7 @@ rodando, pelos scripts de fumaca.
 from __future__ import annotations
 
 import re
+import shutil
 from pathlib import Path
 
 from flowpool.nucleo import tipos
@@ -1722,6 +1723,43 @@ class TransportePlaywright:
         # rotulo inteiro para um seletor CSS estoura o parser. A escolha acontece sobre
         # o texto ja lido, por `analise.achar_no_submenu`, que recusa empate.
         itens, indice = await self._esperar_submenu_com(pagina, chave, d)
+
+        # ABA DE GUARDA — sem ela, o download de VIDEO se perde. MEDIDO 2026-09-05,
+        # com ouvintes de `close` no contexto e na pagina:
+        #
+        #     !! download: camera_approaches_books_slowly_...mp4
+        #     !! pagina fechou
+        #     !! contexto fechou
+        #     path() -> TargetClosedError ; save_as -> TargetClosedError
+        #
+        # O Flow navega a PROPRIA pagina para a URL do arquivo; o Chrome transforma
+        # aquilo num download e FECHA a pagina. Sendo ela a unica do contexto
+        # persistente, o contexto morre junto — e o Playwright apaga o arquivo
+        # temporario ao fechar o contexto. O video ficava gerado, pago, e sem arquivo.
+        #
+        # O download de IMAGEM nao faz isso (a pagina sobrevive, e a leitura de saldo
+        # logo depois funcionava). Por isso o defeito so aparecia em video.
+        #
+        # Uma segunda aba mantem o contexto vivo pelo tempo de salvar. Medido com ela:
+        # `path()` responde e `save_as` grava 1,4 MB.
+        # A GUARDA TEM QUE VIVER ATE O ARQUIVO ESTAR SALVO. A primeira versao deste
+        # conserto fechava a guarda logo depois de `expect_download`, e falhava igual:
+        # naquele instante a pagina principal AINDA NAO tinha fechado, entao a guarda
+        # saia, a pagina fechava um momento depois, e o contexto morria antes do
+        # `save_as`. Fechar a guarda e a ULTIMA coisa.
+        # DUAS COISAS SAO NECESSARIAS PARA O DOWNLOAD DE VIDEO SOBREVIVER, e a
+        # bisseccao de 2026-09-05 mostrou que nenhuma sozinha basta:
+        #
+        #     traco  guarda   resultado
+        #     on     sim      FALHA
+        #     off    nao      FALHA
+        #     off    sim      FUNCIONA
+        #
+        # A metade do traco esta em `diario.traco_ligado`, que passou a vir DESLIGADO
+        # por padrao. A metade da guarda esta logo abaixo.
+        # ABA DE GUARDA: com a pagina principal fechando, ela e a unica coisa que
+        # mantem o contexto persistente vivo pelo tempo de copiar o arquivo.
+        guarda = await pagina.context.new_page()
         async with pagina.expect_download(timeout=self.timeout_ms) as espera:
             await itens.nth(indice).click(timeout=15_000)
         download = await espera.value
@@ -1732,7 +1770,27 @@ class TransportePlaywright:
         # `job.arquivo` ficar verdadeiro sem tocar na Task 7.
         real = analise.caminho_final(destino, download.suggested_filename)
         real.parent.mkdir(parents=True, exist_ok=True)
-        await download.save_as(real)
+        # `path()` E NAO `save_as()`, e a diferenca decide o caso.
+        #
+        # MEDIDO 2026-09-05: com a aba de guarda aberta, a pagina principal viva e o
+        # download recebido, `save_as` AINDA falhava com TargetClosedError. O que a
+        # sonda que funcionou fazia de diferente era chamar `path()` primeiro.
+        #
+        # `path()` ESPERA o download terminar e devolve o arquivo temporario; `save_as`
+        # manda o NAVEGADOR copiar, e o navegador esta morrendo justamente ai (o Flow
+        # navega a pagina para a URL do arquivo, o Chrome fecha a pagina). Copiando com
+        # o Python, o unico requisito e o arquivo existir — e ele existe.
+        origem = await download.path()
+        try:
+            shutil.copy2(origem, real)
+        finally:
+            # so agora, e so se a pagina principal sobreviveu: fechar a ultima pagina
+            # do contexto persistente derruba o contexto
+            if not pagina.is_closed():
+                try:
+                    await guarda.close()
+                except Exception:
+                    pass
         d.passo(f"baixado: {real}")
         return real
 
