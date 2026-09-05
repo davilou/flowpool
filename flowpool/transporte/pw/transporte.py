@@ -1130,6 +1130,16 @@ class TransportePlaywright:
         terminava cedo demais (`_esperar_item_pronto`), e ela ja foi consertada. Os
         dois consertos sao necessarios: um tira a causa, o outro tira a armadilha.
         """
+        # JA ABERTO E CASO COMUM, e perguntar primeiro custa ~12 s por geracao.
+        #
+        # MEDIDO 2026-09-05 no log de passo: a referencia 1 levava 13,4 s e a 2 levava
+        # 1,6 s. A diferenca nao era a rede — era esta funcao esperando o `+` DECLARAR
+        # fechado logo depois do upload, quando o painel estava aberto o tempo todo. O
+        # `aria-expanded` dizia `true` com razao, `_esperar_anexar_fechado` girava ate
+        # o teto de 10 s, e so entao o codigo percebia que ja podia usar o painel.
+        if await self._esperar_seletor_midia(pagina, teto_ms=1500):
+            return pagina.locator(sel.SELETOR_MIDIA).first
+
         for volta in range(tentativas):
             # SO CLICA COM O BOTAO DECLARANDO FECHADO. Com ele em `open` — o que
             # acontece enquanto a animacao de fechamento da referencia anterior corre —
