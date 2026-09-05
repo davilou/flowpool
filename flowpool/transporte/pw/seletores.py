@@ -328,8 +328,55 @@ BOTAO_REPETIR_CARD = PENDENTE
 # MEDIDO: os menus são `mat-menu` renderizados no overlay do CDK.
 MENU_CARD = f"{OVERLAY}"
 MENU_ITEM = "[role=menuitem]"
-MENU_BAIXAR = PENDENTE
-BAIXAR: dict[str, str] = {}        # submenu de resolução do download; não medido
+
+# A barra de ação que aparece ao passar o mouse sobre um resultado, e o `more_vert`
+# que abre o menu completo.
+BOTAO_MAIS_DO_CARD = f'{CARD_GRADE} button:has-text("more_vert")'
+BOTAO_REUTILIZAR_COMANDO = f'{CARD_GRADE} button[aria-label*="reutilizar"]'
+
+# O MENU DO RESULTADO, MEDIDO INTEIRO em 2026-09-05, na ordem em que aparece:
+#
+#     favorite        / favorito
+#     keyboard_return / reutilizar comando
+#     motion_blur     / animar
+#     add_2           / incluir no comando
+#     download        / fazer o download          <- tem submenu (aria-haspopup=menu)
+#     content_copy    / copiar
+#     edit            / renomear
+#     share           / compartilhar
+#     photo_library   / definir capa do projeto
+#     flag            / sinalizar saida
+#     delete          / mover para a lixeira      <- O ÚLTIMO
+#
+# "Mover para a lixeira" continua sendo o ÚLTIMO item, em outra aplicação e em outro
+# framework. A cicatriz não mudou de lugar: um `.last` aqui apaga o trabalho do
+# usuário. Escolha por TEXTO, e ambiguidade é erro.
+MENU_BAIXAR = '[role=menuitem]:has-text("fazer o download")'
+MENU_LIXEIRA = '[role=menuitem]:has-text("mover para a lixeira")'
+MENU_ANIMAR = '[role=menuitem]:has-text("animar")'
+MENU_REUTILIZAR = '[role=menuitem]:has-text("reutilizar comando")'
+
+# O submenu de download, MEDIDO num resultado de IMAGEM:
+#     1k / tamanho original
+#     2k / aprimorada
+#     4k / aprimorada
+# Falta medir o de VÍDEO — a aplicação antiga oferecia 270p/720p/1080p/4K ali.
+#
+# O valor é a PRIMEIRA PALAVRA do rótulo, não um seletor: os rótulos têm duas linhas
+# ("1k" e "tamanho original"), e rótulo inteiro estoura o parser de seletor CSS. Quem
+# escolhe é `analise.escolher_opcao`, que trata empate como erro.
+BAIXAR = {
+    "1k": "1k",
+    "2k": "2k",
+    "4k": "4k",
+}
+BAIXAR_VIDEO = {}                  # não medido
+
+# ARMADILHA MEDIDA: ao abrir o submenu, DOIS panes ficam abertos ao mesmo tempo — o
+# menu pai e o submenu. `.last` entre eles é tão frágil quanto índice em lista que
+# reordena, e o vizinho errado aqui é "mover para a lixeira". Quem escolhe percorre
+# TODOS os panes e acha o que CONTÉM a opção (`analise.achar_no_submenu`).
+PANES_ABERTOS = OVERLAY
 
 # NÃO MEDIDO: se o novo entra no começo ou no fim da grade. Enquanto pendente, quem
 # identifica um resultado usa o RETRATO ANTES/DEPOIS, nunca a posição.
@@ -355,6 +402,12 @@ AVISO_SEM_CREDITO = PENDENTE
 AVISO_ALTA_DEMANDA = PENDENTE
 AVISO_DIREITOS = PENDENTE
 BOTAO_CONCORDO = PENDENTE
+# O VÉU DO OVERLAY. MEDIDO por um clique que falhou: com um menu aberto, o Playwright
+# recusa o clique seguinte com
+#     <div class="cdk-overlay-backdrop ..."> ... intercepts pointer events
+# Ou seja, o véu bloqueia TUDO enquanto estiver na tela, e quem não o fecha vê um
+# timeout falando do elemento coberto e nunca do que o cobre — foi exatamente assim
+# que o aviso de direitos travou a geração na aplicação antiga.
 VEU_ABERTO = ".cdk-overlay-backdrop"
 
 BOTAO_MAIS_OPCOES = 'button[aria-label*="mais op"]'
