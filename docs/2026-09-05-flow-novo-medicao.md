@@ -198,3 +198,72 @@ Busca própria (`input[aria-label*="pesquisar recursos"]`) e "Enviar mídia" no 
 
 **Vozes e Avatares são categorias que a aplicação antiga não tinha** — ainda não
 medidas, e possivelmente modos de geração que o painel do FlowPool nem conhece.
+
+---
+
+# Terceira rodada: o transporte portado, provado ao vivo
+
+## 12. Contrato do transporte — o que já funciona
+
+Provado com `scratch/fumaca_transporte.py`, que usa o **transporte de verdade**, não
+um script solto:
+
+| método | estado |
+|---|---|
+| `abrir_sessao` | OK — valida pelo avatar, reconhece o portão de idade |
+| `saldo` | OK — 50 em cada uma das cinco contas vivas |
+| `abrir_projeto` | OK — por URL direta, o que o app antigo não permitia |
+| `listar_projetos` | OK — `flow-project-card` traz nome e href |
+| `gerar` (imagem) | OK — com duas referências, conferidas por identidade |
+| `gerar` (vídeo) | OK — `ingredients2v` / omni-flash / 4s, pronto em 40 s |
+| `consultar` | OK para pronto; **falha não é detectada** (não medida) |
+| `baixar` | OK em imagem; vídeo medido, confirmação em curso |
+| `criar_projeto` | **não portado** — `BOTAO_NOVO_PROJETO` não medido |
+
+Corrida completa de imagem, cronometrada:
+
+```
+configuração confirmada por aria-checked; custo anunciado: 0 créditos
+2 arquivos enviados numa tacada ......... 14,4 s
+2 referências incluídas .................. 13,4 s + 1,6 s
+o Flow aceitou: card-0 → PRONTO ......... 24 s
+baixado: resultado-imagem.jpeg (305.793 bytes)
+saldo 50 → 50
+```
+
+Vídeo: **7 créditos** (50 → 43) para omni-flash 4s — o mesmo custo do app antigo.
+
+## 13. Menu do resultado: imagem e vídeo diferem
+
+```
+comum:   favorito · reutilizar comando · incluir no comando · fazer o download ·
+         copiar · renomear · compartilhar · definir capa · sinalizar saída ·
+         MOVER PARA A LIXEIRA (último, nos dois)
+imagem:  motion_blur / animar
+vídeo:   play_movies / adicionar ao cenário · video_library / publicar no youtube
+```
+
+Submenu de download:
+
+```
+imagem : 1k / tamanho original    2k / aprimorada     4k / aprimorada
+vídeo  : 270p / gif animado       720p / tamanho original
+         1080p / aprimorada       4k / aprimorada
+```
+
+**"270p" é GIF animado, não vídeo pequeno.** Pedir a resolução mais barata traria
+outro *formato*, e o arquivo pareceria certo até alguém abrir.
+
+## 14. O que ainda não foi medido
+
+| o quê | consequência hoje |
+|---|---|
+| card de FALHA | uma geração falha parece RODANDO até o teto do polling |
+| aviso de crédito zerado | não encurta o prazo quando a conta seca |
+| criar projeto | produto novo não ganha projeto sozinho |
+| renomear projeto | idem |
+| aviso de direitos | se ainda existir, pode travar o primeiro envio de uma conta |
+| abas Vozes e Avatares | modos de geração que o painel não conhece |
+
+Nenhum deles está chutado: todos estão como `PENDENTE` em `seletores.py`, e o
+transporte trata pendente como "não sei" em vez de mandar `"..."` ao Playwright.
