@@ -12,6 +12,7 @@ from flowpool.dados.repo import Repo
 from flowpool.nucleo.credito import LIMIAR_DIVERGENCIA, liberar, reconciliar, reservar
 from flowpool.nucleo.escolha import apta, escolher
 from flowpool.nucleo.tipos import Conta, EstadoJob, Job, Modo, SaudeSessao
+from flowpool.motor import diagnostico
 from flowpool.transporte.base import (
     Estado, FlowTransport, GeracaoFalhou, Pedido, SaldoInsuficiente, Sessao,
     SessaoMorta,
@@ -120,10 +121,17 @@ class Orquestrador:
     def __init__(self, repo: Repo, transporte: FlowTransport, raiz: Path | str,
                  max_simultaneos: int = MAX_SIMULTANEOS,
                  timeout_geracao: timedelta = TIMEOUT_GERACAO,
-                 intervalo_polling: float = INTERVALO_POLLING) -> None:
+                 intervalo_polling: float = INTERVALO_POLLING,
+                 diagnosticador: diagnostico.Diagnosticador | None = None) -> None:
         self.repo = repo
         self.transporte = transporte
         self.raiz = Path(raiz)
+        # Quem explica um job que falhou de vez (`motor/diagnostico.py`). `None` = sem
+        # diagnostico, que e o padrao DE PROPOSITO: quem liga e o `__main__`, com o
+        # modelo local; um teste que falha um job nao pode sair batendo em HTTP.
+        self.diagnosticador = diagnosticador
+        # tarefas de fundo que nao ocupam janela (diagnosticos em curso)
+        self._fundo: set[asyncio.Task] = set()
         self.max_simultaneos = max(1, int(max_simultaneos))
         # parametrizados para o teste nao ter que esperar dez minutos de verdade
         self.timeout_geracao = timeout_geracao
@@ -448,6 +456,10 @@ class Orquestrador:
         """
         while self._tarefas:
             await asyncio.gather(*tuple(self._tarefas), return_exceptions=True)
+        # os diagnosticos de fundo tambem: um teste que falha um job quer ver o
+        # evento, e a parada limpa nao pode deixar tarefa orfa
+        while self._fundo:
+            await asyncio.gather(*tuple(self._fundo), return_exceptions=True)
 
     # -------------------------------------------------------------- saldo e semeadura
 
@@ -660,7 +672,8 @@ class Orquestrador:
             # partir de uma copia velha, e outro worker ressuscitaria a sessao
             self.repo.marcar_sessao(conta.id, SaudeSessao.EXPIRADA)
             self._evento_de_falha(job, conta, "sessao_morta")
-            self._devolver(job, str(e), gasta_tentativa=False)
+            self._devolver(job, str(e), gasta_tentativa=False,
+                           falha=sessao.falha if sessao else None)
 
         except SaldoInsuficiente as e:
             # Vem de duas fontes: o guarda local em `reservar` (a conta tem credito
@@ -678,7 +691,8 @@ class Orquestrador:
             self.repo.salvar_conta(conta)
             job.reavaliar_em = conta.seca_ate
             self._evento_de_falha(job, conta, "conta_seca")
-            self._devolver(job, str(e), gasta_tentativa=False)
+            self._devolver(job, str(e), gasta_tentativa=False,
+                           falha=sessao.falha if sessao else None)
 
         except Exception as e:  # falha de rede, timeout, geracao errada
             # `_estornar` decide sozinho se devolve: so devolve enquanto o Flow ainda
@@ -688,7 +702,8 @@ class Orquestrador:
             conta.falhas += 1
             self.repo.salvar_conta(conta)
             self._evento_de_falha(job, conta, "falhou", {"erro": str(e)})
-            self._devolver(job, f"{type(e).__name__}: {e}", gasta_tentativa=True)
+            self._devolver(job, f"{type(e).__name__}: {e}", gasta_tentativa=True,
+                           falha=sessao.falha if sessao else None)
 
         finally:
             if sessao is not None:
@@ -795,13 +810,17 @@ class Orquestrador:
         job.custo_estimado = None
         return devolveu
 
-    def _devolver(self, job: Job, erro: str, gasta_tentativa: bool) -> None:
+    def _devolver(self, job: Job, erro: str, gasta_tentativa: bool,
+                  falha: dict | None = None) -> None:
         """Devolve o job a fila.
 
         Com `id_remoto` preenchido, `id_remoto` e `conta_id` sao PRESERVADOS: existe
         geracao paga em curso no Flow, e a proxima tentativa retoma aquela em vez de
         gerar (e pagar) de novo deixando a primeira orfa. Um Quality de 11 minutos
         custa 200 creditos e nao entrega nada; na terceira tentativa, 300.
+
+        `falha` e o material que o transporte deixou na sessao (print e log de
+        passos). Quando o job falha DE VEZ, ele vai para o diagnostico automatico.
         """
         job.erro = erro
         if gasta_tentativa:
@@ -813,6 +832,36 @@ class Orquestrador:
             if job.id_remoto is None:
                 job.conta_id = None
         self.repo.salvar_job(job)
+        if job.estado is EstadoJob.FALHOU:
+            self._agendar_diagnostico(job.id, falha)
+
+    def _agendar_diagnostico(self, job_id: int, falha: dict | None) -> None:
+        """Diagnostico em segundo plano: nunca segura a fila nem a chamada HTTP.
+
+        O modelo local pode levar minutos so para carregar. Quem quer o resultado
+        olha o evento `diagnostico` no detalhe do job quando ele aparecer.
+        """
+        if self.diagnosticador is None:
+            return
+        try:
+            laco = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        tarefa = laco.create_task(diagnostico.diagnosticar_job(
+            self.repo, job_id, self.diagnosticador, falha))
+        self._fundo.add(tarefa)
+        tarefa.add_done_callback(self._fundo.discard)
+
+    async def diagnosticar(self, job_id: int) -> str | None:
+        """Diagnostico sob demanda (rota da API): espera e devolve o texto.
+
+        Sem o material da sessao — o print e o log ja foram embora com ela — o modelo
+        trabalha so com erro e eventos, e o prompt manda dizer o que nao da para
+        afirmar.
+        """
+        if self.diagnosticador is None:
+            return None
+        return await diagnostico.diagnosticar_job(self.repo, job_id, self.diagnosticador)
 
     async def _esperar(self, sessao, id_remoto: str) -> Estado:
         limite = datetime.now(timezone.utc) + self.timeout_geracao

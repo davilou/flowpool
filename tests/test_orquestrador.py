@@ -1190,3 +1190,30 @@ async def test_encerrar_sessao_libera_o_perfil_para_o_chrome_de_fora(repo, tmp_p
     assert await orq.encerrar_sessao(cid) is True
     assert t.abertas == 0
     assert await orq.encerrar_sessao(cid) is False      # nada a fechar: nao levanta
+
+
+async def test_job_que_falha_de_vez_recebe_diagnostico_em_segundo_plano(repo, tmp_path):
+    """O diagnostico e disparado na falha FINAL, uma vez, sem segurar a fila."""
+    from tests.test_diagnostico import ModeloFalso
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 500; repo.salvar_conta(c)
+    jid = repo.criar_job(job_fast())
+    modelo = ModeloFalso(resposta="falhou porque sim")
+    orq = Orquestrador(repo, TransporteFalso(saldos={cid: 500}, falha_em={cid}),
+                       raiz=tmp_path, diagnosticador=modelo)
+    for _ in range(MAX_TENTATIVAS):
+        await ciclo(orq)                      # `ciclo` drena tambem as tarefas de fundo
+    assert repo.job(jid).estado is EstadoJob.FALHOU
+    diags = [e for e in repo.eventos(jid) if e["tipo"] == "diagnostico"]
+    assert len(diags) == 1 and len(modelo.perguntas) == 1
+    assert json.loads(diags[0]["payload"])["texto"] == "falhou porque sim"
+
+
+async def test_sem_diagnosticador_nada_e_disparado(repo, tmp_path):
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 500; repo.salvar_conta(c)
+    jid = repo.criar_job(job_fast())
+    orq = Orquestrador(repo, TransporteFalso(saldos={cid: 500}, falha_em={cid}), raiz=tmp_path)
+    for _ in range(MAX_TENTATIVAS):
+        await ciclo(orq)
+    assert not [e for e in repo.eventos(jid) if e["tipo"].startswith("diagnostico")]

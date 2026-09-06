@@ -1059,6 +1059,7 @@ function pintarDetalhe() {
     </div>
     ${j.erro && j.estado !== "pronto" ? `<div class="detalhe-secao"><div class="alerta erro">${icone("alerta")}<div class="alerta-texto"><strong>${esc(j.estado === "falhou" ? "Falhou" : "Última falha (voltou para a fila)")}</strong>
         <pre>${esc(j.erro)}</pre>${explicacao ? `<div style="margin-top:8px">${esc(explicacao)}</div>` : ""}</div></div></div>` : ""}
+    ${j.erro || j.estado === "falhou" ? secaoDiagnostico(j) : ""}
     <div class="detalhe-secao"><h3>Prompt <button type="button" class="botao mini fantasma" data-copiar-prompt>${icone("copiar")}copiar</button></h3><p class="detalhe-prompt">${esc(j.prompt || "—")}</p></div>
     <div class="detalhe-secao"><h3>Configuração</h3><div class="grade-meta">
       <div><span>Proporção</span><b>${esc(j.proporcao)}</b></div>
@@ -1081,6 +1082,43 @@ function pintarDetalhe() {
     </div></div>
     <div class="detalhe-secao"><h3>Linha do tempo <button type="button" class="botao mini fantasma" data-alternar-diag>${diag ? "ocultar" : "mostrar"}</button></h3>
       ${diag ? linhaDoTempo(eventosJob.lista) : ""}</div>`;
+}
+
+/* O diagnostico do modelo local: o motor pede sozinho quando o job falha de vez; o
+   botao pede de novo (ou pela primeira vez, em job anterior ao recurso). */
+let diagnosticando = null;
+
+function secaoDiagnostico(j) {
+  const lista = eventosJob.lista || [];
+  const diag = [...lista].reverse().find((e) => e.tipo === "diagnostico");
+  const falhou = [...lista].reverse().find((e) => e.tipo === "diagnostico_falhou");
+  const emCurso = diagnosticando === j.id;
+  let corpo;
+  if (emCurso) corpo = `<div class="leve pequeno"><span class="girando" style="display:inline-block;vertical-align:middle;margin-right:6px"></span>perguntando ao modelo local… pode levar um minuto se ele precisar carregar.</div>`;
+  else if (diag && (!falhou || falhou.id < diag.id)) {
+    corpo = `<p class="detalhe-prompt">${esc(diag.payload.texto || "")}</p>
+      <span class="leve pequeno">${esc(diag.payload.modelo || "modelo local")} · ${esc(relativo(diag.em))}${diag.payload.com_imagem ? " · viu o print da tela" : " · sem print"}</span>`;
+  } else if (falhou) {
+    corpo = `<div class="alerta aviso">${icone("alerta")}<div class="alerta-texto">O modelo local não respondeu: <span class="mono pequeno">${esc(falhou.payload.erro || "?")}</span>. O llama-swap está de pé em 127.0.0.1:9090?</div></div>`;
+  } else if (eventosJob.lista === null) corpo = `<div class="leve pequeno">carregando…</div>`;
+  else corpo = `<div class="leve pequeno">${j.estado === "falhou" ? "Ainda sem diagnóstico — o motor pede sozinho ao falhar de vez; se o job é anterior a isso, peça aqui." : "Job ainda na fila; o diagnóstico é para falha definitiva."}</div>`;
+  return `<div class="detalhe-secao"><h3>Diagnóstico do modelo local
+      <button type="button" class="botao mini fantasma" data-diagnosticar ${emCurso ? "disabled" : ""}>${icone("bolt")}${diag ? "refazer" : "pedir"}</button></h3>${corpo}</div>`;
+}
+
+async function pedirDiagnostico(id) {
+  diagnosticando = id;
+  delete assinaturas.detalhe; pintarDetalhe();
+  try {
+    await api(`/jobs/${id}/diagnosticar`, { metodo: "POST" }, 320000);
+    toast("ok", "Diagnóstico pronto.", 3000);
+  } catch (e) {
+    toast("erro", `Diagnóstico: ${e.message}`, 10000);
+  } finally {
+    diagnosticando = null;
+    try { eventosJob = { id, lista: await api(`/jobs/${id}/eventos`) }; } catch (e) { /* fica como estava */ }
+    delete assinaturas.detalhe; pintarDetalhe();
+  }
 }
 
 async function renomearJob(id, nome) {
@@ -1678,6 +1716,7 @@ $("detalhe-lado").addEventListener("click", (ev) => {
   else if (b.hasAttribute("data-cancelar-detalhe")) cancelarJob(j.id);
   else if (b.dataset.abrirContaDetalhe) abrirConta(Number(b.dataset.abrirContaDetalhe), emailDaConta(Number(b.dataset.abrirContaDetalhe)));
   else if (b.hasAttribute("data-repetir")) repetirJob(j);
+  else if (b.hasAttribute("data-diagnosticar")) pedirDiagnostico(j.id);
   else if (b.hasAttribute("data-alternar-diag")) { $("detalhe").dataset.diagnostico = $("detalhe").dataset.diagnostico === "1" ? "" : "1"; delete assinaturas.detalhe; pintarDetalhe(); }
 });
 $("detalhe-lado").addEventListener("keydown", (ev) => {

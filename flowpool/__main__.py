@@ -14,6 +14,8 @@ import uvicorn
 
 from flowpool.api.app import criar_app
 from flowpool.dados.repo import Repo
+from flowpool.motor.diagnostico import DiagnosticadorLocal
+from flowpool.motor.diagnostico import ligado as diagnostico_ligado
 from flowpool.motor.orquestrador import teto_do_ambiente
 from flowpool.transporte.pw.cura import ligar_no_banco
 from flowpool.transporte.pw.transporte import TransportePlaywright
@@ -49,9 +51,14 @@ def main() -> None:
     # adaptaria a uma mudanca do Google sem deixar rastro na linha do tempo — e o
     # rastro e metade do valor de deixar uma IA mexer em seletor.
     ligar_no_banco(transporte.cura, repo)
+    # job que falha de vez recebe um diagnostico do modelo de visao local, em segundo
+    # plano — o mesmo llama.cpp da auto-cura. `FLOWPOOL_DIAGNOSTICO=0` desliga.
+    diagnosticador = DiagnosticadorLocal() if diagnostico_ligado() else None
     app = criar_app(repo=repo, transporte=transporte, raiz=RAIZ,
-                    rodar_motor=True, max_simultaneos=MAX_SIMULTANEOS)
-    print(f"FlowPool no ar. Painel: http://127.0.0.1:{PORTA}/")
+                    rodar_motor=True, max_simultaneos=MAX_SIMULTANEOS,
+                    diagnosticador=diagnosticador)
+    print(f"FlowPool no ar. Painel: http://127.0.0.1:{PORTA}/"
+          + (f" | diagnostico: {diagnosticador.modelo}" if diagnosticador else ""))
     uvicorn.run(app, host="127.0.0.1", port=PORTA)
 
 

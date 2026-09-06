@@ -138,6 +138,12 @@ class Diario:
         self._inicio = relogio()
         # ultimo aviso de cada espera longa, para nao repetir a cada volta do laco
         self._ultimo: dict[str, float] = {}
+        # as ultimas linhas, para o diagnostico automatico de uma falha: o stdout
+        # sobrevive a morte do navegador, mas nao da para ler stdout de dentro do
+        # processo — este buffer e o que o modelo recebe
+        self.linhas: list[str] = []
+
+    TETO_LINHAS = 120
 
     @property
     def decorrido_s(self) -> float:
@@ -158,7 +164,11 @@ class Diario:
     def passo(self, texto: str) -> None:
         """Uma etapa. Nunca levanta: log que derruba job nao e log."""
         try:
-            print(f"[{round(self.decorrido_s):>4}s] conta {self.conta_id}: {texto}")
+            linha = f"[{round(self.decorrido_s):>4}s] conta {self.conta_id}: {texto}"
+            self.linhas.append(linha)
+            if len(self.linhas) > self.TETO_LINHAS:
+                del self.linhas[: len(self.linhas) - self.TETO_LINHAS]
+            print(linha)
         except Exception:
             pass
 

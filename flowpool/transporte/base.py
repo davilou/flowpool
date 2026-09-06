@@ -63,6 +63,10 @@ class ProjetoRemoto:
 class Sessao:
     conta: Conta
     handle: Any = None
+    # O que o transporte guardou da ULTIMA falha nesta sessao: caminho do print da
+    # tela e as ultimas linhas do log de passo. E o material do diagnostico automatico
+    # (`motor/diagnostico.py`); o orquestrador le e repassa, sem interpretar.
+    falha: dict | None = None
 
 
 class ErroTransporte(Exception):

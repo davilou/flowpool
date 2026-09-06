@@ -915,10 +915,24 @@ class TransportePlaywright:
         try:
             return await self._gerar(s, p, pagina)
         except Exception as e:
-            await self.print_de_falha(pagina, f"gerar {p.modo.value} {type(e).__name__}")
-            self._diario(s.conta.id).passo(f"FALHOU em gerar: {type(e).__name__}: {e}")
+            caminho = await self.print_de_falha(
+                pagina, f"gerar {p.modo.value} {type(e).__name__}")
+            d = self._diario(s.conta.id)
+            d.passo(f"FALHOU em gerar: {type(e).__name__}: {e}")
+            self._anotar_falha(s, caminho, d)
             await self._traco_da_falha(s)
             raise
+
+    @staticmethod
+    def _anotar_falha(s: Sessao, caminho: Path | None, d: Diario) -> None:
+        """Deixa na sessao o material do diagnostico automatico: print e log.
+
+        O orquestrador nao ve pagina nem diario; ve a sessao. E o print e nomeado
+        pelo MOTIVO (sobrescrito a cada falha igual), entao o caminho precisa ser
+        guardado agora, antes de a proxima falha do mesmo tipo trocar a imagem.
+        """
+        s.falha = {"print": str(caminho) if caminho else None,
+                   "passos": list(d.linhas[-40:])}
 
     async def _gerar(self, s: Sessao, p: Pedido, pagina) -> str:
         # o que o modo nao aceita e recusado ANTES de qualquer coisa: nenhum clique
@@ -1893,6 +1907,14 @@ class TransportePlaywright:
             return await self._baixar(s, id_remoto, destino, d)
         except Exception as e:
             d.passo(f"FALHOU em baixar: {type(e).__name__}: {e}")
+            caminho = None
+            try:
+                if not s.handle[2].is_closed():
+                    caminho = await self.print_de_falha(
+                        s.handle[2], f"baixar {type(e).__name__}")
+            except Exception:
+                pass
+            self._anotar_falha(s, caminho, d)
             await self._traco_da_falha(s)
             raise
 
