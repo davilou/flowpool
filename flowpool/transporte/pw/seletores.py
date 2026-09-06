@@ -178,8 +178,26 @@ BOTAO_TROCAR_FRAMES = 'flow-ingredient-bar button:has-text("swap_horiz")'
 # O sinal de montado e o botao `upload`: ele existe com acervo cheio E VAZIO, que e a
 # mesma razao pela qual as abas servem no outro painel. Contar itens nao serve, pela
 # regra de sempre: acervo vazio e estado legitimo.
-# literal e nao `OVERLAY`: esta secao vem ANTES da definicao dele no arquivo
-BOTAO_UPLOAD_FRAME = '.cdk-overlay-pane button:has-text("upload")'
+# O POPOVER DO SLOT, e ele NAO E o painel do `+`. MEDIDO 2026-09-05 clicando em
+# `inicio` numa janela maximizada (a mesma condicao do transporte):
+#
+#     titulo  : "selecione uma imagem de ..."
+#     conteudo: seletor de projeto, busca, ordenacao, os itens do acervo
+#     acao    : "incluir no comando"
+#     upload  : `flow-media-upload` EXISTE mas esta VAZIO e invisivel
+#
+# Duas consequencias que mudam o desenho:
+#
+# 1. O sinal de "abriu" e o elemento NOMEADO, nao as abas — este painel nao tem
+#    nenhuma, e exigir abas reprovava um popover que estava aberto.
+# 2. NAO DA PARA ENVIAR ARQUIVO POR AQUI. O slot so escolhe do acervo. Por isso o
+#    envio dos frames acontece ANTES de trocar para o modo Frames, enquanto o `+`
+#    ainda existe na barra.
+#
+# E o layout muda com o tamanho da janela: numa janela pequena aparece
+# `flow-mobile-add-menu`, com botao de upload proprio. O transporte roda maximizado, e
+# e o popover que vale.
+POPOVER_SLOT = "flow-add-menu-popover-content"
 
 # ----------------------------------------------------------------- anexar / mídia
 #

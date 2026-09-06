@@ -901,8 +901,43 @@ class TransportePlaywright:
         antes = await pagina.locator(grade).count()
 
         d = self._diario(s.conta.id)
+
+        # EM FRAMES, O ENVIO VEM ANTES DA CONFIGURACAO — e a ordem nao e capricho.
+        #
+        # MEDIDO 2026-09-05: o popover que o slot `inicio`/`fim` abre SO ESCOLHE do
+        # acervo; o `flow-media-upload` dele esta vazio e invisivel. E no modo Frames o
+        # `+` some da barra (ela vira `flow-ingredient-bar`). Ou seja, depois de trocar
+        # para Frames nao existe mais nenhuma porta de envio.
+        #
+        # Entao os arquivos sobem enquanto o `+` ainda esta la, e depois os slots os
+        # escolhem por ID no acervo.
+        frames: list[dict] = []
+        if p.modo is Modo.FRAMES2V:
+            arquivos = analise.arquivos_do_pedido(p)
+            if not arquivos:
+                raise GeracaoFalhou("frames2v sem frame inicial")
+            # SAIR DE FRAMES ANTES DE ENVIAR. O chip guarda o modo entre execucoes:
+            # numa REPETICAO do job o projeto abre ja em Frames, o `+` nao existe, e o
+            # envio morria com "waiting for locator(flow-add-menu button)" — na
+            # primeira tentativa funcionava, na segunda nao, que e o pior tipo de
+            # intermitencia porque parece aleatorio.
+            #
+            # `ingredients2v` e o vizinho natural: mesmo tipo (video) e tem o `+`.
+            await self._exigir_agente_desligado(pagina)
+            if await self._garantir_painel(pagina, d):
+                painel_envio = self._painel(pagina)
+                await self._escolher_modo(pagina, painel_envio,
+                                          Modo.INGREDIENTS2V.value)
+                await self._fechar_painel(pagina)
+            d.passo(f"enviando {len(arquivos)} frame(s) antes de trocar para Frames")
+            frames = await self._enviar_arquivos(pagina, arquivos, d)
+            await self._fechar_painel(pagina)
+
         await self._configurar(pagina, p, d)
-        await self._anexar(pagina, p, d)
+        if p.modo is Modo.FRAMES2V:
+            await self._preencher_slots(pagina, frames, d)
+        else:
+            await self._anexar(pagina, p, d)
 
         # ARMADILHA: `input[aria-label="Texto editavel"]` e o NOME DO PROJETO. Escrever
         # ali renomeia o projeto em vez de gerar, e o sintoma e "nada acontece" — que e
@@ -1035,13 +1070,11 @@ class TransportePlaywright:
                 return
             raise GeracaoFalhou(f"modo {p.modo.value} sem arquivo para anexar")
 
-        # FRAMES TEM OUTRA BARRA, e por isso outro caminho. MEDIDO 2026-09-05: em modo
-        # Frames a barra do prompt vira `flow-ingredient-bar` com os slots `inicio` e
-        # `fim`, e o `flow-add-menu` fica SEM botao clicavel. Era isso que matava
-        # `frames2v` com "waiting for locator(flow-add-menu button)" — o `+` do anexo
-        # comum nao existe la.
+        # FRAMES nao passa por aqui: os arquivos dele sobem ANTES de trocar de modo, e
+        # os slots sao preenchidos por `_preencher_slots`. Ver `_gerar`.
         if p.modo is Modo.FRAMES2V:
-            return await self._anexar_frames(pagina, arquivos, d)
+            raise GeracaoFalhou(
+                "frames2v nao usa `_anexar` — o envio acontece antes de configurar")
 
         await self._limpar_referencias(pagina)
 
@@ -1075,15 +1108,17 @@ class TransportePlaywright:
         # da para comparar identidade em vez de numero.
         analise.exigir_referencias_completas(await self._ids_anexados(pagina), esperados)
 
-    async def _anexar_frames(self, pagina, arquivos: list[str], d: Diario) -> None:
-        """Poe o frame inicial (e o final, se houver) nos slots da barra de frames.
+    async def _preencher_slots(self, pagina, frames: list[dict], d: Diario) -> None:
+        """Poe cada frame ja enviado no seu slot da barra de Frames.
 
-        `arquivos` vem de `analise.arquivos_do_pedido`, que em FRAMES2V devolve
-        [frame_inicial, frame_final] nessa ordem — o final e opcional.
+        `frames` vem de `_enviar_arquivos`, na ordem [inicial, final] — o final e
+        opcional.
 
-        A ORDEM DOS SLOTS E POSICIONAL, e a conferencia e o que torna isso seguro: a
-        barra tem exatamente dois slots, e cada um e conferido depois de preenchido.
-        Sem conferir, seria o mesmo tipo de aposta que ja mandou video para a lixeira.
+        A ORDEM DOS SLOTS E POSICIONAL, e so e aceitavel por tres razoes juntas: a
+        barra tem exatamente dois, o do meio se identifica pela ligadura `swap_horiz`
+        (que nao e traduzida, e por isso fica de fora do seletor), e cada slot e
+        CONFERIDO depois de preenchido. Sem a conferencia isto seria a mesma aposta que
+        ja mandou video do usuario para a lixeira.
         """
         slots = pagina.locator(sel.SLOT_FRAME)
         quantos = await slots.count()
@@ -1091,33 +1126,46 @@ class TransportePlaywright:
             raise GeracaoFalhou(
                 f"a barra de frames deveria ter 2 slots (inicio e fim), tem {quantos}")
 
-        for n, arquivo in enumerate(arquivos[:2]):
+        for n, item in enumerate(frames[:2]):
             qual = "inicio" if n == 0 else "fim"
-            d.passo(f"frame {qual}: {Path(arquivo).name}")
+            d.passo(f"frame {qual}: {item['nome']}")
             quanto = d.cronometro()
+            await self._sem_veu(pagina)
             await slots.nth(n).click(timeout=15_000)
-            # O SLOT ABRE OUTRO SELETOR — sem abas. Ver `BOTAO_UPLOAD_FRAME`: o painel
-            # do `+` tem 7 abas, este nao tem nenhuma, e exigir abas aqui reprovava um
-            # painel aberto ("o slot inicio nao abriu o seletor de midia").
-            pronto = await self._esperar(
-                pagina, lambda: self._tem(pagina, sel.BOTAO_UPLOAD_FRAME), d,
-                f"o seletor do slot {qual}", teto_ms=30_000)
-            if not pronto:
+
+            # o popover do slot NAO tem abas — o sinal e o elemento nomeado
+            if not await self._esperar(
+                    pagina, lambda: self._tem(pagina, sel.POPOVER_SLOT), d,
+                    f"o popover do slot {qual}", teto_ms=30_000):
                 raise GeracaoFalhou(f"o slot {qual} nao abriu o seletor de midia")
-            novos = await self._enviar_no_seletor_aberto(pagina, [arquivo], d)
-            await self._incluir_do_acervo(pagina, novos[0], d)
+
+            alvo = pagina.locator(sel.ITEM_MIDIA_POR_ID.format(id=item["id"]))
+            analise.exigir_unico(await alvo.count(), f"item {item['id']}",
+                                 f"frame {qual} no acervo")
+            await alvo.first.click(timeout=15_000)
+            await pagina.wait_for_timeout(1200)
+            incluir = pagina.locator(sel.BOTAO_INCLUIR_NO_COMANDO)
+            if await incluir.count() == 1:
+                await incluir.first.click(timeout=15_000)
+
+            if not await self._esperar(
+                    pagina, lambda n=n: self._slot_cheio(pagina, n), d,
+                    f"o slot {qual} mostrar a imagem", teto_ms=30_000):
+                raise GeracaoFalhou(f"{item['nome']} nao entrou no slot {qual}")
             d.passo(f"frame {qual} posto em {quanto():.1f}s")
 
-        # CONFERE que cada slot ficou com alguma coisa. A identidade por slot ainda nao
-        # e conferivel — falta medir o que a ficha do slot expoe —, entao esta e uma
-        # conferencia FRACA, e o comentario existe para nao passar por forte.
-        cheios = await pagina.evaluate(
-            "(s) => [...document.querySelectorAll(s)]"
-            ".map(e => e.querySelectorAll('img, video').length)", sel.SLOT_FRAME)
-        pedidos = len(arquivos[:2])
-        if sum(1 for c in cheios if c) < pedidos:
-            raise GeracaoFalhou(
-                f"pedi {pedidos} frame(s) e os slots mostram {cheios}")
+    async def _slot_cheio(self, pagina, indice: int) -> bool:
+        """Se aquele slot ja mostra uma imagem. E a conferencia que valida a posicao.
+
+        POR LOCATOR, NAO POR `evaluate`. `SLOT_FRAME` usa `:not(:has-text(...))`, que e
+        pseudo-classe DO PLAYWRIGHT e nao CSS: passar isso para `querySelectorAll`
+        estoura com "is not a valid selector" — e o erro fala de sintaxe quando o
+        seletor estava certo, so no lugar errado.
+        """
+        slots = pagina.locator(sel.SLOT_FRAME)
+        if await slots.count() <= indice:
+            return False
+        return await slots.nth(indice).locator("img, video").count() > 0
 
     async def _limpar_referencias(self, pagina) -> None:
         """Zera o rascunho antes de anexar. Referencia herdada e geracao errada.
