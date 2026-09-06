@@ -48,10 +48,20 @@ MAX_SIMULTANEOS = 5
 # sucesso em 3 no mesmo arquivo. Como o video ja existe e ja foi pago quando se chega
 # aqui, repetir custa tempo e um navegador, e desistir custa o job inteiro.
 #
-# Com ~1/3 de sucesso, 8 tentativas dao ~96% de chance de pelo menos uma passar. O teto
-# existe porque sem ele isto vira laco quente: um download que nunca funciona abriria e
-# fecharia navegador para sempre.
-MAX_DOWNLOADS = 8
+# A TAXA FOI MEDIDA, e o numero sai dela. Quatro downloads seguidos do MESMO arquivo:
+# falha, falha, falha, OK — ~25% de sucesso por tentativa.
+#
+#     teto  chance de pelo menos um passar (1 - 0.75^n)
+#      8            90%
+#     20            99,7%
+#
+# Com teto 8 um job em cada dez morria com o arquivo pronto do outro lado — foi o que
+# aconteceu com o job 93. Cada tentativa custa ~10 s e uma abertura de navegador, entao
+# 20 sao ~3 minutos no pior caso, contra perder um video ja pago.
+#
+# O teto continua existindo porque sem ele isto vira laco quente: um download que nunca
+# funciona abriria e fecharia navegador para sempre.
+MAX_DOWNLOADS = 20
 
 
 def teto_do_ambiente(padrao: int = MAX_SIMULTANEOS) -> int:
@@ -515,8 +525,8 @@ class Orquestrador:
                     # numero de tentativas — 24 aberturas de navegador para um
                     # download que nunca vai funcionar.
                     raise GeracaoFalhou(
-                        f"o download falhou {vezes} vezes seguidas. O video EXISTE na "
-                        f"conta {conta.email} (card {job.id_remoto}) e ja foi pago — "
+                        f"o download falhou {vezes} vezes seguidas. O resultado EXISTE "
+                        f"na conta {conta.email} (card {job.id_remoto}) e ja foi pago — "
                         f"da para baixar na mao. Ultimo erro: {type(e).__name__}: {e}"
                     ) from e
                 job.reavaliar_em = None

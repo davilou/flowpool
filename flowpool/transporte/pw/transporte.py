@@ -1927,13 +1927,9 @@ class TransportePlaywright:
         # ABA DE GUARDA: com a pagina principal fechando, ela e a unica coisa que
         # mantem o contexto persistente vivo pelo tempo de copiar o arquivo.
         guarda = await pagina.context.new_page()
-        # A GUARDA PRECISA SER UMA PAGINA DE VERDADE. `about:blank` nao parece segurar
-        # o contexto persistente: com ela o download continuava intermitente. Navegar
-        # para a home do Flow da a ela conteudo e um ciclo de vida proprio.
-        try:
-            await guarda.goto(sel.URL_FLOW, wait_until="domcontentloaded", timeout=20_000)
-        except Exception:
-            pass
+        # A guarda fica em `about:blank` DE PROPOSITO. Navegar ela para o Flow foi
+        # tentado e MEDIDO: nao melhorou a taxa (continuou ~1 em 3) e ainda carregava
+        # uma pagina inteira no mesmo contexto a cada download.
         d.passo(f"guarda aberta (traco={traco_ligado()}, "
                 f"paginas={len(pagina.context.pages)})")
         async with pagina.expect_download(timeout=self.timeout_ms) as espera:
