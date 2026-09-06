@@ -6,285 +6,239 @@
 <title>FlowPool</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/painel.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%236f7ff0'/%3E%3Cpath d='M13 4L6 14h6l-1 6 7-10h-6l1-6z' fill='%23fff'/%3E%3C/svg%3E">
 </head>
 <body>
 
-<!-- L4: a faixa. Contas saem do caminho, mas o que EXIGE AÇÃO continua gritando aqui:
-     a sessão do Flow cai a cada ~48h e revalidar é a única coisa que precisa de gente. -->
-<header class="faixa">
-  <div class="marca">
-    <span class="ponto" id="ponto-servico"></span>
-    <strong>FlowPool</strong>
-  </div>
+<!-- Ícones: um sprite só, referenciado por <use>. Traço 1.75, sem preenchimento —
+     o mesmo peso da tipografia, para o ícone não gritar mais que o texto ao lado.
+     `display:none` explícito: o atributo `hidden` é do namespace HTML e NÃO esconde um
+     <svg> inline — medido: o sprite ocupava 21px e empurrava o app inteiro para baixo. -->
+<svg style="display:none" xmlns="http://www.w3.org/2000/svg">
+  <symbol id="i-painel" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></symbol>
+  <symbol id="i-jobs" viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></symbol>
+  <symbol id="i-fila" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+  <symbol id="i-historico" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></symbol>
+  <symbol id="i-contas" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8"/></symbol>
+  <symbol id="i-saidas" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="M21 15l-5-5L5 21"/></symbol>
+  <symbol id="i-projetos" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+  <symbol id="i-config" viewBox="0 0 24 24"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/></symbol>
+  <symbol id="i-mais" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></symbol>
+  <symbol id="i-busca" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></symbol>
+  <symbol id="i-baixar" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></symbol>
+  <symbol id="i-externo" viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6M15 3h6v6M10 14L21 3"/></symbol>
+  <symbol id="i-atualizar" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-2.6-6.4L21 8M21 3v5h-5"/></symbol>
+  <symbol id="i-alerta" viewBox="0 0 24 24"><path d="M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4M12 17h.01"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6L9 17l-5-5"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M6 4l14 8-14 8z"/></symbol>
+  <symbol id="i-copiar" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
+  <symbol id="i-seta-dir" viewBox="0 0 24 24"><path d="M9 18l6-6-6-6"/></symbol>
+  <symbol id="i-seta-cima" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></symbol>
+  <symbol id="i-janela" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9h18"/></symbol>
+  <symbol id="i-saldo" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v10M9.5 9.5h3.5a1.75 1.75 0 0 1 0 3.5H11a1.75 1.75 0 0 0 0 3.5h3.5"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/></symbol>
+  <symbol id="i-video" viewBox="0 0 24 24"><rect x="2" y="6" width="14" height="12" rx="2"/><path d="M16 10l6-3v10l-6-3"/></symbol>
+  <symbol id="i-imagem" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="M21 15l-5-5L5 21"/></symbol>
+  <symbol id="i-lixeira" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></symbol>
+  <symbol id="i-anexo" viewBox="0 0 24 24"><path d="M21.4 11.05l-9.2 9.2a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.5-8.5"/></symbol>
+  <symbol id="i-editar" viewBox="0 0 24 24"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></symbol>
+  <symbol id="i-pasta" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+  <symbol id="i-voltar" viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></symbol>
+  <symbol id="i-relogio" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+  <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2L4 14h7l-1 8 9-12h-7l1-8z"/></symbol>
+</svg>
 
-  <div class="medidores">
-    <span class="medidor"><b class="mono" id="credito-total">—</b> créditos</span>
-    <span class="medidor"><b class="mono" id="contas-vivas">—</b> contas vivas</span>
-    <span class="medidor"><b class="mono" id="ocupacao">—</b> contas ocupadas</span>
-    <span class="medidor"><b class="mono" id="gerando">—</b> gerando</span>
-    <span class="medidor"><b class="mono" id="fila-pendente">—</b> na fila</span>
-  </div>
+<div class="app">
 
-  <div class="expiradas oculto" id="faixa-expiradas">
-    <span class="alerta-texto" id="titulo-expiradas"></span>
-    <span class="lista-expiradas" id="lista-expiradas"></span>
-  </div>
+  <!-- Barra lateral fixa. Operação (painel, jobs, fila, histórico) em cima, recursos
+       (contas, saídas, projetos) no meio, configuração no fim. Os contadores ao lado
+       dos itens são o que está exigindo atenção — não decoração. -->
+  <aside class="lateral">
+    <a class="marca" href="#/painel">
+      <span class="marca-icone"><svg><use href="#i-bolt"/></svg></span>
+      <span class="marca-nome">FlowPool</span>
+    </a>
 
-  <div class="faixa-fim">
-    <span class="estado-conexao" id="estado-conexao">conectando…</span>
-    <button type="button" class="mini" id="abrir-contas">Contas</button>
-  </div>
-</header>
+    <nav class="nav" id="nav">
+      <a href="#/painel" data-rota="painel"><svg><use href="#i-painel"/></svg><span>Painel</span></a>
+      <a href="#/jobs" data-rota="jobs"><svg><use href="#i-jobs"/></svg><span>Jobs</span><b class="nav-conta" id="nav-jobs"></b></a>
+      <a href="#/fila" data-rota="fila"><svg><use href="#i-fila"/></svg><span>Fila</span><b class="nav-conta" id="nav-fila"></b></a>
+      <a href="#/historico" data-rota="historico"><svg><use href="#i-historico"/></svg><span>Histórico</span></a>
+      <div class="nav-grupo">Recursos</div>
+      <a href="#/contas" data-rota="contas"><svg><use href="#i-contas"/></svg><span>Contas</span><b class="nav-conta alerta" id="nav-contas"></b></a>
+      <a href="#/saidas" data-rota="saidas"><svg><use href="#i-saidas"/></svg><span>Saídas</span></a>
+      <a href="#/projetos" data-rota="projetos"><svg><use href="#i-projetos"/></svg><span>Projetos</span></a>
+      <div class="nav-grupo"></div>
+      <a href="#/config" data-rota="config"><svg><use href="#i-config"/></svg><span>Configurações</span></a>
+    </nav>
 
-<!-- L1: a galeria é a tela. Tudo o que foi gerado, mais recente primeiro. -->
-<main class="galeria" id="galeria">
-  <div class="galeria-vazia">Carregando…</div>
-</main>
+    <div class="lateral-rodape">
+      <div class="servico">
+        <span class="ponto" id="ponto-servico"></span>
+        <span class="servico-texto"><span id="servico-nome">Serviço local</span><br><span class="mono leve" id="servico-endereco"></span></span>
+      </div>
+    </div>
+  </aside>
 
-<!-- Barra de seleção: só aparece quando há algo marcado. -->
-<div class="barra-selecao oculto" id="barra-selecao">
-  <span id="selecao-conta"></span>
-  <button type="button" class="mini" id="baixar-selecao">Baixar selecionados</button>
-  <button type="button" class="mini" id="limpar-selecao">Limpar</button>
+  <header class="topo">
+    <div class="topo-caminho">
+      <span class="topo-app">FlowPool</span>
+      <span class="topo-sep">/</span>
+      <span class="topo-titulo" id="topo-titulo">Painel</span>
+    </div>
+    <div class="topo-direita">
+      <div class="estado-sistema" id="estado-sistema" title="estado do serviço e do pool">
+        <span class="ponto"></span><span id="estado-sistema-texto">conectando…</span>
+      </div>
+      <span class="atualizado" id="atualizado" title="última atualização dos dados">—</span>
+      <button type="button" class="botao fantasma" id="topo-contas" title="gestão de contas">
+        <svg><use href="#i-contas"/></svg><span>Contas</span><b class="badge" id="topo-contas-n"></b>
+      </button>
+      <button type="button" class="botao primario" id="botao-nova">
+        <svg><use href="#i-mais"/></svg><span>Nova geração</span>
+      </button>
+    </div>
+  </header>
+
+  <main class="conteudo" id="conteudo"></main>
 </div>
 
-<!-- L3: a barra de prompt. Flutua sobre a galeria, no rodapé.
-     NÃO é um agente: o campo é só o prompt. Quem decide modo, modelo e parâmetros é o
-     chip ao lado — a mesma escolha determinística que o transporte já faz. -->
-<footer class="barra">
-  <form class="caixa" id="form-job" autocomplete="off">
-    <div class="tira-anexos" id="tira-anexos"></div>
+<!-- Detalhe do job: mídia grande à esquerda, tudo o que se sabe do job à direita.
+     É o mesmo modal para a tabela, a fila, o histórico e a galeria. -->
+<div class="modal-fundo oculto" id="detalhe">
+  <div class="modal detalhe" role="dialog" aria-modal="true" aria-labelledby="detalhe-titulo">
+    <div class="detalhe-palco" id="detalhe-palco"></div>
+    <aside class="detalhe-lado" id="detalhe-lado"></aside>
+    <button type="button" class="fechar-x" data-fechar="detalhe" title="fechar (Esc)"><svg><use href="#i-x"/></svg></button>
+  </div>
+</div>
 
-    <div class="linha-caixa">
-      <button type="button" class="redondo" id="botao-mais"
-              title="anexar imagens do disco">+</button>
+<!-- Nova geração. O campo é SÓ o prompt — não há agente conversacional. Modo, modelo,
+     proporção, duração e quantidade são escolhas explícitas, e só aparecem as que a
+     API aceitaria naquele modo. -->
+<div class="modal-fundo oculto" id="composer">
+  <form class="modal composer" id="form-job" autocomplete="off" role="dialog" aria-modal="true" aria-labelledby="composer-titulo">
+    <div class="modal-topo">
+      <strong id="composer-titulo">Nova geração</strong>
+      <button type="button" class="fechar-x" data-fechar="composer" title="fechar (Esc)"><svg><use href="#i-x"/></svg></button>
+    </div>
 
-      <textarea id="job-prompt" rows="1" placeholder="O que você quer criar?"
-                required></textarea>
+    <div class="composer-corpo">
+      <div class="segmentado" id="seg-modo" role="radiogroup" aria-label="Tipo de geração">
+        <button type="button" data-modo="imagem">Imagem</button>
+        <button type="button" data-modo="t2v">Vídeo · texto</button>
+        <button type="button" data-modo="ingredients2v">Vídeo · referências</button>
+        <button type="button" data-modo="frames2v">Vídeo · frames</button>
+      </div>
 
-      <button type="button" class="chip" id="chip">
-        <span id="chip-texto">Vídeo · 4s · 9:16 · x1</span>
-        <span class="chip-seta">▾</span>
-      </button>
+      <textarea id="job-prompt" rows="4" placeholder="Descreva a cena. Diga também o que não deve acontecer." required></textarea>
 
-      <button type="button" class="chip produto" id="chip-produto">
-        <span id="chip-produto-texto">produto</span>
-        <span class="chip-seta">▾</span>
-      </button>
+      <div class="tira-anexos" id="tira-anexos"></div>
 
-      <button type="submit" class="enviar" id="botao-enviar" title="enviar (Enter)">↑</button>
+      <div class="composer-grade">
+        <label class="campo"><span>Produto</span>
+          <div class="campo-combo">
+            <select id="job-produto"></select>
+            <input type="text" id="job-produto-novo" placeholder="ou novo produto…">
+          </div>
+        </label>
+        <label class="campo"><span>Modelo</span><div class="opcoes" id="opc-modelo"></div></label>
+        <label class="campo"><span>Proporção</span><div class="opcoes" id="opc-proporcao"></div></label>
+        <label class="campo" id="campo-duracao"><span>Duração</span><div class="opcoes" id="opc-duracao"></div></label>
+        <label class="campo" id="campo-quantidade"><span>Quantidade</span><div class="opcoes" id="opc-quantidade"></div></label>
+      </div>
+
+      <p class="dica" id="composer-dica"></p>
+      <div class="alerta erro oculto" id="erro-job"></div>
+    </div>
+
+    <div class="modal-rodape">
+      <button type="button" class="botao" id="botao-anexar"><svg><use href="#i-anexo"/></svg><span id="botao-anexar-texto">Anexar do disco</span></button>
+      <span class="leve composer-custo" id="composer-custo"></span>
+      <span class="cresce"></span>
+      <button type="submit" class="botao primario" id="botao-enviar"><svg><use href="#i-seta-cima"/></svg><span>Enviar para a fila</span></button>
     </div>
   </form>
+</div>
 
-  <div class="aviso erro oculto" id="erro-job"></div>
-</footer>
-
-<!-- Popover do chip. Só mostra o que a API aceitaria: duração só em vídeo, quantidade
-     acima de 1 só em imagem, proporção de vídeo só 9:16 e 16:9, modelo por família. -->
-<div class="popover oculto" id="pop-chip" role="dialog" aria-label="Configuração da geração">
-  <div class="pop-grupo">
-    <span class="pop-rotulo">Tipo</span>
-    <div class="pop-opcoes" id="pop-tipo">
-      <button type="button" data-modo="t2v">vídeo — texto</button>
-      <button type="button" data-modo="frames2v">vídeo — frames</button>
-      <button type="button" data-modo="ingredients2v">vídeo — referências</button>
-      <!-- imagem aceita referência: é o Nano Banana gerando a partir de uma foto, e é
-           por aí que o pipeline começa (foto da roupa → imagem da modelo vestida). -->
-      <button type="button" data-modo="imagem">imagem — texto ou referências</button>
+<!-- Seletor de imagens. Navega o DISCO pelo servidor: o transporte precisa de um
+     caminho real para `set_input_files`, e o <input type=file> do navegador nunca
+     entrega o caminho. -->
+<div class="modal-fundo oculto" id="seletor">
+  <div class="modal seletor" role="dialog" aria-modal="true" aria-labelledby="seletor-titulo">
+    <div class="modal-topo">
+      <div>
+        <strong id="seletor-titulo">Escolher imagem</strong>
+        <div class="mono leve pequeno" id="seletor-caminho">/</div>
+      </div>
+      <button type="button" class="fechar-x" data-fechar="seletor" title="fechar (Esc)"><svg><use href="#i-x"/></svg></button>
     </div>
+    <div class="modal-barra">
+      <button type="button" class="botao mini" id="seletor-voltar"><svg><use href="#i-voltar"/></svg>Voltar</button>
+      <span class="leve" id="seletor-restam"></span>
+      <span class="cresce"></span>
+      <button type="button" class="botao mini oculto" id="seletor-tres">Usar as 3 primeiras desta pasta</button>
+    </div>
+    <div class="modal-corpo" id="seletor-corpo"></div>
+    <div class="alerta erro oculto" id="seletor-erro"></div>
   </div>
-
-  <div class="pop-grupo">
-    <span class="pop-rotulo">Modelo</span>
-    <div class="pop-opcoes" id="pop-modelo"></div>
-  </div>
-
-  <div class="pop-grupo">
-    <span class="pop-rotulo">Proporção</span>
-    <div class="pop-opcoes" id="pop-proporcao"></div>
-  </div>
-
-  <div class="pop-grupo" id="grupo-duracao">
-    <span class="pop-rotulo">Duração</span>
-    <div class="pop-opcoes" id="pop-duracao"></div>
-  </div>
-
-  <div class="pop-grupo" id="grupo-quantidade">
-    <span class="pop-rotulo">Quantidade</span>
-    <div class="pop-opcoes" id="pop-quantidade"></div>
-  </div>
-
-  <p class="pop-dica" id="pop-dica"></p>
 </div>
 
-<!-- Popover do produto. O produto é a pasta em disco E o nome do projeto no Flow, então
-     a API exige. Fica aqui, e não na barra, para não roubar espaço do prompt. -->
-<div class="popover oculto" id="pop-produto" role="dialog" aria-label="Produto">
-  <span class="pop-rotulo">Produto</span>
-  <div class="pop-lista" id="lista-produtos"></div>
-  <div class="pop-novo">
-    <input type="text" id="produto-novo" placeholder="novo produto…">
-    <button type="button" class="mini" id="usar-produto-novo">Usar</button>
-  </div>
-  <p class="pop-dica">
-    O produto é a pasta onde o arquivo cai (<span class="mono-peq">produto/clipes</span>)
-    e o nome do projeto dentro do Flow. O nome do arquivo sai automático
-    (<span class="mono-peq">produto-n</span>) e dá para trocar no visualizador enquanto o
-    job está na fila.
-  </p>
-</div>
-
-<!-- Visualizador. Abre no clique do card: mídia grande, o prompt inteiro, de onde veio
-     e o caminho em disco — que é como o arquivo chega no editor de vídeo. -->
-<div class="modal-fundo oculto" id="visor">
-  <div class="visor" role="dialog" aria-modal="true" aria-labelledby="visor-titulo">
-    <div class="visor-palco" id="visor-palco"></div>
-    <aside class="visor-lado">
-      <div class="visor-topo">
-        <strong id="visor-titulo">—</strong>
-        <button type="button" class="mini" id="visor-fechar">Fechar</button>
+<!-- Nova conta. O cadastro abre um Chrome e espera a pessoa logar: o estado
+     "em andamento" existe para ninguém clicar duas vezes. -->
+<div class="modal-fundo oculto" id="nova-conta">
+  <form class="modal nova-conta" id="form-conta" autocomplete="off" role="dialog" aria-modal="true" aria-labelledby="nova-conta-titulo">
+    <div class="modal-topo">
+      <strong id="nova-conta-titulo">Adicionar conta</strong>
+      <button type="button" class="fechar-x" data-fechar="nova-conta" title="fechar (Esc)"><svg><use href="#i-x"/></svg></button>
+    </div>
+    <fieldset class="modal-corpo campos" id="campos-conta">
+      <label class="campo"><span>E-mail da conta Google</span>
+        <input type="email" id="conta-email" required placeholder="conta@gmail.com"></label>
+      <div class="campos-linha">
+        <label class="campo"><span>Tier</span>
+          <select id="conta-tier"><option value="free" selected>free</option><option value="pro">pro</option><option value="ultra">ultra</option></select></label>
+        <label class="campo cresce"><span>Proxy <em class="leve">(opcional)</em></span>
+          <input type="text" id="conta-proxy" class="mono" placeholder="http://host:porta"></label>
       </div>
+      <p class="dica">O proxy entra já no cadastro: o login precisa sair do mesmo IP por onde a conta vai operar. Sem proxy, a conta usa o IP desta máquina. Proxy com usuário e senha não funciona no Chrome do cadastro.</p>
+    </fieldset>
 
-      <div class="visor-linha"><span class="pop-rotulo">Prompt</span>
-        <p class="visor-prompt" id="visor-prompt"></p></div>
-
-      <div class="visor-linha"><span class="pop-rotulo">Configuração</span>
-        <p class="mono-peq" id="visor-config"></p></div>
-
-      <div class="visor-linha"><span class="pop-rotulo">Produto e conta</span>
-        <p class="mono-peq" id="visor-origem"></p></div>
-
-      <div class="visor-linha" id="visor-linha-erro"><span class="pop-rotulo">Erro</span>
-        <p class="visor-erro" id="visor-erro"></p></div>
-
-      <div class="visor-linha" id="visor-linha-nome"><span class="pop-rotulo">Nome do arquivo</span>
-        <div class="linha-arquivo">
-          <input type="text" id="visor-nome" class="mono">
-          <button type="button" class="mini" id="visor-renomear">Salvar</button>
-        </div>
-        <p class="pop-dica">O nome vira o arquivo em disco, então só muda enquanto o job
-          está na fila.</p></div>
-
-      <div class="visor-linha" id="visor-linha-caminho"><span class="pop-rotulo">Caminho no disco</span>
-        <div class="linha-arquivo">
-          <input type="text" id="visor-caminho" class="mono" readonly>
-          <button type="button" class="mini" id="visor-copiar">Copiar</button>
-        </div></div>
-
-      <div class="visor-acoes">
-        <a class="mini primario-link oculto" id="visor-baixar" download>Baixar</a>
-        <button type="button" class="mini oculto" id="visor-cancelar">Cancelar job</button>
-      </div>
-
-      <div class="aviso erro oculto" id="visor-aviso"></div>
-    </aside>
-  </div>
-</div>
-
-<!-- L4: a gaveta. Toda a gestão de contas continua aqui — cadastrar, revalidar,
-     ativar/desativar, tier, proxy, ler saldo. Fora do caminho, não fora do alcance. -->
-<div class="gaveta-fundo oculto" id="gaveta-fundo"></div>
-<aside class="gaveta oculto" id="gaveta" aria-label="Contas">
-  <div class="gaveta-topo">
-    <strong>Contas</strong>
-    <span class="contador mono" id="contador-contas"></span>
-    <button type="button" class="mini" id="fechar-contas">Fechar</button>
-  </div>
-
-  <div class="gaveta-corpo">
-    <form id="form-conta" autocomplete="off">
-      <fieldset id="campos-conta">
-        <legend>Cadastrar nova conta</legend>
-        <label class="campo">
-          <span>E-mail da conta Google</span>
-          <input type="email" id="conta-email" required placeholder="conta@gmail.com">
-        </label>
-        <label class="campo">
-          <span>Tier</span>
-          <select id="conta-tier">
-            <option value="free" selected>free</option>
-            <option value="pro">pro</option>
-            <option value="ultra">ultra</option>
-          </select>
-        </label>
-        <label class="campo">
-          <span>Proxy (opcional)</span>
-          <input type="text" id="conta-proxy" class="mono" placeholder="http://host:porta">
-        </label>
-        <button type="submit" id="botao-cadastrar" class="primario">Cadastrar conta</button>
-        <p class="dica">
-          O proxy entra <em>já no cadastro</em>: o login precisa sair do mesmo IP por onde a
-          conta vai operar. Sem proxy, a conta usa o IP desta máquina. Proxy com usuário e
-          senha não funciona no Chrome do cadastro — use um sem credencial ou deixe em branco.
-        </p>
-      </fieldset>
-    </form>
-
-    <!-- O estado que evita o segundo clique. POST /contas bloqueia por minutos. -->
     <div class="andamento oculto" id="andamento-cadastro">
-      <div class="andamento-cabeca">
-        <span class="girando"></span>
-        <strong id="andamento-titulo">Abri o Chrome. Agora é com você.</strong>
-      </div>
+      <div class="andamento-cabeca"><span class="girando"></span><strong id="andamento-titulo">Abri o Chrome. Agora é com você.</strong><span class="mono leve" id="cronometro">0:00</span></div>
       <ol class="passos">
         <li>Faça o login na conta Google na janela que abriu.</li>
         <li>Tela de consentimento: <strong>deixe as duas caixas desmarcadas</strong> e clique em “Avançar”.</li>
-        <li>Aviso de privacidade: <strong>role até o fim do texto</strong> — o botão “Continuar” só habilita
-            quando o fim entra na tela de verdade. Janela minimizada ou coberta não conta.</li>
+        <li>Aviso de privacidade: <strong>role até o fim do texto</strong> — o “Continuar” só habilita quando o fim entra na tela.</li>
         <li>Confirme que a lista de projetos do Flow carregou.</li>
         <li><strong>Feche a janela do Chrome.</strong> Daí em diante é comigo.</li>
       </ol>
-      <p class="andamento-rodape">
-        Não abra este mesmo perfil em outro Chrome enquanto isso, e não clique em cadastrar de
-        novo: o segundo Chrome rouba a janela do primeiro e o cadastro falha.
-        <br>Eu confirmo aqui quando a sessão estiver de pé. <span class="mono" id="cronometro">0:00</span>
-      </p>
+      <p class="dica">Não abra este perfil em outro Chrome enquanto isso, e não clique em cadastrar de novo: o segundo Chrome rouba a janela do primeiro e o cadastro falha.</p>
     </div>
 
-    <div class="aviso erro oculto" id="erro-cadastro"></div>
-    <div class="aviso ok oculto" id="ok-cadastro"></div>
-
-    <div class="lista-contas" id="lista-contas">
-      <div class="galeria-vazia">Carregando…</div>
+    <div class="alerta erro oculto" id="erro-cadastro"></div>
+    <div class="alerta ok oculto" id="ok-cadastro"></div>
+    <div class="modal-rodape">
+      <span class="cresce"></span>
+      <button type="button" class="botao" data-fechar="nova-conta">Cancelar</button>
+      <button type="submit" class="botao primario" id="botao-cadastrar">Abrir o Chrome e cadastrar</button>
     </div>
-  </div>
-</aside>
-
-<!-- Seletor de imagens. Navega o DISCO pelo servidor (GET /arquivos), e não faz upload:
-     o transporte precisa de um caminho em disco para o `set_input_files`, e o
-     `<input type="file">` do navegador entrega o conteúdo do arquivo, nunca o caminho. -->
-<div class="modal-fundo oculto" id="seletor">
-  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="seletor-titulo">
-    <div class="modal-topo">
-      <div class="modal-titulo">
-        <strong id="seletor-titulo">Escolher imagem</strong>
-        <div class="mono-peq caminho-atual" id="seletor-caminho">/</div>
-      </div>
-      <button type="button" class="mini" id="seletor-fechar">Fechar</button>
-    </div>
-
-    <div class="modal-barra">
-      <button type="button" class="mini" id="seletor-voltar">↑ Voltar</button>
-      <span class="leve" id="seletor-restam"></span>
-      <button type="button" class="mini oculto" id="seletor-tres">Usar as 3 primeiras desta pasta</button>
-    </div>
-
-    <div class="modal-corpo" id="seletor-corpo"></div>
-    <div class="aviso erro oculto" id="seletor-erro"></div>
-  </div>
+  </form>
 </div>
 
-<!-- Área de soltura. Cobre a tela inteira enquanto algo está sendo arrastado por cima do
-     painel: o alvo é o painel todo, e não um retângulo que a pessoa precise acertar.
-     `pointer-events: none` no CSS — a camada é só o aviso, quem recebe o `drop` é o
-     documento. -->
+<!-- Gaveta da conta: edição, ações e a linha do tempo de eventos dela. -->
+<div class="gaveta-fundo oculto" id="gaveta-fundo"></div>
+<aside class="gaveta oculto" id="gaveta" aria-label="Conta"></aside>
+
+<!-- Avisos curtos, no canto. -->
+<div class="toasts" id="toasts"></div>
+
+<!-- Camada de soltura: cobre o painel inteiro enquanto algo é arrastado por cima. -->
 <div class="solta oculto" id="solta" aria-hidden="true">
-  <div class="solta-alvo">
-    <strong>Solte para anexar como referência</strong>
-    <span>PNG, JPEG, WEBP ou GIF · até 20 MB · no máximo 3</span>
-  </div>
+  <div class="solta-alvo"><strong>Solte para anexar como referência</strong><span>PNG, JPEG, WEBP ou GIF · até 20 MB · no máximo 3</span></div>
 </div>
 
 <script src="/painel.js"></script>

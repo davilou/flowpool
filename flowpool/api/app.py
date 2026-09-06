@@ -17,15 +17,19 @@ from flowpool.api.arquivos import (
     tipo_de,
 )
 from flowpool.api.esquemas import (
-    NovaConta, PatchConta, PatchJob, PedidoColarUrl, PedidoJob, PedidoLote,
-    RespostaArquivos, RespostaColagem, RespostaConta, RespostaJob, RespostaProjeto,
-    Saude,
+    _MODELO_PADRAO, Info, NovaConta, PatchConta, PatchJob, PedidoColarUrl, PedidoJob,
+    PedidoLote, RespostaArquivos, RespostaColagem, RespostaConta, RespostaEvento,
+    RespostaJob, RespostaProjeto, Saude,
 )
 from flowpool.dados.repo import Repo
 from flowpool.motor.orquestrador import MAX_SIMULTANEOS, Orquestrador
-from flowpool.nucleo.erros import ProxyInvalido
+from flowpool.nucleo.custos import CUSTO_DURACAO_BASE, TETO_DIARIO_FREE, custo_de
+from flowpool.nucleo.erros import DuracaoSemCusto, ModeloSemCusto, ProxyInvalido
 from flowpool.nucleo.proxy import mascarar
-from flowpool.nucleo.tipos import Conta, EstadoJob, Job, SaudeSessao
+from flowpool.nucleo.tipos import (
+    DURACOES, PROPORCOES, SEM_DURACAO, Conta, EstadoJob, Job, Modelo, Modo, SaudeSessao,
+    Tier, max_referencias, modelos_do_modo, quantidade_maxima,
+)
 from flowpool.transporte.base import FlowTransport, SessaoMorta
 from flowpool.transporte.pw.sessao import (ChromeAusente, PerfilOcupado,
                                            abrir_para_conferir, cadastrar)
@@ -65,7 +69,28 @@ def _resposta(j: Job, raiz: Path | str) -> RespostaJob:
                        duracao=j.duracao, conta_id=j.conta_id, arquivo=j.arquivo,
                        caminho=relativo_seguro(raiz, j.arquivo),
                        custo_estimado=j.custo_estimado,
-                       tentativas=j.tentativas, erro=j.erro)
+                       tentativas=j.tentativas, erro=j.erro,
+                       referencias=list(j.referencias),
+                       frame_inicial=j.frame_inicial, frame_final=j.frame_final,
+                       prioridade=j.prioridade, reavaliar_em=j.reavaliar_em,
+                       criado_em=j.criado_em, atualizado_em=j.atualizado_em)
+
+
+def _evento(e: dict) -> RespostaEvento:
+    """Linha da tabela `evento` como o painel a le, com o payload aberto.
+
+    O payload e texto JSON gravado pelo motor; se algum dia vier torto, o evento nao
+    some da linha do tempo — o texto cru vai em `bruto`.
+    """
+    try:
+        payload = json.loads(e.get("payload") or "{}")
+        if not isinstance(payload, dict):
+            payload = {"valor": payload}
+    except ValueError:
+        payload = {"bruto": e.get("payload")}
+    return RespostaEvento(id=e["id"], job_id=e.get("job_id"), conta_id=e.get("conta_id"),
+                          tipo=e["tipo"], em=datetime.fromisoformat(e["em"]),
+                          payload=payload)
 
 
 def _resposta_conta(c: Conta) -> RespostaConta:
@@ -77,7 +102,8 @@ def _resposta_conta(c: Conta) -> RespostaConta:
     """
     return RespostaConta(id=c.id, email=c.email, tier=c.tier, saldo=c.saldo,
                          saldo_confiavel=c.saldo_confiavel, saude=c.saude,
-                         ativa=c.ativa, falhas=c.falhas, proxy=mascarar(c.proxy))
+                         ativa=c.ativa, falhas=c.falhas, proxy=mascarar(c.proxy),
+                         saldo_lido_em=c.saldo_lido_em, seca_ate=c.seca_ate)
 
 
 def criar_app(repo: Repo, transporte: FlowTransport, raiz: Path | str,
@@ -329,6 +355,18 @@ def criar_app(repo: Repo, transporte: FlowTransport, raiz: Path | str,
     def listar_jobs(estado: EstadoJob | None = None) -> list[RespostaJob]:
         return [_resposta(j, raiz) for j in repo.jobs(estado)]
 
+    @app.get("/jobs/{id_}/eventos", response_model=list[RespostaEvento])
+    def eventos_do_job(id_: int) -> list[RespostaEvento]:
+        """A linha do tempo de um job, do despacho ao fim.
+
+        E o diagnostico que o painel abre quando um job falha: a mensagem de erro diz
+        o ultimo passo, os eventos dizem o caminho — em que conta caiu, quantas vezes
+        o download falhou, se ficou sem conta apta antes de rodar.
+        """
+        if repo.job(id_) is None:
+            raise HTTPException(404, "job nao existe")
+        return [_evento(e) for e in repo.eventos(id_)]
+
     @app.delete("/jobs/{id_}", response_model=RespostaJob)
     def cancelar(id_: int) -> RespostaJob:
         j = repo.job(id_)
@@ -529,6 +567,18 @@ def criar_app(repo: Repo, transporte: FlowTransport, raiz: Path | str,
                      "a sessao pode ter caido — revalide a conta")
         return _resposta_conta(c)
 
+    @app.get("/contas/{id_}/eventos", response_model=list[RespostaEvento])
+    def eventos_da_conta(id_: int, limite: int = Query(default=60, ge=1, le=500)
+                         ) -> list[RespostaEvento]:
+        """Os ultimos eventos daquela conta, mais recente primeiro.
+
+        Responde "o que aconteceu com esta conta": a sessao caiu em que momento, o
+        saldo foi lido quando, que jobs passaram por ela.
+        """
+        if repo.conta(id_) is None:
+            raise HTTPException(404, "conta nao existe")
+        return [_evento(e) for e in repo.eventos_da_conta(id_, limite)]
+
     @app.patch("/contas/{id_}", response_model=RespostaConta)
     def alterar_conta(id_: int, p: PatchConta) -> RespostaConta:
         c = repo.conta(id_)
@@ -546,6 +596,42 @@ def criar_app(repo: Repo, transporte: FlowTransport, raiz: Path | str,
             c.proxy = p.proxy
         repo.salvar_conta(c)
         return _resposta_conta(c)
+
+    @app.get("/info", response_model=Info)
+    def info() -> Info:
+        """As regras e a tabela de custos, como o nucleo as conhece.
+
+        O painel lia isto de constantes copiadas no JS, e cada copia envelhecia
+        sozinha: o custo do 4s mudou no nucleo e o chip continuou anunciando o velho.
+        Agora o painel le daqui uma vez, na partida.
+        """
+        custos: dict[str, dict[str, dict[str, int]]] = {}
+        for modelo in Modelo:
+            por_tier: dict[str, dict[str, int]] = {}
+            for tier in Tier:
+                try:
+                    if modelo is Modelo.NANO_BANANA:
+                        por_tier[tier.value] = {"-": custo_de(modelo, tier)}
+                    else:
+                        por_tier[tier.value] = {d: custo_de(modelo, tier, d)
+                                                for d in DURACOES}
+                except (ModeloSemCusto, DuracaoSemCusto):
+                    continue
+            custos[modelo.value] = por_tier
+        return Info(
+            raiz=str(raiz),
+            max_simultaneos=orq.max_simultaneos,
+            teto_diario_free=TETO_DIARIO_FREE,
+            custos=custos,
+            modelos_do_modo={m.value: [x.value for x in modelos_do_modo(m)] for m in Modo},
+            modelo_padrao={m.value: _MODELO_PADRAO[m].value for m in Modo},
+            proporcoes=list(PROPORCOES),
+            duracoes=list(DURACOES),
+            sem_duracao=[m.value for m in SEM_DURACAO],
+            duracao_base=CUSTO_DURACAO_BASE,
+            max_referencias={m.value: max_referencias(m) for m in Modo},
+            quantidade_maxima={m.value: quantidade_maxima(m) for m in Modo},
+        )
 
     @app.get("/saude", response_model=Saude)
     def saude() -> Saude:

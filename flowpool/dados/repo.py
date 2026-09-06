@@ -354,3 +354,17 @@ class Repo:
         else:
             rs = self.con.execute("SELECT * FROM evento ORDER BY id DESC LIMIT 200").fetchall()
         return [dict(r) for r in rs]
+
+    def eventos_da_conta(self, conta_id: int, limite: int = 100) -> list[dict]:
+        """Os ultimos eventos daquela conta — de qualquer job, e os sem job.
+
+        Existe para o painel: quando uma conta esta `expirada` ou com `~` no saldo, a
+        pergunta e "o que aconteceu com ela", e a resposta esta espalhada por eventos de
+        jobs diferentes (`despachado`, `saldo_nao_semeado`, `sessao_revalidada`). Mais
+        recente primeiro, com teto, porque a tabela cresce sem parar.
+        """
+        rs = self.con.execute(
+            "SELECT * FROM evento WHERE conta_id = ? ORDER BY id DESC LIMIT ?",
+            (conta_id, limite),
+        ).fetchall()
+        return [dict(r) for r in rs]

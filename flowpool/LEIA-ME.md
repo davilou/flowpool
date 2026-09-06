@@ -23,9 +23,34 @@ Serviço local, um usuário, uma máquina: **não há login, e a porta escuta s�
 
 ## O que o painel faz
 
-**Contas** — o centro. Cadastrar uma conta nova, revalidar sessão caída, ler o saldo,
-ativar e desativar, e trocar tier e proxy. Cada linha mostra e-mail, tier, saldo, saúde
-da sessão e o proxy (sempre mascarado: a senha nunca sai do servidor).
+Oito páginas numa barra lateral fixa, desenhadas para operação — tabela para operar,
+galeria para olhar, um modal para entender um job:
+
+| página | o que mostra |
+|---|---|
+| **Painel** | crédito disponível, contas saudáveis, gerando agora, fila; pipeline ativo; jobs recentes; saúde do pool (barra de crédito por conta); lista de **atenção** com ação ao lado |
+| **Jobs** | tabela de tudo, com busca e filtros por estado, tipo e produto |
+| **Fila** | o que gera agora (tempo decorrido) e o que espera — com **quem pode pagar** cada job |
+| **Histórico** | prontos, falhos e cancelados por dia; botão **Diagnóstico** nos falhos |
+| **Contas** | tabela operacional: e-mail, tier, crédito, sessão, proxy, ativa, ações |
+| **Saídas** | galeria de imagens e vídeos; seleção e download em zip |
+| **Projetos** | por produto: jobs, prontos, e o projeto do Flow em cada conta |
+| **Configurações** | o serviço, a tabela de custos e as regras por modo (lidas de `GET /info`) |
+
+O botão **Nova geração** (ou a tecla `n`) abre o composer: prompt, tipo, modelo,
+proporção, duração, quantidade, produto e anexos. Ctrl+V e arrastar-soltar anexam de
+qualquer página. O topo mostra o estado do sistema (Operacional / Atenção / Parado) e a
+hora da última atualização.
+
+**Erro não domina a tela.** Um job falho é uma pílula vermelha com o começo da mensagem;
+o detalhe traz a mensagem inteira, uma explicação do que fazer para os erros conhecidos
+(download que perde o arquivo, portão de idade, sessão caída, perfil ocupado) e a
+**linha do tempo de eventos** do job (`GET /jobs/{id}/eventos`).
+
+**Contas** — cadastrar uma conta nova, revalidar sessão caída, ler o saldo, ativar e
+desativar, e trocar tier e proxy (na gaveta que abre ao clicar na linha). Cada linha
+mostra e-mail, tier, saldo, saúde da sessão e o proxy (sempre mascarado: a senha nunca
+sai do servidor).
 
 **O saldo é lido no cadastro**, e não fica em zero esperando o primeiro job. Tem que ser
 assim: `escolher` só manda job para conta cujo saldo cobre o custo, então conta com saldo
@@ -49,24 +74,27 @@ do primeiro e o cadastro falha. Os cinco passos, resumidos:
 5. **Feche a janela do Chrome.** O resto é com o serviço.
 
 **Revalidar é o mesmo fluxo**, e vira rotina: a sessão do Flow vive cerca de **48h**.
-Quando cai, a conta sai do pool e aparece na faixa laranja do topo, que é a informação
-mais acionável do painel — é a única coisa ali que exige uma pessoa.
+Quando cai, a conta sai do pool e sobe para a lista de **atenção** do painel com o botão
+Revalidar ao lado — é a única coisa ali que exige uma pessoa.
 
-**Saúde do pool** — crédito total das contas vivas, quantas estão vivas, quantos jobs
-esperam na fila, e as contas expiradas em destaque.
+**Crédito não se soma entre contas.** O painel diz isso em três lugares de propósito:
+o tile de crédito mostra o maior saldo numa conta ao lado do total; a fila mostra quantas
+contas pagam cada job; e a lista de atenção avisa quando há job na fila que nenhuma
+conta paga.
 
-**Jobs** — a fila e o histórico, com estado, modo, modelo, conta usada, arquivo e erro;
-um formulário para enfileirar e um botão para cancelar job ainda pendente. O formulário
-esconde o que a API recusaria: duração só existe em vídeo, quantidade acima de 1 só em
-imagem, e proporção de vídeo é só 9:16 ou 16:9.
+**O composer esconde o que a API recusaria**: duração só existe em vídeo por texto e por
+referências (imagem e frames não têm o grupo), quantidade acima de 1 só em imagem, e
+proporção de vídeo é só 9:16 ou 16:9. Os modelos por modo e os custos vêm de `GET /info`,
+não de constantes copiadas no JS.
 
-**Imagem aceita referência** — até 3, pelo mesmo `+` (ou Ctrl+V, ou arrastando). É o
+**Imagem aceita referência** — até 3, pelo botão de anexar (ou Ctrl+V, ou arrastando). É o
 Nano Banana gerando a partir de uma foto, e é por aí que o pipeline começa: foto da
 roupa → imagem da modelo vestida. Imagem sem referência continua sendo geração por
 texto puro. Anexar em **vídeo — texto** é o único caso em que o painel troca o modo
 sozinho (para *vídeo — referências*), porque lá o arquivo não teria para onde ir.
 
-A tela se atualiza sozinha a cada 4 segundos.
+A tela se atualiza sozinha a cada 4 segundos (ajustável em Configurações), e só
+redesenha o que mudou — senão cada `<video>` recarregaria o primeiro quadro a cada volta.
 
 ## Proxy
 
@@ -86,10 +114,11 @@ retransmissor local sem senha.
 
 Documentação interativa em **http://127.0.0.1:8777/docs**.
 
-`GET /saude`, `GET|POST /contas`, `PATCH /contas/{id}`, `POST /contas/{id}/revalidar`,
-`POST /contas/{id}/saldo`,
-`GET|POST /jobs`, `POST /jobs/lote`, `GET|DELETE /jobs/{id}`, `GET /projetos`,
-`DELETE /projetos/{id}`.
+`GET /saude`, `GET /info`, `GET|POST /contas`, `PATCH /contas/{id}`,
+`POST /contas/{id}/revalidar`, `POST /contas/{id}/saldo`, `POST /contas/{id}/abrir`,
+`GET /contas/{id}/eventos`,
+`GET|POST /jobs`, `POST /jobs/lote`, `GET|PATCH|DELETE /jobs/{id}`,
+`GET /jobs/{id}/eventos`, `GET /projetos`, `DELETE /projetos/{id}`.
 
 ## Quando o Google muda a interface
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from flowpool.nucleo.custos import CUSTO_DURACAO_BASE
@@ -242,6 +244,57 @@ class RespostaJob(BaseModel):
     custo_estimado: int | None = None
     tentativas: int = 0
     erro: str | None = None
+    # O que entrou na geracao. O detalhe do job mostra as miniaturas: e assim que se
+    # confere, sem abrir o Flow, que a referencia certa foi usada.
+    referencias: list[str] = Field(default_factory=list)
+    frame_inicial: str | None = None
+    frame_final: str | None = None
+    prioridade: int = 0
+    # Quando o motor volta a olhar um job devolvido a fila. `None` e "na proxima volta".
+    reavaliar_em: datetime | None = None
+    # Sem estas duas datas nao ha tabela de jobs nem historico que se ordene por tempo
+    # — so por id, que nao diz ha quanto tempo um job esta rodando.
+    criado_em: datetime | None = None
+    atualizado_em: datetime | None = None
+
+
+class RespostaEvento(BaseModel):
+    """Uma linha da tabela de eventos, com o payload ja aberto.
+
+    E o diagnostico de um job ou de uma conta: `despachado`, `download_falhou`,
+    `sem_conta_apta`, `divergencia`, `saldo_semeado`... O painel mostra a linha do tempo
+    quando algo deu errado, em vez de so a ultima mensagem de erro.
+    """
+
+    id: int
+    job_id: int | None = None
+    conta_id: int | None = None
+    tipo: str
+    em: datetime
+    payload: dict = Field(default_factory=dict)
+
+
+class Info(BaseModel):
+    """O que o painel precisa saber do servico e das regras — lido, nao espelhado.
+
+    Antes o JS repetia a tabela de custos, os modelos por modo e os tetos; cada copia
+    envelhecia por conta propria. Aqui a fonte e o nucleo.
+    """
+
+    raiz: str
+    max_simultaneos: int
+    teto_diario_free: int
+    # custos[modelo][tier][duracao] -> creditos. Imagem nao tem duracao: a chave e "-".
+    custos: dict[str, dict[str, dict[str, int]]]
+    modelos_do_modo: dict[str, list[str]]
+    modelo_padrao: dict[str, str]
+    proporcoes: list[str]
+    duracoes: list[str]
+    sem_duracao: list[str]
+    # A duracao que a tabela de custo cobra nos modos SEM grupo de duracao (frames2v).
+    duracao_base: str
+    max_referencias: dict[str, int]
+    quantidade_maxima: dict[str, int]
 
 
 class PatchJob(BaseModel):
@@ -282,6 +335,11 @@ class RespostaConta(BaseModel):
     # SEMPRE mascarado por `nucleo.proxy.mascarar` antes de chegar aqui. A resposta vai
     # para o painel e para log, e credencial de proxy nao precisa passear por ali.
     proxy: str | None = None
+    # Quando o saldo foi lido pela ultima vez no Flow. Conta gratuita reseta todo dia,
+    # entao "50 creditos" lido ha 30 horas vale menos que o numero sugere.
+    saldo_lido_em: datetime | None = None
+    # Ate quando o Flow recusou gerar apesar do saldo. No futuro = conta fora da escolha.
+    seca_ate: datetime | None = None
 
 
 class PatchConta(BaseModel):
