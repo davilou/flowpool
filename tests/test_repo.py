@@ -296,3 +296,23 @@ def test_leitura_de_varias_threads_nao_embaralha_linha(repo):
         f.join()
 
     assert falhas == []
+
+
+def test_antecipar_reavaliacao_zera_so_os_adiados_ate_o_limite(repo):
+    """Conta liberada antecipa quem esperava a janela (30 s), nao quem espera o reset (1 h)."""
+    agora = datetime.now(timezone.utc)
+    base = Job(id=0, modo=Modo.T2V, modelo=Modelo.VEO_FAST, prompt="x", destino="d", nome="n")
+    ids = [repo.criar_job(base) for _ in range(3)]
+    janela, reset, pronto = (repo.job(i) for i in ids)
+    janela.reavaliar_em = agora + timedelta(seconds=30); repo.salvar_job(janela)
+    reset.reavaliar_em = agora + timedelta(hours=1); repo.salvar_job(reset)
+    pronto.estado = EstadoJob.PRONTO; pronto.reavaliar_em = agora + timedelta(seconds=5)
+    repo.salvar_job(pronto)
+
+    assert repo.antecipar_reavaliacao(agora + timedelta(seconds=30)) == 1
+    assert repo.job(janela.id).reavaliar_em is None
+    assert repo.job(reset.id).reavaliar_em is not None      # espera o reset, como antes
+    assert repo.job(pronto.id).reavaliar_em is not None     # nao e pendente: fora
+
+    assert repo.antecipar_reavaliacao(None) == 1             # `None` = todos os pendentes
+    assert repo.job(reset.id).reavaliar_em is None

@@ -1074,3 +1074,36 @@ async def test_download_que_nunca_funciona_desiste_e_diz_onde_esta_o_video(repo,
     assert t.tentativas_de_download <= MAX_DOWNLOADS + 3
     # a mensagem tem que dizer que o video existe — senao o usuario refaz e paga de novo
     assert final.erro and "ja foi pago" in final.erro
+
+
+async def test_conta_liberada_antecipa_o_job_que_esperava_a_janela(repo, tmp_path):
+    """O job adiado por 'janela cheia' sai da fila quando a conta vaga, nao 30 s depois.
+
+    Medido antes disto: 11,6 eventos `sem_conta_apta` por job pronto — fila cheia,
+    pool ocioso, todo mundo esperando um relogio de 30 s.
+    """
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 50; repo.salvar_conta(c)
+    j1 = repo.criar_job(job_fast("c1"))
+    j2 = repo.criar_job(job_fast("c2"))
+    esperando = repo.job(j2)
+    esperando.reavaliar_em = datetime.now(timezone.utc) + timedelta(seconds=30)
+    repo.salvar_job(esperando)
+
+    orq = Orquestrador(repo, TransporteFalso(saldos={cid: 50}), raiz=tmp_path)
+    assert await orq.passo()                       # puxa c1 (c2 esta adiado)
+    assert repo.job(j2).reavaliar_em is not None
+    await orq.drenar()                              # c1 termina e libera a conta
+
+    assert repo.job(j1).estado is EstadoJob.PRONTO
+    assert repo.job(j2).reavaliar_em is None        # antecipado na liberacao
+    assert orq._acordar.is_set()                    # e o laco foi acordado
+
+
+async def test_dormir_acorda_antes_do_prazo_quando_uma_conta_e_liberada(repo, tmp_path):
+    orq = Orquestrador(repo, TransporteFalso(saldos={}), raiz=tmp_path)
+    inicio = asyncio.get_event_loop().time()
+    asyncio.get_event_loop().call_later(0.05, orq._liberar, 1)
+    await orq._dormir(5.0)
+    assert asyncio.get_event_loop().time() - inicio < 1.0
+    assert not orq._acordar.is_set()                # limpo para a proxima volta

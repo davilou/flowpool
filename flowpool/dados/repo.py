@@ -233,6 +233,34 @@ class Repo:
         self.con.commit()
         return self._job(rs[0]) if rs else None
 
+    def antecipar_reavaliacao(self, ate: datetime | None) -> int:
+        """Traz para AGORA os pendentes adiados ate `ate` (`None` = todos os adiados).
+
+        A espera de um job devolvido a fila mora em `reavaliar_em`, e ela e um
+        palpite feito no instante da devolucao: "a janela deve vagar em 30 s", "o
+        credito deve voltar em 1 h". Quando o fato acontece antes — uma conta e
+        liberada, um saldo e lido — o palpite ficou velho, e o job esperaria por nada.
+        Zerar `reavaliar_em` faz `reivindicar` enxerga-lo na proxima volta.
+
+        `ate` separa os dois palpites: quem liberou uma conta antecipa so os adiados
+        por janela cheia (ate 30 s a frente); quem leu um saldo antecipa todos, porque
+        o que mudou foi o que se sabe do credito. Devolve quantos jobs antecipou.
+        """
+        # RETURNING e nao `rowcount`: `_Conexao.execute` devolve o resultado ja
+        # drenado, e as linhas devolvidas sao a contagem
+        if ate is None:
+            r = self.con.execute(
+                "UPDATE job SET reavaliar_em=NULL "
+                " WHERE estado='pendente' AND reavaliar_em IS NOT NULL RETURNING id")
+        else:
+            r = self.con.execute(
+                "UPDATE job SET reavaliar_em=NULL "
+                " WHERE estado='pendente' AND reavaliar_em IS NOT NULL AND reavaliar_em <= ?"
+                " RETURNING id",
+                (_txt(ate),))
+        self.con.commit()
+        return len(r.fetchall())
+
     def renomear_job(self, id_: int, nome: str) -> None:
         """Troca so o `nome` do job.
 

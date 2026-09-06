@@ -19,7 +19,10 @@ from flowpool.transporte.base import (
 MAX_TENTATIVAS = 3
 ESPERA_RESET = timedelta(hours=1)
 TIMEOUT_GERACAO = timedelta(minutes=10)
-INTERVALO_POLLING = 5.0
+# De quanto em quanto o card e consultado durante a geracao. Era 5 s: o "pronto"
+# chegava ate 5 s atrasado em TODO job, por uma leitura de DOM que custa
+# milissegundos. 2 s corta a media de 2,5 s para 1 s por job (2026-09-06).
+INTERVALO_POLLING = 2.0
 
 # Quanto um job espera quando a conta que ele precisa esta OCUPADA — nao seca, nao
 # expirada: ocupada. Sao coisas de escala diferente. Conta seca espera o reset diario
@@ -118,6 +121,12 @@ class Orquestrador:
         # downloads que falharam por job — nao gastam tentativa, mas tem teto
         self._downloads_falhos: dict[int, int] = {}
         self._tarefas: set[asyncio.Task] = set()
+        # O despertador do laco. `rodar` dorme sobre ele em vez de sobre um relogio:
+        # conta liberada ou saldo lido acordam o motor na hora, em vez de dali a
+        # `intervalo` segundos — e junto com `antecipar_reavaliacao` e o que faz um job
+        # adiado por "janela cheia" sair da fila no instante em que a janela vaga, e
+        # nao 30 s depois (medido: 11,6 eventos `sem_conta_apta` por job pronto).
+        self._acordar = asyncio.Event()
 
     # ------------------------------------------------------------- o que o painel ve
 
@@ -333,7 +342,28 @@ class Orquestrador:
                 job.id, conta.id, "conduzir_falhou",
                 json.dumps({"erro": f"{type(e).__name__}: {e}"}))
         finally:
-            self._ocupadas.discard(conta.id)
+            self._liberar(conta.id)
+
+    def _liberar(self, conta_id: int) -> None:
+        """Devolve a conta ao pool E acorda quem esperava por uma.
+
+        Os jobs adiados por "janela cheia" (`ESPERA_JANELA`, 30 s) esperavam
+        exatamente isto: uma conta vagar. Zerar o `reavaliar_em` deles e acordar o
+        laco faz o proximo despacho acontecer agora. Os adiados por falta de credito
+        (`ESPERA_RESET`, 1 h) ficam como estao — uma conta livre sem saldo nao muda
+        nada para eles; quem os antecipa e a leitura de saldo.
+        """
+        self._ocupadas.discard(conta_id)
+        self.repo.antecipar_reavaliacao(datetime.now(timezone.utc) + ESPERA_JANELA)
+        self._acordar.set()
+
+    async def _dormir(self, intervalo: float) -> None:
+        """Dorme ate `intervalo` segundos — ou ate alguem acordar o motor."""
+        try:
+            await asyncio.wait_for(self._acordar.wait(), timeout=intervalo)
+        except asyncio.TimeoutError:
+            pass
+        self._acordar.clear()
 
     async def drenar(self) -> None:
         """Espera as geracoes ja despachadas terminarem. Nao reivindica nada.
@@ -427,6 +457,10 @@ class Orquestrador:
             self.repo.salvar_conta(conta)
             self.repo.registrar_evento(None, conta.id, "saldo_semeado",
                                        json.dumps({"antes": antes, "lido": lido}))
+            # o que se sabe do credito mudou: todo job adiado por "sem conta apta"
+            # merece nova avaliacao agora, e nao daqui a uma hora
+            self.repo.antecipar_reavaliacao(None)
+            self._acordar.set()
             return True
         except SessaoMorta as e:
             # campo a campo, como no resto do motor: `salvar_conta` grava a linha
@@ -448,7 +482,7 @@ class Orquestrador:
                 except Exception as e:
                     self.repo.registrar_evento(None, conta.id, "fechar_falhou",
                                                json.dumps({"erro": str(e)}))
-            self._ocupadas.discard(conta.id)
+            self._liberar(conta.id)
 
     # --------------------------------------------------------------------- a execucao
 
@@ -737,12 +771,12 @@ class Orquestrador:
         while self._rodando:
             try:
                 if not await self.passo():
-                    await asyncio.sleep(intervalo)
+                    await self._dormir(intervalo)
             except Exception as e:
                 self.repo.registrar_evento(
                     None, None, "passo_falhou",
                     json.dumps({"erro": f"{type(e).__name__}: {e}"}))
-                await asyncio.sleep(intervalo)
+                await self._dormir(intervalo)
         # parada limpa: as geracoes ja despachadas terminam e fecham seus navegadores.
         # Sair sem isto deixaria Chrome orfao segurando o perfil, e o proximo boot
         # esbarraria em `PerfilOcupado` numa conta que nao tem defeito nenhum.
