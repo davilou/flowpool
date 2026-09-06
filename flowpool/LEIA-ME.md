@@ -96,6 +96,21 @@ sozinho (para *vídeo — referências*), porque lá o arquivo não teria para o
 A tela se atualiza sozinha a cada 4 segundos (ajustável em Configurações), e só
 redesenha o que mudou — senão cada `<video>` recarregaria o primeiro quadro a cada volta.
 
+## O navegador entre jobs
+
+Depois de um job, o Chrome da conta **fica aberto por até 3 minutos** esperando o
+próximo job dela — abrir, navegar e validar um Chrome custa 10 a 15 s por job, e a
+retomada de um download pagava isso inteiro. O painel mostra esses navegadores como
+"em espera" no tile *Gerando agora*. Um job novo na mesma conta reusa o navegador numa
+**aba nova** (a aba velha guarda o modo escolhido no `sessionStorage`, e o painel do
+Flow não oferece o modo que já está ativo). Os botões **Abrir** e **Revalidar** fecham o
+navegador em espera antes de subir o Chrome deles: dois Chromes no mesmo perfil não
+coexistem.
+
+O arquivo gerado **não passa pelo download do Chrome**: o Chrome 152 trava o processo
+inteiro ao iniciar um download nativo de `blob:` (medido em 06/09/2026). O transporte
+captura o blob na página e grava os bytes ele mesmo (`transporte/pw/captura.py`).
+
 ## Proxy
 
 O proxy é **por conta** e entra já no cadastro: o login precisa sair do mesmo IP por

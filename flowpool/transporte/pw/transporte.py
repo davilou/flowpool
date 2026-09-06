@@ -218,12 +218,29 @@ class TransportePlaywright:
             return False
 
     async def renovar(self, s: Sessao) -> None:
-        """Sessao reusada para um job novo: o relogio do log de passo recomeca.
+        """Sessao reusada para um job novo: ABA NOVA, aba velha fechada, relogio zerado.
 
-        O total que o usuario le no log e "ha quanto tempo ESTE job esta rodando"; com
-        o navegador vivendo entre jobs, contar desde a abertura diria 900 s num job
-        que comecou ha 20.
+        A aba nova e o que faz o reuso se comportar como um Chrome novo. MEDIDO
+        2026-09-06 no primeiro reuso: o Flow guarda o modo escolhido no
+        `sessionStorage` DA ABA, entao a aba do job anterior ja abria em modo imagem
+        e `_escolher_modo("imagem")` nao achava o botao — o painel nao oferece o modo
+        que ja esta ativo. Num Chrome novo o `sessionStorage` nasce vazio e o defeito
+        nunca aparecia. Aba nova = `sessionStorage` vazio, nenhum menu aberto, nenhum
+        veu do job anterior; e custa ~1 s, contra 10-15 s de abrir e validar um Chrome.
+
+        A nova abre ANTES de a velha fechar: num contexto persistente, fechar a ultima
+        aba derruba o navegador inteiro.
+
+        O relogio do log de passo recomeca porque o total que o usuario le e "ha
+        quanto tempo ESTE job esta rodando", nao ha quanto tempo o navegador existe.
         """
+        pw, ctx, velha = s.handle
+        nova = await ctx.new_page()
+        try:
+            await velha.close()
+        except Exception:
+            pass
+        s.handle = (pw, ctx, nova)
         self._diarios[s.conta.id] = Diario(s.conta.id)
 
     async def fechar(self, s: Sessao) -> None:
