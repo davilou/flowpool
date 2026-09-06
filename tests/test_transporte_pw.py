@@ -11,6 +11,7 @@ import pytest
 
 from flowpool.nucleo.tipos import Conta, Modelo, Modo, Tier
 from flowpool.transporte.base import Estado, GeracaoFalhou, Pedido, Sessao
+from flowpool.transporte.pw import analise
 from flowpool.transporte.pw import seletores as sel
 from flowpool.transporte.pw.diario import (
     Diario, descartar_traco, guardar_traco, iniciar_traco, proximo_traco,
@@ -1547,36 +1548,52 @@ async def test_card_com_midia_esta_pronto():
     assert await _consultar(t, _CardDaGrade(midia=True, texto="um gato")) is Estado.PRONTO
 
 
-async def test_card_sem_progresso_so_falha_depois_de_insistir():
-    """Paciencia antes de desistir: card recem-criado passa instantes sem sinal.
+async def test_card_sem_progresso_so_falha_depois_do_prazo_em_segundos():
+    """Paciencia antes de desistir, POR TEMPO: card recem-criado passa instantes sem
+    sinal, e o prazo tem que ser o mesmo em qualquer ritmo de leitura.
 
-    Declarar falha na primeira leitura mataria geracao boa, que e pior do que esperar.
+    Era por numero de leituras (15). Quando o polling caiu de 5 s para 2 s, o prazo
+    caiu de 75 s para 30 s sem ninguem decidir, e toda imagem lenta virou "falhou"
+    aos 36 s (jobs 145-158, 2026-09-06).
     """
-    from flowpool.transporte.pw.transporte import VOLTAS_SEM_PROGRESSO
     t = TransportePlaywright()
+    agora = [1000.0]
+    t._relogio = lambda: agora[0]
     parado = _CardDaGrade(midia=False, texto="um gato")
-    for _ in range(VOLTAS_SEM_PROGRESSO - 1):
-        assert await _consultar(t, parado) is Estado.RODANDO
+    assert await _consultar(t, parado) is Estado.RODANDO          # marca o inicio
+    agora[0] += analise.SEM_PROGRESSO_S - 1
+    assert await _consultar(t, parado) is Estado.RODANDO
+    agora[0] += 1
     assert await _consultar(t, parado) is Estado.FALHOU
 
 
 async def test_progresso_no_meio_zera_a_paciencia():
-    """Uma porcentagem que aparece depois de leituras vazias RECOMECA a contagem.
+    """Uma porcentagem que aparece depois de leituras vazias RECOMECA o relogio.
 
-    Sem isso, um card que demora a comecar acumularia leituras vazias e seria dado por
+    Sem isso, um card que demora a comecar acumularia tempo vazio e seria dado por
     falho ja gerando — falha inventada com credito gasto.
     """
-    from flowpool.transporte.pw.transporte import VOLTAS_SEM_PROGRESSO
     t = TransportePlaywright()
+    agora = [1000.0]
+    t._relogio = lambda: agora[0]
     vazio = _CardDaGrade(midia=False, texto="um gato")
     andando = _CardDaGrade(midia=False, texto="image 12% um gato")
-    for _ in range(VOLTAS_SEM_PROGRESSO - 1):
-        await _consultar(t, vazio)
+    await _consultar(t, vazio)
+    agora[0] += analise.SEM_PROGRESSO_S - 1
     assert await _consultar(t, andando) is Estado.RODANDO
-    # a contagem zerou: agora precisa das voltas todas de novo
-    for _ in range(VOLTAS_SEM_PROGRESSO - 1):
-        assert await _consultar(t, vazio) is Estado.RODANDO
+    # o relogio zerou: precisa do prazo inteiro de novo
+    assert await _consultar(t, vazio) is Estado.RODANDO
+    agora[0] += analise.SEM_PROGRESSO_S - 1
+    assert await _consultar(t, vazio) is Estado.RODANDO
+    agora[0] += 1
     assert await _consultar(t, vazio) is Estado.FALHOU
+
+
+async def test_video_a_8_por_cento_com_miniatura_borrada_esta_rodando():
+    # MEDIDO por print em 2026-09-06 (job 189): o card de video em andamento tem
+    # <img> borrada E "8%". Olhar a midia antes da porcentagem dava PRONTO.
+    t = TransportePlaywright()
+    assert await _consultar(t, _CardDaGrade(midia=True, texto="8% The scene moves")) is Estado.RODANDO
 
 
 # --- saldo curto se reconhece ANTES do clique --------------------------------
@@ -1648,3 +1665,26 @@ async def test_sem_o_mais_na_tela_valem_as_outras_condicoes(monkeypatch):
     vazio = _PainelFalso(expandido=None, dialogos=0, visivel=False, opcoes=0, abas=0,
                          tem_mais=0)
     assert await TransportePlaywright()._esperar_seletor_midia(vazio, 1000) is False
+
+
+# ---- o estado do card e uma decisao pura, e a ordem dos sinais e a decisao ----
+
+def test_card_com_porcentagem_esta_rodando_mesmo_com_miniatura():
+    # MEDIDO 2026-09-06 (job 189): video a 8% com <img> borrada no card. Olhar a midia
+    # antes da porcentagem dava "pronto" e 22 downloads de nada.
+    assert analise.estado_do_card(False, True, True, None) == "rodando"
+
+
+def test_card_com_midia_e_sem_porcentagem_esta_pronto():
+    assert analise.estado_do_card(False, False, True, 0.0) == "pronto"
+
+
+def test_card_de_falha_e_falha_antes_de_qualquer_outro_sinal():
+    assert analise.estado_do_card(True, True, True, None) == "falhou"
+
+
+def test_card_sem_sinal_espera_por_tempo_e_nao_por_leituras():
+    assert analise.estado_do_card(False, False, False, None) == "rodando"
+    assert analise.estado_do_card(False, False, False, 35.0) == "rodando"   # 15 leituras de 2 s
+    assert analise.estado_do_card(False, False, False, 89.0) == "rodando"
+    assert analise.estado_do_card(False, False, False, 90.0) == "falhou"

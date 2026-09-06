@@ -10,6 +10,7 @@ rodando, pelos scripts de fumaca.
 from __future__ import annotations
 
 import re
+import time
 from pathlib import Path
 
 from flowpool.nucleo import tipos
@@ -70,7 +71,6 @@ MAX_REPETICOES = 4
 # recem-criado passa alguns instantes sem sinal nenhum, e o proprio Flow leva uns
 # segundos para comecar a contar a porcentagem. Desistir tarde custa so tempo de
 # polling, e o teto de dez minutos do orquestrador continua atras como rede.
-VOLTAS_SEM_PROGRESSO = 15
 
 
 def _medido(nome: str, seletor: str) -> str:
@@ -119,7 +119,10 @@ class TransportePlaywright:
         # recebem a sessao, entao o id da conta esta sempre a mao.
         self._repeticoes: dict[tuple[int, str], int] = {}
         # leituras seguidas sem sinal de progresso, por card
-        self._parado: dict[tuple[int, str], int] = {}
+        # desde quando cada card esta sem porcentagem e sem midia. O relogio entra
+        # pela porta para o teste avancar o tempo sem dormir.
+        self._relogio = time.monotonic
+        self._parado: dict[tuple[int, str], float] = {}
         # o custo que o painel anunciou na ultima configuracao
         self._ultimo_custo: int | None = None
         # `baixar` recebe so o id_remoto, e o menu de resolucao e diferente entre
@@ -1008,8 +1011,15 @@ class TransportePlaywright:
         # vez de gastar as tres tentativas do job na mesma conta seca.
         await self._exigir_botao_de_enviar(pagina, s.conta.email)
 
+        # A CONTAGEM DE CARDS E FEITA AQUI, DEPOIS DOS UPLOADS. Frame e referencia
+        # enviados VIRAM TILES na grade ("Todas as midias" mostra os envios) — MEDIDO
+        # por print em 2026-09-06: pares e trios de imagens identicas, que o usuario
+        # leu como "gerou duas imagens". Contar antes dos uploads fazia
+        # `_esperar_card_novo` voltar no instante do clique, por um tile que nao era a
+        # geracao. O `antes` do inicio de `_gerar` continua valendo so como registro.
+        antes = await pagina.locator(grade).count()
         # dois botoes contem a palavra "Criar": anexar e enviar. So a ligadura separa.
-        d.passo(f"enviando o comando ({len(p.prompt)} caracteres)")
+        d.passo(f"enviando o comando ({len(p.prompt)} caracteres; {antes} cards na grade)")
         await pagina.locator(sel.BOTAO_ENVIAR).first.click(timeout=15_000)
 
         # O CARD DECIDE, O AVISO NAO. Esta ordem estava invertida, e custou videos
@@ -1853,11 +1863,26 @@ class TransportePlaywright:
             await self._traco_da_falha(s)
             return Estado.FALHOU
 
-        if await card.locator(sel.CARD_MIDIA).count() > 0:
-            self._parado.pop((s.conta.id, id_remoto), None)
+        # A DECISAO E PURA (`analise.estado_do_card`) e a ORDEM dos sinais e a decisao:
+        # porcentagem antes de midia. MEDIDO por print em 2026-09-06 (job 189): um
+        # video a 8% ja tem uma <img> borrada no card; olhar a midia primeiro dava
+        # PRONTO e 22 tentativas de baixar um video que ainda nao existia.
+        texto = dom.seguro(await card.inner_text(timeout=10_000))
+        tem_porcentagem = re.search(sel.PADRAO_PORCENTAGEM, texto) is not None
+        tem_midia = await card.locator(sel.CARD_MIDIA).count() > 0
+        chave = (s.conta.id, id_remoto)
+        if tem_porcentagem or tem_midia:
+            self._parado.pop(chave, None)
+        else:
+            self._parado.setdefault(chave, self._relogio())
+        parado_ha = (self._relogio() - self._parado[chave]) if chave in self._parado else None
+        veredito = analise.estado_do_card(False, tem_porcentagem, tem_midia, parado_ha)
+        if veredito == "rodando":
+            return Estado.RODANDO
+        if veredito == "pronto":
             return Estado.PRONTO
 
-        # SEM MIDIA E SEM PORCENTAGEM = PAROU DE PROGREDIR.
+        # SEM MIDIA E SEM PORCENTAGEM POR `SEM_PROGRESSO_S` = PAROU DE PROGREDIR.
         #
         # O texto do card de falha da aplicacao NOVA ainda nao foi medido: varri os
         # oito projetos das cinco contas vivas e nao ha um unico card falho guardado —
@@ -1873,22 +1898,13 @@ class TransportePlaywright:
         # card nao esta indo a lugar nenhum. Nao depende de frase nenhuma, e por isso
         # sobrevive a proxima traducao do Google.
         #
-        # A PACIENCIA E O QUE TORNA ISSO SEGURO. Um card recem-criado passa alguns
-        # instantes sem midia e sem porcentagem — declarar falha ali mataria geracao
-        # boa, que e pior do que esperar. So depois de `VOLTAS_SEM_PROGRESSO` leituras
-        # seguidas sem sinal nenhum e que se desiste.
-        texto = dom.seguro(await card.inner_text(timeout=10_000))
-        if re.search(sel.PADRAO_PORCENTAGEM, texto):
-            self._parado.pop((s.conta.id, id_remoto), None)
-            return Estado.RODANDO
-
-        chave = (s.conta.id, id_remoto)
-        self._parado[chave] = vezes = self._parado.get(chave, 0) + 1
-        if vezes < VOLTAS_SEM_PROGRESSO:
-            return Estado.RODANDO
+        # A PACIENCIA E O QUE TORNA ISSO SEGURO, e ela e POR TEMPO. Era por numero de
+        # leituras (15), e quando o polling caiu de 5 s para 2 s o prazo caiu de 75 s
+        # para 30 s sem ninguem decidir isso: toda imagem lenta virava "falhou" aos
+        # 36 s e a retomada a achava pronta 4 s depois (jobs 145-158, 2026-09-06).
         self._parado.pop(chave, None)
         self._diario(s.conta.id).passo(
-            f"{id_remoto}: {vezes} leituras sem midia e sem porcentagem — o card "
+            f"{id_remoto}: {parado_ha:.0f}s sem midia e sem porcentagem — o card "
             f"parou de progredir. Texto: {texto[:120]!r}")
         await self._traco_da_falha(s)
         return Estado.FALHOU

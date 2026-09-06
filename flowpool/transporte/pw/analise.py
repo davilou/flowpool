@@ -576,3 +576,35 @@ def indice_por_sufixo(rotulos, alvo: str) -> int:
             f"modelo {alvo!r}: esperava 1 rotulo terminando nele, achei "
             f"{len(achados)} em {list(rotulos)!r}")
     return achados[0]
+
+
+# Quanto tempo um card pode ficar SEM porcentagem e SEM midia antes de ser dado como
+# parado. Por TEMPO, e nao por numero de leituras: quando o polling caiu de 5 s para
+# 2 s, "15 leituras" caiu de 75 s para 30 s e toda imagem lenta virou "Flow devolveu
+# falhou" aos 36 s — a retomada a encontrava pronta 4 s depois (jobs 145-158,
+# 2026-09-06). O prazo tem que significar a mesma coisa em qualquer ritmo de leitura.
+SEM_PROGRESSO_S = 90.0
+
+
+def estado_do_card(falhou: bool, tem_porcentagem: bool, tem_midia: bool,
+                   parado_ha_s: float | None,
+                   limite_s: float = SEM_PROGRESSO_S) -> str:
+    """O que um card e, dado o que se le nele. Devolve 'falhou' | 'rodando' | 'pronto'.
+
+    A ORDEM E O CONTEUDO DA DECISAO. Porcentagem vem ANTES da midia: um card de video
+    em andamento tem miniatura borrada (um <img>) e "8%" ao mesmo tempo — MEDIDO por
+    print em 2026-09-06, job 189 —, e olhar a midia primeiro dava "pronto" para um
+    video a 8%, que virava 22 tentativas de baixar uma coisa que nao existia.
+
+    `parado_ha_s` e ha quanto tempo o card esta sem nenhum dos dois sinais (`None` =
+    acabou de ficar assim). So passa de `limite_s` e que se desiste.
+    """
+    if falhou:
+        return "falhou"
+    if tem_porcentagem:
+        return "rodando"
+    if tem_midia:
+        return "pronto"
+    if parado_ha_s is not None and parado_ha_s >= limite_s:
+        return "falhou"
+    return "rodando"
