@@ -1035,6 +1035,14 @@ class TransportePlaywright:
                 return
             raise GeracaoFalhou(f"modo {p.modo.value} sem arquivo para anexar")
 
+        # FRAMES TEM OUTRA BARRA, e por isso outro caminho. MEDIDO 2026-09-05: em modo
+        # Frames a barra do prompt vira `flow-ingredient-bar` com os slots `inicio` e
+        # `fim`, e o `flow-add-menu` fica SEM botao clicavel. Era isso que matava
+        # `frames2v` com "waiting for locator(flow-add-menu button)" — o `+` do anexo
+        # comum nao existe la.
+        if p.modo is Modo.FRAMES2V:
+            return await self._anexar_frames(pagina, arquivos, d)
+
         await self._limpar_referencias(pagina)
 
         # O ENVIO VIRA UMA TACADA SO. Na aplicacao antiga havia uma volta completa do
@@ -1066,6 +1074,50 @@ class TransportePlaywright:
         # conferindo a conta. Cada ficha carrega o id da midia (MEDIDO 21/08), entao
         # da para comparar identidade em vez de numero.
         analise.exigir_referencias_completas(await self._ids_anexados(pagina), esperados)
+
+    async def _anexar_frames(self, pagina, arquivos: list[str], d: Diario) -> None:
+        """Poe o frame inicial (e o final, se houver) nos slots da barra de frames.
+
+        `arquivos` vem de `analise.arquivos_do_pedido`, que em FRAMES2V devolve
+        [frame_inicial, frame_final] nessa ordem — o final e opcional.
+
+        A ORDEM DOS SLOTS E POSICIONAL, e a conferencia e o que torna isso seguro: a
+        barra tem exatamente dois slots, e cada um e conferido depois de preenchido.
+        Sem conferir, seria o mesmo tipo de aposta que ja mandou video para a lixeira.
+        """
+        slots = pagina.locator(sel.SLOT_FRAME)
+        quantos = await slots.count()
+        if quantos != 2:
+            raise GeracaoFalhou(
+                f"a barra de frames deveria ter 2 slots (inicio e fim), tem {quantos}")
+
+        for n, arquivo in enumerate(arquivos[:2]):
+            qual = "inicio" if n == 0 else "fim"
+            d.passo(f"frame {qual}: {Path(arquivo).name}")
+            quanto = d.cronometro()
+            await slots.nth(n).click(timeout=15_000)
+            # O SLOT ABRE OUTRO SELETOR — sem abas. Ver `BOTAO_UPLOAD_FRAME`: o painel
+            # do `+` tem 7 abas, este nao tem nenhuma, e exigir abas aqui reprovava um
+            # painel aberto ("o slot inicio nao abriu o seletor de midia").
+            pronto = await self._esperar(
+                pagina, lambda: self._tem(pagina, sel.BOTAO_UPLOAD_FRAME), d,
+                f"o seletor do slot {qual}", teto_ms=30_000)
+            if not pronto:
+                raise GeracaoFalhou(f"o slot {qual} nao abriu o seletor de midia")
+            novos = await self._enviar_no_seletor_aberto(pagina, [arquivo], d)
+            await self._incluir_do_acervo(pagina, novos[0], d)
+            d.passo(f"frame {qual} posto em {quanto():.1f}s")
+
+        # CONFERE que cada slot ficou com alguma coisa. A identidade por slot ainda nao
+        # e conferivel — falta medir o que a ficha do slot expoe —, entao esta e uma
+        # conferencia FRACA, e o comentario existe para nao passar por forte.
+        cheios = await pagina.evaluate(
+            "(s) => [...document.querySelectorAll(s)]"
+            ".map(e => e.querySelectorAll('img, video').length)", sel.SLOT_FRAME)
+        pedidos = len(arquivos[:2])
+        if sum(1 for c in cheios if c) < pedidos:
+            raise GeracaoFalhou(
+                f"pedi {pedidos} frame(s) e os slots mostram {cheios}")
 
     async def _limpar_referencias(self, pagina) -> None:
         """Zera o rascunho antes de anexar. Referencia herdada e geracao errada.
@@ -1113,13 +1165,26 @@ class TransportePlaywright:
             isso que fez duas referencias virarem a mesma foto na aplicacao antiga
         """
         await self._abrir_seletor_midia(pagina, d)
+        return await self._enviar_no_seletor_aberto(pagina, arquivos, d)
 
+    async def _enviar_no_seletor_aberto(self, pagina, arquivos: list[str],
+                                        d: Diario) -> list[dict]:
+        """A parte do envio que supoe o seletor de midia JA ABERTO.
+
+        Existe separada porque o modo FRAMES chega aqui por outro caminho: la o
+        seletor e aberto pelo slot `inicio`/`fim`, e nao pelo `+`.
+        """
         antes = await self._acervo_assentado(pagina, d)
         ids_antes = {i for i in (analise.id_da_midia(x.get("src")) for x in antes) if i}
         nomes = {Path(a).name for a in arquivos}
 
+        # o painel do `+` traz "upload / enviar midia"; o do slot de frame traz so
+        # "upload". `has-text("upload")` casa os dois, e e o unico que casa os dois.
+        botao = (sel.BOTAO_UPLOAD_FRAME
+                 if await pagina.locator(sel.BOTAO_ENVIAR_MIDIA).count() == 0
+                 else sel.BOTAO_ENVIAR_MIDIA)
         async with pagina.expect_file_chooser(timeout=30_000) as espera:
-            await self._clicar_unico(pagina, sel.BOTAO_ENVIAR_MIDIA, "enviar midia")
+            await self._clicar_unico(pagina, botao, "enviar midia")
         seletor = await espera.value
         await seletor.set_files(arquivos)
 
@@ -1166,6 +1231,10 @@ class TransportePlaywright:
             gasto += cada
             d.esperando(o_que)
         return False
+
+    @staticmethod
+    async def _tem(pagina, seletor: str) -> bool:
+        return await pagina.locator(seletor).count() > 0
 
     async def _acervo_assentado(self, pagina, d: Diario) -> list[dict]:
         """O retrato do acervo, SO depois de a lista parar de mudar.
@@ -1291,6 +1360,9 @@ class TransportePlaywright:
         """
         gasto = 0
         while gasto < teto_ms:
+            # sem `+` na tela (modo FRAMES) nao ha interruptor para esperar
+            if await pagina.locator(sel.BOTAO_ANEXAR).count() == 0:
+                return True
             if await pagina.locator(sel.BOTAO_ANEXAR).first.get_attribute(
                     sel.ATRIBUTO_ANEXAR) == sel.ANEXAR_FECHADO:
                 return True
@@ -1341,10 +1413,23 @@ class TransportePlaywright:
         alguem quiser esse tempo de volta, o caminho e medir o LENTO, nao encurtar o
         teto e torcer.
         """
+        # O `+` NAO EXISTE EM TODO MODO. MEDIDO 2026-09-05: em FRAMES a barra vira
+        # `flow-ingredient-bar` com os slots `inicio`/`fim`, e `flow-add-menu` fica sem
+        # botao clicavel. Ler `aria-expanded` dele ali estoura com
+        #     TimeoutError: waiting for locator("flow-add-menu button")
+        # — e o erro fala do `+` quando o fato e que aquele modo nao tem `+`.
+        #
+        # Sem o `+`, sobram as outras duas condicoes, que ja bastam: o overlay visivel
+        # E as abas montadas. O `aria-expanded` continua valendo onde existe, porque e
+        # ele que exclui o painel que esta SAINDO de cena pela animacao.
         gasto = 0
         while gasto < teto_ms:
-            if (await pagina.locator(sel.BOTAO_ANEXAR).first.get_attribute(
+            tem_mais = await pagina.locator(sel.BOTAO_ANEXAR).count() > 0
+            declarado = True
+            if tem_mais:
+                declarado = await pagina.locator(sel.BOTAO_ANEXAR).first.get_attribute(
                     sel.ATRIBUTO_ANEXAR) == sel.ANEXAR_ABERTO
+            if (declarado
                     and await pagina.locator(sel.SELETOR_MIDIA).count() > 0
                     and await pagina.locator(sel.SELETOR_MIDIA).first.is_visible()
                     and await pagina.locator(sel.ABAS_SELETOR_MIDIA).count() > 0):

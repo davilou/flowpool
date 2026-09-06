@@ -144,6 +144,43 @@ AGENTE_DESLIGADO = "false"
 BOTAO_TIRAR_REFERENCIA = f'{BARRA_PROMPT} button:has-text("cancel")'
 BOTAO_APAGAR_COMANDO = PENDENTE    # o `close` existe, mas o efeito dele não foi medido
 
+# --------------------------------------------------------- frames: início e fim
+#
+# MEDIDO 2026-09-05: em modo FRAMES a barra do prompt troca de forma. Entra um
+# `flow-ingredient-bar` com TRÊS botões — `início`, `swap_horiz` (troca os dois) e
+# `fim` — e o `flow-add-menu` fica SEM botão clicável.
+#
+# Era isso que fazia `frames2v` morrer com
+#     TimeoutError: waiting for locator("flow-add-menu button")
+# — o `+` do anexo comum simplesmente não existe ali.
+#
+# A ESCOLHA É POR POSIÇÃO, e isso normalmente seria erro. Aqui é aceitável por três
+# razões, e só com as três juntas: a barra tem exatamente dois slots, o do meio se
+# identifica por ligadura (`swap_horiz`, que não é traduzida), e o resultado é
+# CONFERIDO depois — cada slot tem que mostrar o arquivo que se pediu. Sem a
+# conferência, isto seria o mesmo `.last` que já mandou vídeo para a lixeira.
+#
+# Casar por texto não serve: o rótulo é traduzido e acentuado ("Início"), e
+# `has-text` é sensível a acento.
+BARRA_INGREDIENTES = "flow-ingredient-bar"
+SLOT_FRAME = 'flow-ingredient-bar button:not(:has-text("swap_horiz"))'
+BOTAO_TROCAR_FRAMES = 'flow-ingredient-bar button:has-text("swap_horiz")'
+
+# O SLOT ABRE OUTRO SELETOR DE MIDIA, e nao o do `+`. MEDIDO 2026-09-05 clicando em
+# `inicio`: abre um overlay com 4 botoes, NENHUMA aba, filtro de tipo, busca e
+# `upload` — algo como
+#     ["teste skill", "close", "image", "imagens", "arrow_drop_down", "search",
+#      "upload", "e511c628ec3c92a4.png"]
+#
+# O seletor do `+` tem 7 ABAS; este nao tem nenhuma. Exigir abas aqui reprovava um
+# painel que estava aberto — foi o "o slot inicio nao abriu o seletor de midia".
+#
+# O sinal de montado e o botao `upload`: ele existe com acervo cheio E VAZIO, que e a
+# mesma razao pela qual as abas servem no outro painel. Contar itens nao serve, pela
+# regra de sempre: acervo vazio e estado legitimo.
+# literal e nao `OVERLAY`: esta secao vem ANTES da definicao dele no arquivo
+BOTAO_UPLOAD_FRAME = '.cdk-overlay-pane button:has-text("upload")'
+
 # ----------------------------------------------------------------- anexar / mídia
 #
 # MEDIDO: o `+` vive em `flow-add-menu`. O painel que ele abre é um overlay do CDK.

@@ -1311,13 +1311,16 @@ def test_sem_menu_nenhum_e_espere_mais():
 class _PainelFalso:
     """Uma tela com o seletor de midia em algum estado. So conta e le atributo."""
 
-    def __init__(self, expandido, dialogos, visivel, opcoes, abas):
+    def __init__(self, expandido, dialogos, visivel, opcoes, abas, tem_mais=1):
+        # `tem_mais` = quantos `+` existem na tela. MEDIDO: em modo FRAMES a barra vira
+        # `flow-ingredient-bar` e o `+` some — ler `aria-expanded` dele ali estoura.
         self.estado = {
-            sel.BOTAO_ANEXAR: expandido,
+            sel.BOTAO_ANEXAR: tem_mais,
             sel.SELETOR_MIDIA: (dialogos, visivel),
             sel.ITEM_MIDIA: opcoes,
             sel.ABAS_SELETOR_MIDIA: abas,
         }
+        self.expandido = expandido
         self.voltas = 0
 
     def locator(self, seletor):
@@ -1345,7 +1348,7 @@ class _LocPainel:
 
     async def get_attribute(self, nome):
         assert nome == sel.ATRIBUTO_ANEXAR
-        return self.painel.estado[sel.BOTAO_ANEXAR]
+        return self.painel.expandido
 
 
 async def test_painel_aberto_com_acervo_VAZIO_esta_pronto():
@@ -1625,3 +1628,23 @@ async def test_com_botao_de_enviar_segue_em_frente():
             return 1 if seletor == sel.BOTAO_ENVIAR else 0
 
     await TransportePlaywright()._exigir_botao_de_enviar(_Ok(), "a@b.com")
+
+
+async def test_sem_o_mais_na_tela_valem_as_outras_condicoes(monkeypatch):
+    """Em modo FRAMES o `+` nao existe, e ler `aria-expanded` dele estoura.
+
+    MEDIDO 2026-09-05: a barra vira `flow-ingredient-bar` com os slots inicio/fim, e
+    `flow-add-menu` fica sem botao clicavel. `frames2v` morria com
+        TimeoutError: waiting for locator("flow-add-menu button")
+    — erro que fala do `+` quando o fato e que aquele modo nao tem `+`.
+
+    Sem ele, sobram o overlay visivel e as abas montadas, que ja bastam.
+    """
+    pronto = _PainelFalso(expandido=None, dialogos=1, visivel=True, opcoes=0, abas=7,
+                          tem_mais=0)
+    assert await TransportePlaywright()._esperar_seletor_midia(pronto, 1500) is True
+
+    # e o painel AUSENTE continua reprovando, com ou sem `+`
+    vazio = _PainelFalso(expandido=None, dialogos=0, visivel=False, opcoes=0, abas=0,
+                         tem_mais=0)
+    assert await TransportePlaywright()._esperar_seletor_midia(vazio, 1000) is False
