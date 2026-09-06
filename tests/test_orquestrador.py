@@ -1014,3 +1014,63 @@ def test_teto_invalido_nao_derruba_o_servico(monkeypatch):
     assert teto_do_ambiente() == MAX_SIMULTANEOS
     monkeypatch.setenv("FLOWPOOL_MAX_SIMULTANEOS", "0")
     assert teto_do_ambiente() == 1
+
+
+# --- download que falha nao gasta tentativa, mas tem teto --------------------
+
+
+class _TransporteQueNaoBaixa(TransporteFalso):
+    """Gera bem e falha SO no download — o caso medido em 2026-09-05."""
+
+    def __init__(self, *a, falhas=99, **kw):
+        super().__init__(*a, **kw)
+        self.falhas = falhas
+        self.tentativas_de_download = 0
+
+    async def baixar(self, s, id_remoto, destino):
+        self.tentativas_de_download += 1
+        if self.tentativas_de_download <= self.falhas:
+            raise RuntimeError("TargetClosedError: Download.path")
+        return await super().baixar(s, id_remoto, destino)
+
+
+async def test_download_que_falha_nao_gasta_tentativa_do_job(repo, tmp_path):
+    """O video JA existe e JA foi pago quando se chega no download.
+
+    Gastar tentativa ali joga fora o job inteiro por uma falha DEPOIS da cobranca.
+    """
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 200; repo.salvar_conta(c)
+    jid = repo.criar_job(job_fast())
+    t = _TransporteQueNaoBaixa(saldos={cid: 200}, falhas=1)
+
+    await ciclo(Orquestrador(repo, t, raiz=tmp_path))
+
+    assert repo.job(jid).tentativas == 0
+    assert t.tentativas_de_download == 1
+
+
+async def test_download_que_nunca_funciona_desiste_e_diz_onde_esta_o_video(repo, tmp_path):
+    """Sem teto isto vira laco quente: navegador abrindo e fechando para sempre."""
+    from flowpool.motor.orquestrador import MAX_DOWNLOADS
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 5000; repo.salvar_conta(c)
+    jid = repo.criar_job(job_fast())
+    t = _TransporteQueNaoBaixa(saldos={cid: 5000}, falhas=999)
+
+    orq = Orquestrador(repo, t, raiz=tmp_path)
+    for _ in range(MAX_DOWNLOADS * 3 + 5):
+        if repo.job(jid).estado is EstadoJob.FALHOU:
+            break
+        c = repo.conta(cid); c.saldo = 5000; c.seca_ate = None; repo.salvar_conta(c)
+        await ciclo(orq)
+
+    final = repo.job(jid)
+    assert final.estado is EstadoJob.FALHOU
+    # o teto vale para as repeticoes QUE NAO GASTAM TENTATIVA. Depois dele o job
+    # falha de verdade, e as tentativas restantes ainda tocam o download uma vez cada
+    # antes de morrer — dai o `+ 3`. O que importa e ser LIMITADO: sem o teto isto
+    # abriria navegador para sempre.
+    assert t.tentativas_de_download <= MAX_DOWNLOADS + 3
+    # a mensagem tem que dizer que o video existe — senao o usuario refaz e paga de novo
+    assert final.erro and "ja foi pago" in final.erro

@@ -42,6 +42,17 @@ ESPERA_JANELA = timedelta(seconds=30)
 # de ambiente existe para isso.
 MAX_SIMULTANEOS = 5
 
+# Quantas vezes repetir SO O DOWNLOAD antes de desistir do job.
+#
+# MEDIDO 2026-09-05: o download de video derruba o Chrome de forma intermitente — 1
+# sucesso em 3 no mesmo arquivo. Como o video ja existe e ja foi pago quando se chega
+# aqui, repetir custa tempo e um navegador, e desistir custa o job inteiro.
+#
+# Com ~1/3 de sucesso, 8 tentativas dao ~96% de chance de pelo menos uma passar. O teto
+# existe porque sem ele isto vira laco quente: um download que nunca funciona abriria e
+# fecharia navegador para sempre.
+MAX_DOWNLOADS = 8
+
 
 def teto_do_ambiente(padrao: int = MAX_SIMULTANEOS) -> int:
     """Le `FLOWPOOL_MAX_SIMULTANEOS`, caindo no padrao quando o valor nao serve.
@@ -94,6 +105,8 @@ class Orquestrador:
         self._rodando = False
         # ids de conta com navegador aberto agora — por geracao ou por leitura de saldo
         self._ocupadas: set[int] = set()
+        # downloads que falharam por job — nao gastam tentativa, mas tem teto
+        self._downloads_falhos: dict[int, int] = {}
         self._tarefas: set[asyncio.Task] = set()
 
     # ------------------------------------------------------------- o que o painel ve
@@ -472,8 +485,45 @@ class Orquestrador:
                 raise GeracaoFalhou(f"Flow devolveu {estado.value}")
 
             destino = self.raiz / job.destino / f"{job.nome}{_extensao(job.modo)}"
-            arquivo = await self.transporte.baixar(sessao, job.id_remoto, destino)
+            try:
+                arquivo = await self.transporte.baixar(sessao, job.id_remoto, destino)
+            except Exception as e:
+                # BAIXAR DE NOVO NAO GASTA TENTATIVA — o video JA existe e JA foi pago.
+                #
+                # MEDIDO 2026-09-05: o download de video derruba o Chrome de forma
+                # intermitente (1 sucesso em 3 no mesmo arquivo). O Flow navega a
+                # propria pagina para a URL do arquivo, e o navegador morre antes de
+                # `path()`/`save_as`. Aba de guarda, pagina real de guarda, `traco`
+                # desligado e `downloads_path` foram todos medidos e nenhum eliminou a
+                # intermitencia — a causa raiz continua sem explicacao.
+                #
+                # A conta que resolve e outra: gastar tentativa aqui joga fora o job
+                # inteiro por uma falha DEPOIS da cobranca. Repetir so o download custa
+                # tempo e um navegador — o mesmo raciocinio de `conta_seca`.
+                vezes = self._downloads_falhos.get(job.id, 0) + 1
+                self._downloads_falhos[job.id] = vezes
+                self.repo.registrar_evento(
+                    job.id, conta.id, "download_falhou",
+                    json.dumps({"erro": f"{type(e).__name__}: {e}", "vezes": vezes}))
+                # TETO. Sem ele isto vira laco quente: um download que nunca funciona
+                # abriria e fecharia navegador para sempre, sem gastar tentativa e sem
+                # nunca desistir. Chegando aqui, a falha e de verdade e o job para —
+                # com o video ainda la, e a mensagem dizendo isso.
+                if vezes >= MAX_DOWNLOADS:
+                    # NAO zera o contador. Zerando, a tentativa seguinte do job
+                    # recomecaria a contagem e o teto viraria MAX_DOWNLOADS vezes o
+                    # numero de tentativas — 24 aberturas de navegador para um
+                    # download que nunca vai funcionar.
+                    raise GeracaoFalhou(
+                        f"o download falhou {vezes} vezes seguidas. O video EXISTE na "
+                        f"conta {conta.email} (card {job.id_remoto}) e ja foi pago — "
+                        f"da para baixar na mao. Ultimo erro: {type(e).__name__}: {e}"
+                    ) from e
+                job.reavaliar_em = None
+                self._devolver(job, f"{type(e).__name__}: {e}", gasta_tentativa=False)
+                return
 
+            self._downloads_falhos.pop(job.id, None)
             job.arquivo = str(arquivo)
             job.estado = EstadoJob.PRONTO
             job.erro = None
