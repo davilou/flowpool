@@ -105,15 +105,22 @@ DURACOES = ("4s", "6s", "8s", "10s")
 DURACAO_PADRAO = "4s"
 
 
-# Modos cujo painel do Flow NAO tem grupo de duracao.
+# Modos que nao tem grupo de duracao no painel do Flow.
 #
-# `IMAGEM` sempre foi um deles. `FRAMES2V` entrou em 2026-08-21, MEDIDO por print do
-# painel aberto em Frames: ele tem `Imagem|Video`, `Frames|Elementos`, proporcao,
-# dropdown de modelo e quantidade — e mais nada. O chip confirma, escrevendo
-# "Video . 720p . x1" onde os outros modos escrevem "Video . 720p . 4s . 9:16 x1".
+# A EXPLICACAO CERTA E OUTRA, e so apareceu em 2026-09-05: o grupo de duracao (e o de
+# resolucao) pertence ao MODELO, nao ao modo. Medido no mesmo painel, em Frames:
 #
-# Sem esta lista o transporte procurava o botao "4s" num painel que nao o tem, a
-# auto-cura era acionada, e a geracao de first/last frame nunca saia do lugar.
+#     Frames + Omni Flash    -> tem duracao e resolucao
+#     Frames + Veo 3.1 Lite  -> NAO tem nenhum dos dois
+#
+# `FRAMES2V` continua aqui porque ele so aceita Veo Lite (ver `MODELOS_DO_MODO`), e o
+# Veo Lite nao oferece duracao. Ou seja: a lista acerta o caso real, mas pela razao do
+# MODELO — e um `frames2v` que passasse a aceitar outro modelo precisaria sair daqui.
+#
+# Quem trata isso de verdade e o transporte, em `_opcao_se_existir`: ele pula o grupo
+# quando ele nao esta na tela, em vez de exigir um botao ausente. Sem isso a geracao
+# quebrava, e a auto-cura ainda tentava "consertar" a ausencia — chegou a mapear
+# `DURACAO[8s]` para o botao de PROPORCAO.
 SEM_DURACAO = (Modo.IMAGEM, Modo.FRAMES2V)
 
 

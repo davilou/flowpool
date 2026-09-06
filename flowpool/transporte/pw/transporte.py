@@ -442,6 +442,32 @@ class TransportePlaywright:
                     f"{tentativas})")
         return False
 
+    async def _opcao_se_existir(self, painel, pagina, mapa: dict, chave, o_que: str,
+                                d: Diario):
+        """Escolhe `chave` no grupo, SE o grupo existir. Devolve o que foi escolhido.
+
+        Devolve `None` quando o grupo inteiro nao esta no painel — e isso e estado
+        legitimo, nao seletor quebrado. MEDIDO 2026-09-05: os grupos de DURACAO e
+        RESOLUCAO pertencem ao MODELO. Em Frames com Omni Flash os dois aparecem; com
+        Veo 3.1 Lite, nenhum dos dois.
+
+        A diferenca entre "ausente" e "quebrado" importa por dois motivos:
+        `_clicar_unico` levantaria erro numa configuracao correta, e a AUTO-CURA
+        tentaria consertar a ausencia — foi o que aconteceu, e ela mapeou
+        `RESOLUCAO[720p]` e `DURACAO[8s]` para o botao de PROPORCAO.
+        """
+        await self._garantir_painel(pagina, d)
+        # o grupo existe se QUALQUER opcao dele estiver na tela
+        for valor, seletor in mapa.items():
+            if await painel.locator(seletor).count() > 0:
+                break
+        else:
+            d.passo(f"o modelo escolhido nao oferece {o_que}; o Flow decide")
+            return None
+        await self._clicar_unico(painel, mapa[chave], o_que)
+        await self._garantir_painel(pagina, d)
+        return chave
+
     @staticmethod
     async def _marcados_no_painel(pagina) -> list[str]:
         """O que o painel declara SELECIONADO agora, por `aria-checked`.
@@ -744,18 +770,22 @@ class TransportePlaywright:
         await self._clicar_unico(painel, sel.PROPORCAO[p.proporcao], "proporcao")
         await self._garantir_painel(pagina, d)
 
-        # RESOLUCAO — grupo que a aplicacao antiga nao tinha.
+        # RESOLUCAO — grupo que a aplicacao antiga nao tinha, e que NEM SEMPRE EXISTE.
         #
-        # MEDIDO 2026-09-05: o painel de video ganhou [360p] [720p], e o padrao do Flow
-        # e 360p. A aplicacao antiga sempre entregou 720p porque era o unico valor que
-        # existia. Sem tocar aqui, TODO video passaria a sair em 360p sem ninguem pedir
-        # — uma piora silenciosa de qualidade, que e o pior tipo.
+        # MEDIDO 2026-09-05: o painel de video ganhou [360p] [720p], com 360p de padrao.
+        # A aplicacao antiga sempre entregou 720p porque era o unico valor. Sem tocar
+        # aqui, todo video sairia em 360p sem ninguem pedir — piora silenciosa, o pior
+        # tipo.
         #
-        # Imagem nao tem o grupo.
+        # MAS O GRUPO PERTENCE AO MODELO, NAO AO MODO. Medido no mesmo painel, em
+        # Frames: com Omni Flash ha duracao e resolucao; trocando para Veo 3.1 Lite,
+        # OS DOIS GRUPOS SOMEM. Exigir o botao ali quebrava a geracao — e pior, a
+        # auto-cura tentava "consertar" a ausencia e mapeou `RESOLUCAO[720p]` para o
+        # botao de PROPORCAO. Ausencia legitima nao e seletor quebrado.
+        resolucao = None
         if p.modo is not Modo.IMAGEM:
-            await self._clicar_unico(
-                painel, sel.RESOLUCAO[RESOLUCAO_VIDEO], "resolucao")
-            await self._garantir_painel(pagina, d)
+            resolucao = await self._opcao_se_existir(
+                painel, pagina, sel.RESOLUCAO, RESOLUCAO_VIDEO, "resolucao", d)
         # `None` nos modos SEM grupo de duracao no painel, onde procurar o botao
         # derrubaria a geracao inteira. Eram so imagem; FRAMES2V entrou em 2026-08-21.
         #
@@ -775,8 +805,8 @@ class TransportePlaywright:
         # continua valendo so para IMAGEM.
         duracao = None if p.modo is Modo.IMAGEM else p.duracao
         if duracao:
-            await self._garantir_painel(pagina, d)
-            await self._clicar_unico(painel, sel.DURACAO[duracao], "duracao")
+            duracao = await self._opcao_se_existir(
+                painel, pagina, sel.DURACAO, duracao, "duracao", d)
         await self._garantir_painel(pagina, d)
         await self._clicar_unico(painel, sel.QUANTIDADE[p.quantidade], "quantidade")
         await self._garantir_painel(pagina, d)
@@ -804,12 +834,15 @@ class TransportePlaywright:
         # Cada item pedido tem que aparecer entre os `aria-checked=true`. O chip
         # continua sendo lido, mas como LOG: ele resume bem para o humano e omite
         # coisas para a maquina (o modelo nunca aparece la).
+        # so se exige o que o painel OFERECEU. `_opcao_se_existir` devolve None quando
+        # o grupo nao existe naquele modelo, e cobrar um botao ausente reprovaria uma
+        # configuracao que esta correta.
         exigidos = [sel.MODO_ICONE[modo], sel.LIGADURA_PROPORCAO[p.proporcao],
                     f"x{p.quantidade}"]
         if duracao:
             exigidos.append(duracao)
-        if p.modo is not Modo.IMAGEM:
-            exigidos.append(RESOLUCAO_VIDEO)
+        if resolucao:
+            exigidos.append(resolucao)
         juntos = " | ".join(marcados)
         faltando = [e for e in exigidos if e not in juntos]
         if faltando:
