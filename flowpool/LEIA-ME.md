@@ -47,6 +47,16 @@ o detalhe traz a mensagem inteira, uma explicação do que fazer para os erros c
 (download que perde o arquivo, portão de idade, sessão caída, perfil ocupado) e a
 **linha do tempo de eventos** do job (`GET /jobs/{id}/eventos`).
 
+**Diagnóstico automático.** Quando um job falha de vez, o motor pergunta ao modelo de
+visão local (o mesmo llama.cpp da auto-cura, `FLOWPOOL_CURA_URL`) o que aconteceu, com
+o erro, os eventos, o log de passos e o print da tela; a resposta aparece no detalhe do
+job. Ele diagnostica, **não conserta**: a auto-cura acertou 0 de 2 quando agiu sozinha.
+`FLOWPOOL_DIAGNOSTICO=0` desliga; o botão "pedir/refazer" chama
+`POST /jobs/{id}/diagnosticar`.
+
+**Modelo de imagem padrão: Nano Banana 2** (ilimitado). `nano-banana` é o Pro, que tem
+cota; `nano-banana-2-lite` também existe. Todos custam zero crédito.
+
 **Contas** — cadastrar uma conta nova, revalidar sessão caída, ler o saldo, ativar e
 desativar, e trocar tier e proxy (na gaveta que abre ao clicar na linha). Cada linha
 mostra e-mail, tier, saldo, saúde da sessão e o proxy (sempre mascarado: a senha nunca

@@ -24,6 +24,7 @@ Cliente e configuracao sao os MESMOS da cura: `FLOWPOOL_CURA_URL`, `FLOWPOOL_CUR
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import os
@@ -38,6 +39,7 @@ from flowpool.transporte.pw.cura import PADRAO_MODELO, PADRAO_URL
 # O modelo de 27B pode levar meio minuto so para carregar na placa que o ComfyUI
 # disputa. O diagnostico corre em segundo plano e nunca segura a fila.
 TIMEOUT_S = 300.0
+PAUSA_ENTRE_TENTATIVAS_S = 15.0
 
 DESLIGADO = {"0", "nao", "não", "off", "false", "desligado"}
 
@@ -152,14 +154,27 @@ class DiagnosticadorLocal:
                          {"role": "user", "content": conteudo}],
         }
         cabecalhos = {"Authorization": f"Bearer {self.chave}"} if self.chave else {}
-        async with httpx.AsyncClient(timeout=self.timeout_s) as cliente:
-            r = await cliente.post(f"{self.url}/chat/completions", json=corpo,
-                                   headers=cabecalhos)
-            r.raise_for_status()
-            dados = r.json()
-        escolhas = dados.get("choices") or [{}]
-        mensagem = escolhas[0].get("message") or {}
-        return limpar_resposta(mensagem.get("content") or "")
+        # DUAS tentativas, com pausa. MEDIDO 2026-09-06: o primeiro diagnostico real
+        # tomou 502 porque OUTRO processo da maquina chamou `/api/models/unload` no
+        # llama-swap enquanto a resposta era gerada ("connection forcibly closed"). A
+        # placa e compartilhada com o ComfyUI e com scripts do usuario; uma segunda
+        # tentativa depois de a poeira baixar e barata, e o diagnostico nao e urgente.
+        ultimo: Exception | None = None
+        for tentativa in range(2):
+            if tentativa:
+                await asyncio.sleep(PAUSA_ENTRE_TENTATIVAS_S)
+            try:
+                async with httpx.AsyncClient(timeout=self.timeout_s) as cliente:
+                    r = await cliente.post(f"{self.url}/chat/completions", json=corpo,
+                                           headers=cabecalhos)
+                    r.raise_for_status()
+                    dados = r.json()
+                escolhas = dados.get("choices") or [{}]
+                mensagem = escolhas[0].get("message") or {}
+                return limpar_resposta(mensagem.get("content") or "")
+            except (httpx.HTTPError, ValueError) as e:
+                ultimo = e
+        raise RuntimeError(f"o modelo local nao respondeu em 2 tentativas: {ultimo}")
 
 
 def _job_como_dict(job) -> dict:
