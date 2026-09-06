@@ -500,6 +500,9 @@ def criar_app(repo: Repo, transporte: FlowTransport, raiz: Path | str,
             raise HTTPException(
                 409, f"{c.email} esta gerando agora; espere a geracao terminar para "
                      "revalidar a sessao")
+        # o motor pode estar guardando um Chrome ocioso neste perfil; o Chrome de
+        # login nao coexiste com ele
+        await orq.encerrar_sessao(c.id)
         # revalidar E cadastrar: mesmo perfil, mesmo Chrome, mesmas duas telas. A
         # sessao expira em ~48h medidas, entao isto vira rotina, nao excecao. E pelo
         # MESMO proxy: revalidar por outro IP e o unico jeito de a conta trocar de IP
@@ -540,6 +543,9 @@ def criar_app(repo: Repo, transporte: FlowTransport, raiz: Path | str,
             raise HTTPException(
                 409, f"{c.email} esta gerando agora; abrir o Chrome no mesmo perfil "
                      "derrubaria a geracao. Espere ela terminar")
+        # sessao guardada pelo motor neste perfil fecha antes: o Chrome comum
+        # entregaria a URL ao Chrome do Playwright e morreria, sem janela nenhuma
+        await orq.encerrar_sessao(c.id)
         try:
             # `to_thread` porque `checar_chrome` toca o disco e `Popen` pode bloquear
             # alguns milissegundos: fora do event loop, que e compartilhado com o motor
@@ -651,6 +657,7 @@ def criar_app(repo: Repo, transporte: FlowTransport, raiz: Path | str,
             gerando=orq.gerando,
             max_simultaneos=orq.max_simultaneos,
             contas_ocupadas=orq.contas_ocupadas,
+            sessoes_ociosas=orq.sessoes_ociosas,
             credito_total=sum(c.saldo for c in vivas),
             fila_pendente=len(repo.jobs(EstadoJob.PENDENTE)),
             contas_expiradas=[c.email for c in contas if c.saude is SaudeSessao.EXPIRADA],

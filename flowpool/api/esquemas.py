@@ -418,6 +418,9 @@ class Saude(BaseModel):
     # Contas com navegador aberto. Passa de `gerando` por um quando alguma leitura de
     # saldo esta acontecendo — ela tambem abre navegador e tambem toma a conta.
     contas_ocupadas: int
+    # Navegadores abertos SEM job: o motor guarda a sessao entre jobs da mesma conta
+    # por alguns minutos, porque abrir e validar um Chrome custa 10-15 s por job.
+    sessoes_ociosas: int = 0
     credito_total: int
     fila_pendente: int
     contas_expiradas: list[str]

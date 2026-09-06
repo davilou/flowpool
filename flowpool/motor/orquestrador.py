@@ -13,7 +13,8 @@ from flowpool.nucleo.credito import LIMIAR_DIVERGENCIA, liberar, reconciliar, re
 from flowpool.nucleo.escolha import apta, escolher
 from flowpool.nucleo.tipos import Conta, EstadoJob, Job, Modo, SaudeSessao
 from flowpool.transporte.base import (
-    Estado, FlowTransport, GeracaoFalhou, Pedido, SaldoInsuficiente, SessaoMorta,
+    Estado, FlowTransport, GeracaoFalhou, Pedido, SaldoInsuficiente, Sessao,
+    SessaoMorta,
 )
 
 MAX_TENTATIVAS = 3
@@ -30,6 +31,18 @@ INTERVALO_POLLING = 2.0
 # minutos. Adiar por uma hora um job que so esbarrou numa janela ocupada deixaria o
 # pool ocioso com a fila cheia.
 ESPERA_JANELA = timedelta(seconds=30)
+
+# Quanto tempo o navegador de uma conta fica aberto, OCIOSO, esperando o proximo job.
+#
+# Abrir o Chrome, navegar ate o Flow, validar pelo avatar e fechar tudo custava 10 a
+# 15 s por job — mais da metade do envelope de um job de imagem de 50 s (medido
+# 2026-09-06), e o preco inteiro de cada retomada. Guardar a sessao entre jobs da
+# mesma conta paga isso uma vez por rajada, nao uma vez por job.
+#
+# Tres minutos, e nao "para sempre": cada Chrome ocioso e ~500 MB, e a sessao do
+# Google e um cookie que envelhece — o transporte confere `viva` antes de reusar, e
+# uma sessao que morreu no meio e descartada e reaberta.
+OCIOSIDADE_SESSAO = timedelta(minutes=3)
 
 # Teto de geracoes ao mesmo tempo. Cada uma segura uma janela de Chrome e uma conta.
 #
@@ -127,6 +140,9 @@ class Orquestrador:
         # adiado por "janela cheia" sair da fila no instante em que a janela vaga, e
         # nao 30 s depois (medido: 11,6 eventos `sem_conta_apta` por job pronto).
         self._acordar = asyncio.Event()
+        # sessoes abertas e OCIOSAS, por conta: (sessao, desde quando esta parada).
+        # Uma conta esta aqui OU em `_ocupadas`, nunca nos dois.
+        self._guardadas: dict[int, tuple[Sessao, datetime]] = {}
 
     # ------------------------------------------------------------- o que o painel ve
 
@@ -146,6 +162,65 @@ class Orquestrador:
 
     def ocupada(self, conta_id: int) -> bool:
         return conta_id in self._ocupadas
+
+    @property
+    def sessoes_ociosas(self) -> int:
+        """Quantos navegadores estao abertos sem job — guardados para o proximo."""
+        return len(self._guardadas)
+
+    # ----------------------------------------------------- sessoes entre jobs
+
+    async def _obter_sessao(self, conta: Conta) -> Sessao:
+        """A sessao guardada da conta, se ainda serve; senao uma nova.
+
+        Conferir `viva` antes de reusar e o que separa "reuso" de "reuso de um Chrome
+        que morreu": o navegador pode ter caido sozinho, e a pagina fechada so seria
+        descoberta no primeiro clique, como um erro de sequencia que nao e.
+        """
+        guardada = self._guardadas.pop(conta.id, None)
+        if guardada is not None:
+            sessao, _ = guardada
+            if await self.transporte.viva(sessao):
+                await self.transporte.renovar(sessao)
+                return sessao
+            await self._fechar_sessao(sessao, conta.id)
+        return await self.transporte.abrir_sessao(conta)
+
+    def _guardar_sessao(self, conta: Conta, sessao: Sessao) -> None:
+        self._guardadas[conta.id] = (sessao, datetime.now(timezone.utc))
+
+    async def _fechar_sessao(self, sessao: Sessao, conta_id: int,
+                             job_id: int | None = None) -> None:
+        """Fecha sem deixar excecao escapar: um browser ja morto levanta ao fechar, e
+        isso escapando de um `finally` matava a task de `rodar()` em silencio."""
+        try:
+            await self.transporte.fechar(sessao)
+        except Exception as e:
+            self.repo.registrar_evento(job_id, conta_id, "fechar_falhou",
+                                       json.dumps({"erro": str(e)}))
+
+    async def encerrar_sessao(self, conta_id: int) -> bool:
+        """Fecha o navegador ocioso daquela conta, se houver. Devolve se fechou.
+
+        E o que as rotas de "Abrir" e "Revalidar" chamam antes de subir um Chrome
+        proprio no mesmo perfil: dois Chromes no mesmo `--user-data-dir` nao
+        coexistem, e o segundo entregaria a URL ao Chrome do Playwright.
+        """
+        guardada = self._guardadas.pop(conta_id, None)
+        if guardada is None:
+            return False
+        await self._fechar_sessao(guardada[0], conta_id)
+        return True
+
+    async def encerrar_todas(self) -> None:
+        for conta_id in list(self._guardadas):
+            await self.encerrar_sessao(conta_id)
+
+    async def _fechar_ociosas(self) -> None:
+        limite = datetime.now(timezone.utc) - OCIOSIDADE_SESSAO
+        for conta_id, (_, desde) in list(self._guardadas.items()):
+            if desde <= limite:
+                await self.encerrar_sessao(conta_id)
 
     # ------------------------------------------------------------------- recuperacao
 
@@ -449,9 +524,11 @@ class Orquestrador:
             return False
         self._ocupadas.add(conta.id)
         sessao = None
+        leu = False
         try:
-            sessao = await self.transporte.abrir_sessao(conta)
+            sessao = await self._obter_sessao(conta)
             lido = await self.transporte.saldo(sessao)
+            leu = True
             antes = conta.saldo
             reconciliar(conta, lido, datetime.now(timezone.utc))
             self.repo.salvar_conta(conta)
@@ -477,11 +554,10 @@ class Orquestrador:
             return False
         finally:
             if sessao is not None:
-                try:
-                    await self.transporte.fechar(sessao)
-                except Exception as e:
-                    self.repo.registrar_evento(None, conta.id, "fechar_falhou",
-                                               json.dumps({"erro": str(e)}))
+                if leu:
+                    self._guardar_sessao(conta, sessao)
+                else:
+                    await self._fechar_sessao(sessao, conta.id)
             self._liberar(conta.id)
 
     # --------------------------------------------------------------------- a execucao
@@ -507,7 +583,7 @@ class Orquestrador:
 
         sessao = None
         try:
-            sessao = await self.transporte.abrir_sessao(conta)
+            sessao = await self._obter_sessao(conta)
             await self._resolver_projeto(sessao, job, conta)
             if not retomando:
                 # a conta mudou: a geracao anterior nao serve mais, comeca do zero
@@ -532,18 +608,16 @@ class Orquestrador:
             try:
                 arquivo = await self.transporte.baixar(sessao, job.id_remoto, destino)
             except Exception as e:
-                # BAIXAR DE NOVO NAO GASTA TENTATIVA — o video JA existe e JA foi pago.
+                # BAIXAR DE NOVO NAO GASTA TENTATIVA — o resultado JA existe e JA foi
+                # pago. Gastar tentativa aqui jogaria fora o job inteiro por uma falha
+                # DEPOIS da cobranca; repetir so o download custa tempo e um navegador.
                 #
-                # MEDIDO 2026-09-05: o download de video derruba o Chrome de forma
-                # intermitente (1 sucesso em 3 no mesmo arquivo). O Flow navega a
-                # propria pagina para a URL do arquivo, e o navegador morre antes de
-                # `path()`/`save_as`. Aba de guarda, pagina real de guarda, `traco`
-                # desligado e `downloads_path` foram todos medidos e nenhum eliminou a
-                # intermitencia — a causa raiz continua sem explicacao.
-                #
-                # A conta que resolve e outra: gastar tentativa aqui joga fora o job
-                # inteiro por uma falha DEPOIS da cobranca. Repetir so o download custa
-                # tempo e um navegador — o mesmo raciocinio de `conta_seca`.
+                # A causa raiz da intermitencia de 2026-09-05 foi encontrada em
+                # 2026-09-06: o processo do Chrome TRAVAVA no download nativo de blob
+                # (ver `transporte/pw/captura.py`). O transporte deixou de usar o
+                # download do Chrome, e este caminho passou a ser a excecao — fica pelo
+                # mesmo motivo de sempre: uma falha depois da cobranca nao pode custar
+                # o job.
                 vezes = self._downloads_falhos.get(job.id, 0) + 1
                 self._downloads_falhos[job.id] = vezes
                 self.repo.registrar_evento(
@@ -618,6 +692,7 @@ class Orquestrador:
 
         finally:
             if sessao is not None:
+                saudavel = False
                 try:
                     lido = await self.transporte.saldo(sessao)
                     delta = reconciliar(conta, lido, datetime.now(timezone.utc))
@@ -630,18 +705,20 @@ class Orquestrador:
                         self.repo.registrar_evento(
                             job.id, conta.id, "divergencia",
                             json.dumps({"delta": delta, "lido": lido}))
+                    saudavel = True
                 except Exception as e:
                     # o `except: pass` daqui engolia tambem falha de `salvar_conta` —
                     # o silencio que transformava conta seca em laco infinito
                     self.repo.registrar_evento(job.id, conta.id, "reconciliacao_falhou",
                                                json.dumps({"erro": str(e)}))
-                try:
-                    # fechar um browser ja morto levanta, e isso escapava do `try` de
-                    # cima: a task de `rodar()` terminava e a fila parava em silencio
-                    await self.transporte.fechar(sessao)
-                except Exception as e:
-                    self.repo.registrar_evento(job.id, conta.id, "fechar_falhou",
-                                               json.dumps({"erro": str(e)}))
+                # A leitura de saldo e a PROVA de que a sessao ainda responde: ela
+                # abre e fecha o menu do avatar. Sessao que passou fica guardada para
+                # o proximo job da conta; sessao que falhou ali e fechada — o proximo
+                # job abre uma nova em vez de herdar um navegador suspeito.
+                if saudavel:
+                    self._guardar_sessao(conta, sessao)
+                else:
+                    await self._fechar_sessao(sessao, conta.id, job.id)
 
     async def _resolver_projeto(self, sessao, job: Job, conta: Conta) -> None:
         """Deixa a sessao dentro do projeto certo antes de gerar.
@@ -770,6 +847,7 @@ class Orquestrador:
         self._rodando = True
         while self._rodando:
             try:
+                await self._fechar_ociosas()
                 if not await self.passo():
                     await self._dormir(intervalo)
             except Exception as e:
@@ -777,10 +855,12 @@ class Orquestrador:
                     None, None, "passo_falhou",
                     json.dumps({"erro": f"{type(e).__name__}: {e}"}))
                 await self._dormir(intervalo)
-        # parada limpa: as geracoes ja despachadas terminam e fecham seus navegadores.
-        # Sair sem isto deixaria Chrome orfao segurando o perfil, e o proximo boot
-        # esbarraria em `PerfilOcupado` numa conta que nao tem defeito nenhum.
+        # parada limpa: as geracoes ja despachadas terminam, e os navegadores — os
+        # delas e os guardados — fecham. Sair sem isto deixaria Chrome orfao segurando
+        # o perfil, e o proximo boot esbarraria em `PerfilOcupado` numa conta que nao
+        # tem defeito nenhum.
         await self.drenar()
+        await self.encerrar_todas()
 
     def parar(self) -> None:
         self._rodando = False

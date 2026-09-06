@@ -1107,3 +1107,86 @@ async def test_dormir_acorda_antes_do_prazo_quando_uma_conta_e_liberada(repo, tm
     await orq._dormir(5.0)
     assert asyncio.get_event_loop().time() - inicio < 1.0
     assert not orq._acordar.is_set()                # limpo para a proxima volta
+
+
+async def test_sessao_e_reusada_entre_jobs_da_mesma_conta(repo, tmp_path):
+    """Dois jobs seguidos na mesma conta abrem UM navegador — o segundo reusa.
+
+    Abrir, navegar e validar custava 10-15 s por job (medido 2026-09-06): mais da
+    metade do envelope de um job de imagem.
+    """
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 50; repo.salvar_conta(c)
+    repo.criar_job(job_fast("c1")); repo.criar_job(job_fast("c2"))
+    t = TransporteFalso(saldos={cid: 50})
+    orq = Orquestrador(repo, t, raiz=tmp_path)
+
+    await ciclo(orq)
+    assert t.aberturas == 1 and t.abertas == 1          # guardado, nao fechado
+    assert orq.sessoes_ociosas == 1 and not orq.ocupada(cid)
+    await ciclo(orq)
+    assert t.aberturas == 1                             # o segundo job reusou
+    assert t.renovacoes == 1
+    assert all(j.estado is EstadoJob.PRONTO for j in repo.jobs())
+
+    await orq.encerrar_todas()
+    assert t.abertas == 0 and orq.sessoes_ociosas == 0
+
+
+async def test_sessao_ociosa_fecha_depois_do_prazo(repo, tmp_path):
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 50; repo.salvar_conta(c)
+    repo.criar_job(job_fast())
+    t = TransporteFalso(saldos={cid: 50})
+    orq = Orquestrador(repo, t, raiz=tmp_path)
+    await ciclo(orq)
+    assert t.abertas == 1
+
+    await orq._fechar_ociosas()
+    assert t.abertas == 1                               # acabou de parar: fica
+    sessao, _ = orq._guardadas[cid]
+    orq._guardadas[cid] = (sessao, datetime.now(timezone.utc) - timedelta(minutes=10))
+    await orq._fechar_ociosas()
+    assert t.abertas == 0 and orq.sessoes_ociosas == 0
+
+
+async def test_sessao_que_morreu_parada_nao_e_reusada(repo, tmp_path):
+    """Chrome que caiu sozinho enquanto ocioso: o proximo job abre outro, sem erro."""
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 50; repo.salvar_conta(c)
+    repo.criar_job(job_fast("c1")); repo.criar_job(job_fast("c2"))
+    t = TransporteFalso(saldos={cid: 50})
+    orq = Orquestrador(repo, t, raiz=tmp_path)
+    await ciclo(orq)
+    t._abertas_por_conta[cid] = 0; t.abertas = 0       # o navegador guardado morreu
+    await ciclo(orq)
+    assert t.aberturas == 2
+    assert all(j.estado is EstadoJob.PRONTO for j in repo.jobs())
+
+
+async def test_sessao_que_falha_na_reconciliacao_e_fechada_e_nao_guardada(repo, tmp_path):
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 50; repo.salvar_conta(c)
+    repo.criar_job(job_fast())
+    t = TransporteFalso(saldos={cid: 50})
+
+    async def menu_sumiu(s):
+        raise RuntimeError("o menu do avatar nao abriu")
+
+    t.saldo = menu_sumiu                                # a reconciliacao vai falhar
+    orq = Orquestrador(repo, t, raiz=tmp_path)
+    await ciclo(orq)
+    assert t.abertas == 0 and orq.sessoes_ociosas == 0
+    assert any(e["tipo"] == "reconciliacao_falhou" for e in repo.eventos())
+
+
+async def test_encerrar_sessao_libera_o_perfil_para_o_chrome_de_fora(repo, tmp_path):
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 50; repo.salvar_conta(c)
+    repo.criar_job(job_fast())
+    t = TransporteFalso(saldos={cid: 50})
+    orq = Orquestrador(repo, t, raiz=tmp_path)
+    await ciclo(orq)
+    assert await orq.encerrar_sessao(cid) is True
+    assert t.abertas == 0
+    assert await orq.encerrar_sessao(cid) is False      # nada a fechar: nao levanta

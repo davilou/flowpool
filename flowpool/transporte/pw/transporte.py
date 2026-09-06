@@ -209,6 +209,23 @@ class TransportePlaywright:
         d.passo("sessao aberta")
         return Sessao(conta=conta, handle=(pw, ctx, pagina))
 
+    async def viva(self, s: Sessao) -> bool:
+        """Se a sessao guardada ainda tem pagina — o Chrome pode ter morrido sozinho."""
+        try:
+            _, ctx, pagina = s.handle
+            return not pagina.is_closed() and bool(ctx.pages)
+        except Exception:
+            return False
+
+    async def renovar(self, s: Sessao) -> None:
+        """Sessao reusada para um job novo: o relogio do log de passo recomeca.
+
+        O total que o usuario le no log e "ha quanto tempo ESTE job esta rodando"; com
+        o navegador vivendo entre jobs, contar desde a abertura diria 900 s num job
+        que comecou ha 20.
+        """
+        self._diarios[s.conta.id] = Diario(s.conta.id)
+
     async def fechar(self, s: Sessao) -> None:
         pw, ctx, _ = s.handle
         # traco que chega inteiro ate aqui e de job que NAO falhou — na falha ele ja

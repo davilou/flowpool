@@ -142,6 +142,12 @@ class TransporteFalso:
         destino.write_bytes(b"FALSO:" + id_remoto.encode())
         return destino
 
+    async def viva(self, s: Sessao) -> bool:
+        return self._abertas_por_conta.get(s.conta.id, 0) > 0
+
+    async def renovar(self, s: Sessao) -> None:
+        self.renovacoes = getattr(self, "renovacoes", 0) + 1
+
     async def fechar(self, s: Sessao) -> None:
         vivas = self._abertas_por_conta.get(s.conta.id, 0)
         if vivas:

@@ -510,7 +510,7 @@ function pintarPainel() {
       sub: expiradas ? `${expiradas} com sessão fora${inativas ? ` · ${inativas} desativada${inativas > 1 ? "s" : ""}` : ""}` : inativas ? `todas as ativas de pé · ${inativas} desativada${inativas > 1 ? "s" : ""}` : "todas as sessões de pé",
       nivel: expiradas ? "aviso" : "" },
     { rotulo: "Gerando agora", icone: "bolt", valor: `${s.gerando}<small>/ ${s.max_simultaneos}</small>`,
-      sub: `${s.contas_ocupadas} conta${s.contas_ocupadas === 1 ? "" : "s"} com navegador aberto`, nivel: "" },
+      sub: `${s.contas_ocupadas} ocupada${s.contas_ocupadas === 1 ? "" : "s"}${s.sessoes_ociosas ? ` · ${s.sessoes_ociosas} navegador${s.sessoes_ociosas === 1 ? "" : "es"} em espera` : ""}`, nivel: "" },
     { rotulo: "Na fila", icone: "fila", valor: `${pendentes.length}`,
       sub: semQuemPague ? `${semQuemPague} sem conta que pague` : pendentes.length ? "todos têm conta com crédito" : "fila vazia",
       nivel: semQuemPague ? "aviso" : "" },
