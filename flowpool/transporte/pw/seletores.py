@@ -425,6 +425,10 @@ ROTULO_MODELO = {
     "veo-fast": "Veo 3.1 - Fast",
     "veo-quality": "Veo 3.1 - Quality",
     "nano-banana": "Nano Banana Pro",
+    # os dois medidos em 2026-09-06 no mesmo dropdown; "Nano Banana 2" nao e sufixo de
+    # "Nano Banana 2 Lite", entao o `endswith` de `analise` separa os dois
+    "nano-banana-2": "Nano Banana 2",
+    "nano-banana-2-lite": "Nano Banana 2 Lite",
 }
 OPCAO_MODELO = f"{OVERLAY} [role=menuitem], {OVERLAY} [role=option]"
 

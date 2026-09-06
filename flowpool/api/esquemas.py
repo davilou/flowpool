@@ -42,7 +42,9 @@ _MODELO_PADRAO = {
     # ser o unico modelo que o modo aceita. Ver `MODELOS_DO_MODO` no nucleo.
     Modo.FRAMES2V: Modelo.VEO_LITE,
     Modo.INGREDIENTS2V: Modelo.OMNI_FLASH,
-    Modo.IMAGEM: Modelo.NANO_BANANA,
+    # Nano Banana 2, e nao o Pro: e o modelo de imagem ILIMITADA (usuario, 2026-09-06).
+    # O Pro tem cota, e foi ela que travou um lote de vinte cenas.
+    Modo.IMAGEM: Modelo.NANO_BANANA_2,
 }
 
 

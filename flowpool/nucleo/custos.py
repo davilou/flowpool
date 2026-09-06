@@ -50,6 +50,13 @@ _CUSTO_IMAGEM: dict[tuple[Modelo, Tier], int] = {
     (Modelo.NANO_BANANA, Tier.FREE): 0,
     (Modelo.NANO_BANANA, Tier.PRO): 0,
     (Modelo.NANO_BANANA, Tier.ULTRA): 0,
+    # Nano Banana 2 e o "ilimitado" (usuario, 2026-09-06); o Lite herda o zero.
+    (Modelo.NANO_BANANA_2, Tier.FREE): 0,
+    (Modelo.NANO_BANANA_2, Tier.PRO): 0,
+    (Modelo.NANO_BANANA_2, Tier.ULTRA): 0,
+    (Modelo.NANO_BANANA_2_LITE, Tier.FREE): 0,
+    (Modelo.NANO_BANANA_2_LITE, Tier.PRO): 0,
+    (Modelo.NANO_BANANA_2_LITE, Tier.ULTRA): 0,
 }
 
 # Escala do custo por duracao, na moeda do Omni Flash free/pro — que e onde estao os

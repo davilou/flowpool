@@ -33,7 +33,12 @@ class Modelo(str, Enum):
     VEO_LITE = "veo-lite"
     VEO_FAST = "veo-fast"
     VEO_QUALITY = "veo-quality"
+    # `nano-banana` E O PRO — o nome ficou de quando era o unico. MEDIDO 2026-09-06 em
+    # modo imagem, o dropdown oferece tres: "Nano Banana Pro", "Nano Banana 2" e
+    # "Nano Banana 2 Lite". O valor nao muda para nao reescrever o historico de jobs.
     NANO_BANANA = "nano-banana"
+    NANO_BANANA_2 = "nano-banana-2"
+    NANO_BANANA_2_LITE = "nano-banana-2-lite"
 
 
 # As cinco do painel de configuracao do Flow, nesta ordem. Valor fora da lista nao
@@ -151,7 +156,10 @@ MODELOS_DO_MODO: dict[Modo, tuple[Modelo, ...]] = {
     Modo.INGREDIENTS2V: (Modelo.OMNI_FLASH, Modelo.VEO_LITE, Modelo.VEO_FAST,
                          Modelo.VEO_QUALITY),
     Modo.FRAMES2V: (Modelo.VEO_LITE,),
-    Modo.IMAGEM: (Modelo.NANO_BANANA,),
+    # O PRIMEIRO e o padrao de imagem. Nano Banana 2 na frente do Pro, por decisao do
+    # usuario em 2026-09-06: a geracao ILIMITADA de imagem e no Nano Banana 2; o Pro
+    # tem cota, e cota e o que trava um lote de vinte cenas.
+    Modo.IMAGEM: (Modelo.NANO_BANANA_2, Modelo.NANO_BANANA, Modelo.NANO_BANANA_2_LITE),
 }
 
 

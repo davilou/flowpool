@@ -339,7 +339,7 @@ def test_job_de_imagem_sem_modelo_sai_com_nano_banana(cliente):
     c, repo = cliente
     r = c.post("/jobs", json={"modo": "imagem", "prompt": "p", "produto": "Moda", "nome": "n"})
     assert r.status_code == 201
-    assert repo.job(r.json()["id"]).modelo is Modelo.NANO_BANANA
+    assert repo.job(r.json()["id"]).modelo is Modelo.NANO_BANANA_2   # o ilimitado, nao o Pro
 
 
 def test_modelo_explicito_continua_valendo(cliente):
@@ -951,3 +951,26 @@ def test_abrir_conta_sem_chrome_vira_409_em_vez_de_500(cliente, monkeypatch):
 
     assert r.status_code == 409
     assert "chrome" in r.json()["detail"].lower()
+
+
+def test_diagnosticar_job_pela_rota(tmp_path):
+    from tests.test_diagnostico import ModeloFalso
+    repo = Repo(tmp_path / "t.db"); repo.criar_esquema()
+    app = criar_app(repo=repo, transporte=TransporteFalso(saldos={}), raiz=tmp_path,
+                    diagnosticador=ModeloFalso(resposta="a conta caiu no portao de idade"))
+    c = TestClient(app)
+    jid = c.post("/jobs", json={"modo": "imagem", "prompt": "x", "produto": "P", "nome": "n"}).json()["id"]
+    assert c.post(f"/jobs/{jid}/diagnosticar").status_code == 409      # sem falha ainda
+    j = repo.job(jid); j.estado = EstadoJob.FALHOU; j.erro = "age-restricted"; repo.salvar_job(j)
+    r = c.post(f"/jobs/{jid}/diagnosticar")
+    assert r.status_code == 200
+    assert r.json()["tipo"] == "diagnostico"
+    assert r.json()["payload"]["texto"] == "a conta caiu no portao de idade"
+    assert c.post("/jobs/999/diagnosticar").status_code == 404
+
+
+def test_diagnosticar_sem_modelo_da_503(cliente):
+    c, repo = cliente
+    jid = c.post("/jobs", json={"modo": "imagem", "prompt": "x", "produto": "P", "nome": "n"}).json()["id"]
+    j = repo.job(jid); j.estado = EstadoJob.FALHOU; j.erro = "x"; repo.salvar_job(j)
+    assert c.post(f"/jobs/{jid}/diagnosticar").status_code == 503
