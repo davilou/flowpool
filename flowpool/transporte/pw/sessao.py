@@ -25,6 +25,7 @@ from playwright.async_api import async_playwright
 
 from flowpool.nucleo.proxy import analisar, argumento_chrome
 from flowpool.transporte.base import SessaoMorta
+from flowpool.transporte.pw import captura
 from flowpool.transporte.pw import seletores as sel
 
 _CANDIDATOS = [
@@ -205,6 +206,10 @@ async def abrir_contexto(perfil: Path, proxy: str | None = None,
         accept_downloads=True,
         proxy=analisar(proxy),
     )
+    # ANTES da primeira navegacao: o download do Flow e lido do blob na pagina, e nao
+    # pelo download do Chrome, que TRAVA o processo inteiro (medido 2026-09-06, Chrome
+    # 152). Ver `captura.py`. Instalar no contexto cobre toda pagina dali em diante.
+    await captura.instalar(ctx)
     return pw, ctx
 
 

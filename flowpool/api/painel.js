@@ -249,8 +249,10 @@ function explicarErro(erro) {
     return "O Flow não ofereceu o botão de gerar: o modelo escolhido custa mais do que o saldo dessa conta. Crédito não se soma entre contas — o job precisa caber em UMA.";
   if (e.includes("age-restricted") || e.includes("portao de idade") || e.includes("idade"))
     return "A conta caiu no portão de idade do Flow. Resolver é verificar a idade na conta Google, e isso só o dono da conta faz.";
-  if (e.includes("download falhou") || e.includes("download_falhou"))
-    return "A geração aconteceu e o vídeo existe no Flow; o que falhou foi trazer o arquivo. O Chrome fecha a página ao baixar em cerca de 1 a cada 4 vezes. Abra a conta e baixe pelo projeto — não gere de novo, seria pagar duas vezes.";
+  if (e.includes("download nativo") || e.includes("nenhum blob"))
+    return "A geração aconteceu e o resultado existe no Flow. O Flow mudou o jeito de baixar (o transporte lê o blob da página, e não achou um): o caminho de download precisa ser medido de novo. Abra a conta e baixe pelo projeto — não gere de novo, seria pagar duas vezes.";
+  if (e.includes("download falhou") || e.includes("download_falhou") || e.includes("download.path"))
+    return "A geração aconteceu e o resultado existe no Flow; o que falhou foi trazer o arquivo. Se o erro cita Download.path, é o Chrome travando no download nativo — corrigido em 06/09 (o arquivo passou a ser lido do blob da página); jobs anteriores a isso só se resolvem baixando pelo projeto. Não gere de novo, seria pagar duas vezes.";
   if (e.includes("targetclosed") || e.includes("target closed") || e.includes("browser has been closed"))
     return "A janela do Chrome foi fechada no meio da geração — normalmente à mão. Não é defeito do serviço.";
   if (e.includes("sessaomorta") || e.includes("sessao morta") || e.includes("sessão"))

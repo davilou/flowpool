@@ -10,7 +10,6 @@ rodando, pelos scripts de fumaca.
 from __future__ import annotations
 
 import re
-import shutil
 from pathlib import Path
 
 from flowpool.nucleo import tipos
@@ -18,11 +17,10 @@ from flowpool.nucleo.tipos import Conta, Modo
 from flowpool.transporte.base import (
     Estado, GeracaoFalhou, Pedido, ProjetoRemoto, SaldoInsuficiente, Sessao, SessaoMorta,
 )
-from flowpool.transporte.pw import analise, dom
+from flowpool.transporte.pw import analise, captura, dom
 from flowpool.transporte.pw.cura import AutoCura
 from flowpool.transporte.pw.diario import (
     Diario, descartar_traco, guardar_traco, iniciar_traco, proximo_traco,
-    traco_ligado,
 )
 from flowpool.transporte.pw import seletores as sel
 from flowpool.transporte.pw.sessao import abrir_contexto, interpretar_sessao
@@ -1891,80 +1889,79 @@ class TransportePlaywright:
         # o texto ja lido, por `analise.achar_no_submenu`, que recusa empate.
         itens, indice = await self._esperar_submenu_com(pagina, chave, d)
 
-        # ABA DE GUARDA — sem ela, o download de VIDEO se perde. MEDIDO 2026-09-05,
-        # com ouvintes de `close` no contexto e na pagina:
+        # O ARQUIVO E LIDO DO BLOB NA PAGINA, NAO DO DOWNLOAD DO CHROME.
         #
-        #     !! download: camera_approaches_books_slowly_...mp4
-        #     !! pagina fechou
-        #     !! contexto fechou
-        #     path() -> TargetClosedError ; save_as -> TargetClosedError
+        # Historia curta de um defeito longo. 2026-09-05: o download "perdia" o video —
+        # pagina e contexto fechavam e o Playwright apagava o arquivo temporario. As
+        # defesas (aba de guarda, `path()` antes de `save_as`, traco desligado)
+        # ganhavam a corrida em ~3 de 4 casos. 2026-09-06, Chrome 152: 0 de 22. A sonda
+        # com `DEBUG=pw:browser` mostrou o que nenhuma hipotese anterior tinha visto:
         #
-        # O Flow navega a PROPRIA pagina para a URL do arquivo; o Chrome transforma
-        # aquilo num download e FECHA a pagina. Sendo ela a unica do contexto
-        # persistente, o contexto morre junto — e o Playwright apaga o arquivo
-        # temporario ao fechar o contexto. O video ficava gerado, pago, e sem arquivo.
+        #     download evento: ...mp4 | url: blob:https://flow.google.com/...
+        #     pw:browser <process did exit: exitCode=3221225477>   (0xC0000005)
         #
-        # O download de IMAGEM nao faz isso (a pagina sobrevive, e a leitura de saldo
-        # logo depois funcionava). Por isso o defeito so aparecia em video.
+        # O PROCESSO DO CHROME TRAVA no instante em que o download nativo de um blob
+        # comeca. Nao ha aba de guarda que segure um navegador morto, e o modo de
+        # download do CDP (`allow` para pasta propria) morre igual.
         #
-        # Uma segunda aba mantem o contexto vivo pelo tempo de salvar. Medido com ela:
-        # `path()` responde e `save_as` grava 1,4 MB.
-        # A GUARDA TEM QUE VIVER ATE O ARQUIVO ESTAR SALVO. A primeira versao deste
-        # conserto fechava a guarda logo depois de `expect_download`, e falhava igual:
-        # naquele instante a pagina principal AINDA NAO tinha fechado, entao a guarda
-        # saia, a pagina fechava um momento depois, e o contexto morria antes do
-        # `save_as`. Fechar a guarda e a ULTIMA coisa.
-        # DUAS COISAS SAO NECESSARIAS PARA O DOWNLOAD DE VIDEO SOBREVIVER, e a
-        # bisseccao de 2026-09-05 mostrou que nenhuma sozinha basta:
-        #
-        #     traco  guarda   resultado
-        #     on     sim      FALHA
-        #     off    nao      FALHA
-        #     off    sim      FUNCIONA
-        #
-        # A metade do traco esta em `diario.traco_ligado`, que passou a vir DESLIGADO
-        # por padrao. A metade da guarda esta logo abaixo.
-        # ABA DE GUARDA: com a pagina principal fechando, ela e a unica coisa que
-        # mantem o contexto persistente vivo pelo tempo de copiar o arquivo.
-        guarda = await pagina.context.new_page()
-        # A guarda fica em `about:blank` DE PROPOSITO. Navegar ela para o Flow foi
-        # tentado e MEDIDO: nao melhorou a taxa (continuou ~1 em 3) e ainda carregava
-        # uma pagina inteira no mesmo contexto a cada download.
-        d.passo(f"guarda aberta (traco={traco_ligado()}, "
-                f"paginas={len(pagina.context.pages)})")
-        async with pagina.expect_download(timeout=self.timeout_ms) as espera:
-            await itens.nth(indice).click(timeout=15_000)
-        download = await espera.value
+        # O Flow baixa por `<a download href="blob:...">` + `a.click()`. O blob e memoria
+        # da pagina: `captura.py` cancela o clique (sem download nativo, sem trava),
+        # guarda a URL e o nome, e os bytes sao lidos em pedacos por `evaluate`. Medido:
+        # 862.943 bytes de MP4 validos, Chrome vivo, sessao fechada com codigo 0.
+        if not await captura.instalado(pagina):
+            raise GeracaoFalhou(
+                "o interceptador de download nao esta nesta pagina: ela foi aberta "
+                "antes de `captura.instalar` — o contexto precisa vir de `abrir_contexto`")
+        await captura.zerar(pagina)
+        await itens.nth(indice).click(timeout=15_000)
+        capturado = await self._esperar_captura(pagina, d)
 
         # o Flow escolhe a extensao: jpeg para imagem, mp4 para video. O orquestrador
         # montou `destino` com .png/.mp4 a partir do modo — se salvassemos ali, o banco
         # apontaria para um .png que na verdade e JPEG. Devolver o caminho REAL faz
-        # `job.arquivo` ficar verdadeiro sem tocar na Task 7.
-        real = analise.caminho_final(destino, download.suggested_filename)
-        real.parent.mkdir(parents=True, exist_ok=True)
-        # `path()` E NAO `save_as()`, e a diferenca decide o caso.
-        #
-        # MEDIDO 2026-09-05: com a aba de guarda aberta, a pagina principal viva e o
-        # download recebido, `save_as` AINDA falhava com TargetClosedError. O que a
-        # sonda que funcionou fazia de diferente era chamar `path()` primeiro.
-        #
-        # `path()` ESPERA o download terminar e devolve o arquivo temporario; `save_as`
-        # manda o NAVEGADOR copiar, e o navegador esta morrendo justamente ai (o Flow
-        # navega a pagina para a URL do arquivo, o Chrome fecha a pagina). Copiando com
-        # o Python, o unico requisito e o arquivo existir — e ele existe.
-        origem = await download.path()
-        try:
-            shutil.copy2(origem, real)
-        finally:
-            # so agora, e so se a pagina principal sobreviveu: fechar a ultima pagina
-            # do contexto persistente derruba o contexto
-            if not pagina.is_closed():
-                try:
-                    await guarda.close()
-                except Exception:
-                    pass
-        d.passo(f"baixado: {real}")
+        # `job.arquivo` ficar verdadeiro.
+        real = analise.caminho_final(destino, capturado["nome"] or destino.name)
+        tamanho = await captura.gravar_blob(pagina, capturado["url"], real)
+        d.passo(f"baixado: {real} ({tamanho} bytes, via {capturado['via']})")
         return real
+
+    async def _esperar_captura(self, pagina, d: Diario, teto_ms: int = 60_000,
+                               cada: int = 250) -> dict:
+        """Espera o interceptador registrar o `<a download>` do clique.
+
+        Espera de ESTADO, nao de tempo: o Flow busca o arquivo antes de montar o
+        blob, e isso leva de 1 s a alguns segundos conforme o tamanho.
+
+        Se em vez da captura chegar um download NATIVO, o Flow mudou o caminho (deixou
+        de usar `<a download>` de blob) e o interceptador precisa ser medido de novo —
+        o erro diz isso, em vez de deixar o Chrome travar em silencio.
+        """
+        nativo: list = []
+
+        def anotar(dl):
+            nativo.append(dl.suggested_filename)
+
+        # registrado e REMOVIDO: uma sessao baixa varias vezes, e cada chamada
+        # deixando um ouvinte a mais e vazamento com cara de bug intermitente
+        pagina.on("download", anotar)
+        try:
+            gasto = 0
+            while gasto < teto_ms:
+                if nativo:
+                    raise GeracaoFalhou(
+                        f"o Flow disparou um download NATIVO ({nativo[0]}) em vez do "
+                        "<a download> de blob que o interceptador cobre. O caminho de "
+                        "download mudou: medir de novo antes de insistir")
+                lista = await captura.capturados(pagina)
+                if lista:
+                    return lista[-1]
+                await pagina.wait_for_timeout(cada)
+                gasto += cada
+                d.esperando("o blob do download")
+            raise GeracaoFalhou(
+                f"cliquei em baixar e nenhum blob foi capturado em {teto_ms // 1000}s")
+        finally:
+            pagina.remove_listener("download", anotar)
 
     async def _esperar_submenu_com(self, pagina, chave: str, d: Diario,
                                    teto_ms: int = 20_000):
