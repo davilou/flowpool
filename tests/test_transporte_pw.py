@@ -1919,11 +1919,31 @@ async def test_placeholder_nunca_vira_identidade_guardada():
     apareceu, nao de identidade para reencontra-lo depois.
     """
     pagina = _PaginaNoTeto(card_na_volta=2, com_midia=False)
+    t = TransportePlaywright()
 
-    apareceu = await TransportePlaywright()._esperar_card_novo(
+    apareceu = await t._esperar_card_novo(
         pagina, pagina.TETO, Diario(1), ids_antes=list(pagina.base))
 
     assert apareceu is True
+    # E ESTA e a linha que o nome do teste promete: o `sem-midia:` serviu de sinal e
+    # nao ficou guardado. Sem ela, o teste passava com o defeito do job 435 inteiro.
+    assert t._identidade_nova is None
+
+
+async def test_identidade_de_verdade_chega_inteira_em_quem_espera():
+    """O par do teste acima: com miniatura, o `src` do card novo TEM que voltar.
+
+    E por este valor que `_gerar` reencontra o card depois, quando a grade cravada no
+    teto faz a posicao mentir.
+    """
+    pagina = _PaginaNoTeto(card_na_volta=2, com_midia=True)
+    t = TransportePlaywright()
+
+    apareceu = await t._esperar_card_novo(
+        pagina, pagina.TETO, Diario(1), ids_antes=list(pagina.base))
+
+    assert apareceu is True
+    assert t._identidade_nova == "src-do-card-novo"
 
 
 async def test_leitura_de_identidade_vazia_volta_para_a_posicao():
