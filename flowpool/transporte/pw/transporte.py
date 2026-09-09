@@ -1377,22 +1377,35 @@ class TransportePlaywright:
 
     async def _enviar_no_seletor_aberto(self, pagina, arquivos: list[str],
                                         d: Diario) -> list[dict]:
-        """A parte do envio que supoe o seletor de midia JA ABERTO.
+        """A parte do envio que supoe o seletor de midia do `+` JA ABERTO.
 
-        Existe separada porque o modo FRAMES chega aqui por outro caminho: la o
-        seletor e aberto pelo slot `inicio`/`fim`, e nao pelo `+`.
+        Existe separada de `_enviar_arquivos` para o caso em que o painel ja esta
+        aberto e reabri-lo custaria os ~12 s de `_abrir_seletor_midia`.
+
+        E O PAINEL DO `+`, E SO ELE. O popover do slot de frame NAO ENVIA ARQUIVO:
+        `flow-media-upload` existe la mas fica vazio e invisivel em janela maximizada,
+        que e a condicao em que o transporte roda (MEDIDO 2026-09-05, ver
+        `seletores.POPOVER_SLOT`). E por isso que `_gerar` sai de Frames para
+        `ingredients2v` ANTES de enviar os frames — enquanto o `+` ainda existe.
         """
         antes = await self._acervo_assentado(pagina, d)
         ids_antes = {i for i in (analise.id_da_midia(x.get("src")) for x in antes) if i}
         nomes = {Path(a).name for a in arquivos}
 
-        # o painel do `+` traz "upload / enviar midia"; o do slot de frame traz so
-        # "upload". `has-text("upload")` casa os dois, e e o unico que casa os dois.
-        botao = (sel.BOTAO_UPLOAD_FRAME
-                 if await pagina.locator(sel.BOTAO_ENVIAR_MIDIA).count() == 0
-                 else sel.BOTAO_ENVIAR_MIDIA)
+        # Aqui havia um desvio para `sel.BOTAO_UPLOAD_FRAME` quando "enviar midia" nao
+        # estava na tela — um atributo que NUNCA EXISTIU em `seletores.py`. Vinha da
+        # primeira medicao do popover do slot, feita em janela pequena (onde aparece o
+        # `flow-mobile-add-menu`, esse sim com upload proprio) e corrigida no mesmo dia
+        # pela medicao em janela maximizada. O ramo nunca foi avaliado, porque
+        # `_abrir_seletor_midia` levanta se o `+` nao abrir — mas o dia em que fosse
+        # daria `AttributeError`, e nao a mensagem que diz o que fazer.
+        if await pagina.locator(sel.BOTAO_ENVIAR_MIDIA).count() == 0:
+            raise GeracaoFalhou(
+                "o painel aberto nao tem 'enviar midia': provavelmente e o popover do "
+                "slot de frame, que so escolhe do acervo. O envio precisa acontecer "
+                "pelo `+`, antes de trocar para o modo Frames.")
         async with pagina.expect_file_chooser(timeout=30_000) as espera:
-            await self._clicar_unico(pagina, botao, "enviar midia")
+            await self._clicar_unico(pagina, sel.BOTAO_ENVIAR_MIDIA, "enviar midia")
         seletor = await espera.value
         await seletor.set_files(arquivos)
 

@@ -37,20 +37,19 @@ custo e banco. Quebrar este é bloqueio.
 .venv/Scripts/pyright.exe
 ```
 
-O repositório inteiro, em modo básico: **20 erros conhecidos em `flowpool/`** (9 em
-`api/app.py`, 3 em `transporte/pw/transporte.py`, 2 em `api/esquemas.py`, 2 em
+O repositório inteiro, em modo básico: **19 erros conhecidos em `flowpool/`** (9 em
+`api/app.py`, 2 em cada de `transporte/pw/transporte.py`, `api/esquemas.py` e
 `motor/orquestrador.py`, 1 em cada de `api/colar.py`, `transporte/pw/conferir.py`,
 `cura.py`, `sessao.py`) e ~60 em `tests/`. **Não é portão — é catraca: o número pode
 descer, nunca subir.** Quase todos são a mesma coisa: `repo.job(id)` devolve
 `Job | None` e o código segue como se nunca fosse None. O conserto certo é falhar alto
 com mensagem, não `assert`.
 
-> **Um desses 20 é bug de verdade**, achado pelo pyright no primeiro dia:
-> `transporte.py:1391` usa `sel.BOTAO_UPLOAD_FRAME`, que **não existe** em
-> `seletores.py`. Só é avaliado quando `BOTAO_ENVIAR_MIDIA` não está na tela — ou seja,
-> exatamente no caminho de upload por slot de frame. `AttributeError` esperando
-> acontecer, e nenhum teste passa por ali. Precisa de medição contra o Flow real para
-> saber qual é o seletor certo; não invente um.
+> O 20º erro era bug de verdade e já foi consertado: `transporte.py` usava
+> `sel.BOTAO_UPLOAD_FRAME`, atributo que nunca existiu, num desvio herdado de uma
+> medição do popover do slot que foi corrigida no mesmo dia. **O popover do slot de
+> frame não envia arquivo** — só escolhe do acervo (`seletores.POPOVER_SLOT`), e é por
+> isso que `_gerar` sai de Frames antes de enviar.
 
 Subir o serviço: `.venv/Scripts/python.exe -m flowpool` → http://127.0.0.1:8777/
 
