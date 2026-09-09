@@ -1,3 +1,4 @@
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -432,6 +433,56 @@ def test_painel_referencia_o_css_e_o_js_que_a_api_serve(cliente):
     assert "/painel.js" in html
     assert c.get("/painel.css").status_code == 200
     assert c.get("/painel.js").status_code == 200
+
+
+# MENSAGENS REAIS, copiadas de producao em 2026-09-09. Servem de corpo de prova para
+# o casador do painel: sao exatamente o texto que o usuario ve no campo de erro.
+MENSAGENS_REAIS = [
+    "conta pmara5537@gmail.com: o Flow recusou por atividade incomum (o antiabuso do "
+    "Google; costuma ser concorrencia demais no mesmo IP) (sem cobranca por esta "
+    "geracao; o saldo continua valendo)",
+    "CardTrocado: card-0 e um card de imagem e o job e video: o card aberto nao e o "
+    "resultado deste job",
+    "GeracaoFalhou: card-0 sumiu da grade",
+    "GeracaoFalhou: o painel de configuracao nao abriu",
+    "daviright@gmail.com caiu no portao de idade do Flow (/age-restricted): a conta "
+    "precisa de verificacao de idade",
+    "TargetClosedError: BrowserType.launch_persistent_context: Target page, context or "
+    "browser has been closed",
+]
+
+
+def test_nenhum_termo_do_painel_casa_dentro_de_outra_palavra(cliente):
+    """⚠️ `includes("idade")` casa DENTRO de "atividade" — MEDIDO 2026-09-09.
+
+    A recusa por ATIVIDADE incomum aparecia no painel como "a conta caiu no portao de
+    idade do Flow", mandando o usuario verificar a idade da conta Google por um
+    problema que nao existia. A regra do portao e a segunda da lista, entao ela atirava
+    antes de qualquer regra mais especifica poder responder.
+
+    O painel nao tem como ser testado por dentro (sem Node, por decisao do projeto),
+    entao o que da para garantir daqui e a materia-prima: TERMO QUE APARECE DENTRO DE
+    OUTRA PALAVRA numa mensagem real e uma armadilha esperando quem trocar `casaTermo`
+    de volta por `includes`. "identidade", "qualidade" e "prioridade" caem igual, e as
+    tres aparecem em mensagens deste app.
+    """
+    c, _ = cliente
+    js = c.get("/painel.js").text
+    termos = {t.lower() for bloco in re.findall(r"casaTermo\(e,\s*\[(.*?)\]\)", js,
+                                                re.S)
+              for t in re.findall(r'"([^"]+)"', bloco)}
+    assert termos, "nao achei os termos do casador — o formato mudou, refaca o teste"
+
+    for msg in MENSAGENS_REAIS:
+        baixo = msg.lower()
+        for termo in termos:
+            if termo not in baixo:
+                continue
+            inteiro = re.search(rf"(?<![a-z0-9]){re.escape(termo)}(?![a-z0-9])", baixo)
+            assert inteiro, (
+                f"o termo {termo!r} aparece DENTRO de outra palavra em {msg!r}. "
+                "Um casador por substring explicaria o erro errado — foi o que "
+                "'idade' fez com 'atividade' em 2026-09-09.")
 
 
 def test_css_e_js_saem_com_o_tipo_certo(cliente):

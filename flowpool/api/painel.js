@@ -242,20 +242,38 @@ function resumoConfig(j) {
 
 /* A mensagem de erro diz o que o transporte viu. Isto diz o que a pessoa faz com
    isso — cada linha veio de um caso real que custou uma investigacao. */
+/* ⚠️ PALAVRA INTEIRA, E NAO SUBSTRING. MEDIDO 2026-09-09, e custou uma investigacao:
+   `includes("idade")` casa DENTRO de "atividade". A recusa por ATIVIDADE incomum
+   aparecia no painel como "a conta caiu no portao de idade do Flow", mandando o
+   usuario mexer na verificacao de idade da conta Google por um problema que nao
+   existia — e a regra do portao e a SEGUNDA da lista, entao ela atirava antes de
+   qualquer regra mais especifica poder responder.
+
+   Nao e um caso isolado: "identidade" (que este app usa o tempo todo para o `src` da
+   miniatura), "qualidade", "prioridade", "velocidade" e "necessidade" casam igual. */
+const casaTermo = (e, termos) => termos.some(t =>
+  new RegExp(`\\b${t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(e));
+
 function explicarErro(erro) {
   const e = (erro || "").toLowerCase();
   if (!e) return null;
-  if (e.includes("botao de enviar") || e.includes("saldoinsuficiente") || e.includes("saldo insuficiente"))
+  if (casaTermo(e, ["botao de enviar", "saldoinsuficiente", "saldo insuficiente"]))
     return "O Flow não ofereceu o botão de gerar: o modelo escolhido custa mais do que o saldo dessa conta. Crédito não se soma entre contas — o job precisa caber em UMA.";
-  if (e.includes("age-restricted") || e.includes("portao de idade") || e.includes("idade"))
+  if (casaTermo(e, ["atividade incomum"]))
+    return "O Flow recusou a geração NESTA conta e não cobrou por ela — é o antiabuso do Google, não a conta. O job já foi para outra conta sozinho, sem gastar tentativa, e esta descansa uma hora. Se estiver acontecendo direto, é concorrência demais saindo pelo mesmo IP: proxy por conta é o conserto.";
+  if (casaTermo(e, ["limite de uso"]))
+    return "A conta bateu no limite de uso do Flow — não é falta de crédito, e o saldo continua valendo. O job já foi para outra conta sozinho; esta volta ao pool depois do descanso.";
+  if (casaTermo(e, ["age-restricted", "portao de idade"]))
     return "A conta caiu no portão de idade do Flow. Resolver é verificar a idade na conta Google, e isso só o dono da conta faz.";
+  if (casaTermo(e, ["nao e o resultado deste job", "cardtrocado"]))
+    return "O robô abriu um card que não é o resultado deste job (card de imagem num job de vídeo, em geral a referência enviada). Ele parou na hora em vez de insistir. NÃO se sabe se a geração existe: abra a grade do projeto na conta e veja se há card do tipo certo antes de gerar de novo.";
   if (e.includes("download nativo") || e.includes("nenhum blob"))
     return "A geração aconteceu e o resultado existe no Flow. O Flow mudou o jeito de baixar (o transporte lê o blob da página, e não achou um): o caminho de download precisa ser medido de novo. Abra a conta e baixe pelo projeto — não gere de novo, seria pagar duas vezes.";
   if (e.includes("download falhou") || e.includes("download_falhou") || e.includes("download.path"))
     return "A geração aconteceu e o resultado existe no Flow; o que falhou foi trazer o arquivo. Se o erro cita Download.path, é o Chrome travando no download nativo — corrigido em 06/09 (o arquivo passou a ser lido do blob da página); jobs anteriores a isso só se resolvem baixando pelo projeto. Não gere de novo, seria pagar duas vezes.";
   if (e.includes("targetclosed") || e.includes("target closed") || e.includes("browser has been closed"))
     return "A janela do Chrome foi fechada no meio da geração — normalmente à mão. Não é defeito do serviço.";
-  if (e.includes("sessaomorta") || e.includes("sessao morta") || e.includes("sessão"))
+  if (casaTermo(e, ["sessaomorta", "sessao morta", "sessão"]))
     return "A sessão do Google caiu nessa conta (dura ~48 h). Revalide a conta pelo painel; o job volta para a fila sozinho.";
   if (e.includes("perfilocupado") || e.includes("perfil ocupado") || e.includes("user-data-dir"))
     return "Já havia um Chrome aberto nesse perfil — provavelmente a janela do botão “Abrir”. Feche a janela: enquanto ela existe, a conta não consegue gerar.";
