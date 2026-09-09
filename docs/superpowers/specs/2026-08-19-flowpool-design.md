@@ -115,7 +115,7 @@ Python 3.13 (mesmo do pipeline), FastAPI + uvicorn, SQLite, Playwright async, ht
 
 ### Pasta
 
-`Tiktok Shop/flowpool/`, com `perfis/` (um diretório de perfil de navegador por conta) e `flowpool.db`.
+`Vibe Code/flowpool/flowpool/`, com `perfis/` (um diretório de perfil de navegador por conta) e `flowpool.db`.
 
 ## Decisões de geração
 

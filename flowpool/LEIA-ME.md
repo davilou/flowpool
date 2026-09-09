@@ -6,6 +6,18 @@ API HTTP; o painel web e os scripts do pipeline são clientes dela.
 
 O desenho inteiro está em `docs/superpowers/specs/2026-08-19-flowpool-design.md`.
 
+## Onde o projeto mora
+
+`C:\Users\User\Documents\Vibe Code\flowpool` — repositorio proprio desde 09/09/2026.
+Antes era uma pasta dentro do repo da Tiktok Shop, e a midia veio junto na mudanca:
+as pastas de produto (`Mega Bauwerke/clipes/`, `Canal Japones/clipes/`, ...) e as
+referencias coladas (`_coladas/`) ficam aqui.
+
+Esta pasta e a **raiz**, e ela decide tres coisas: onde o arquivo gerado cai, o que o
+seletor de referencias enxerga, e a base dos caminhos relativos gravados no banco. Por
+padrao e a pasta que contem o pacote; `FLOWPOOL_RAIZ` sobrescreve, para o dia em que o
+app e a midia morarem em lugares diferentes.
+
 ## Abrir o painel
 
 ```bash
