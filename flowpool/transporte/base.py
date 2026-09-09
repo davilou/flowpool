@@ -20,6 +20,7 @@ from flowpool.nucleo.tipos import (
 # `transporte.base` continuar funcionando. Duas classes com o mesmo nome fariam o
 # `except` do orquestrador pegar uma e deixar a outra passar como falha de rede.
 __all__ = [
+    "CardTrocado",
     "ErroTransporte",
     "Estado",
     "FlowTransport",
@@ -91,6 +92,23 @@ class SessaoMorta(ErroTransporte):
 
 class GeracaoFalhou(ErroTransporte):
     """O Flow aceitou e depois devolveu erro."""
+
+
+class CardTrocado(GeracaoFalhou):
+    """O card aberto nao e o resultado deste job. REPETIR NAO CONSERTA.
+
+    Card de imagem num job de video quer dizer que a IDENTIFICACAO furou — `card-0` e
+    posicional, e posicao mente assim que qualquer tile entra na frente. Um card do
+    tipo errado nao vira o certo com o tempo, entao o laco de download (que existe
+    para a falha que passa sozinha, o Chrome travando no blob) so gasta navegador.
+
+    ⚠️ JOBS 583-588, 2026-09-09: foram 21 tentativas cada, e no fim a mensagem do teto
+    afirmou que o resultado existia e ja fora pago. Nao existia — o Flow tinha recusado
+    a geracao sem cobrar. O usuario passou a tarde procurando video que nunca houve.
+
+    E filha de `GeracaoFalhou` para que todo `except GeracaoFalhou` que ja existia
+    continue pegando; quem quer a distincao pede por ela.
+    """
 
 
 class FlowTransport(Protocol):

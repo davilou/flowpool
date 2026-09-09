@@ -16,7 +16,7 @@ from flowpool.nucleo.custos import custo_de
 from flowpool.nucleo.erros import SaldoInsuficiente
 from flowpool.nucleo.escolha import escolher
 from flowpool.nucleo.tipos import EstadoJob, Job, Modelo, Modo, SaudeSessao, Tier
-from flowpool.transporte.base import ErroTransporte
+from flowpool.transporte.base import CardTrocado, ErroTransporte
 from flowpool.transporte.falso import TransporteFalso
 
 
@@ -1077,6 +1077,47 @@ async def test_download_que_nunca_funciona_desiste_e_diz_onde_esta_o_video(repo,
     assert t.tentativas_de_download <= MAX_DOWNLOADS + 3
     # a mensagem tem que dizer que o video existe — senao o usuario refaz e paga de novo
     assert final.erro and "ja foi pago" in final.erro
+
+
+class _TransporteComCardTrocado(TransporteFalso):
+    """O card aberto e de OUTRO tipo: a identificacao esta errada, nao o download."""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.tentativas_de_download = 0
+
+    async def baixar(self, s, id_remoto, destino):
+        self.tentativas_de_download += 1
+        raise CardTrocado(
+            f"{id_remoto} e um card de imagem e o job e video: "
+            "o card aberto nao e o resultado deste job")
+
+
+async def test_card_trocado_desiste_na_hora_em_vez_de_baixar_21_vezes(repo, tmp_path):
+    """⚠️ JOBS 583-588, 2026-09-09. Card de imagem nunca vira video repetindo.
+
+    O laco de download existe para a falha que PASSA sozinha — o Chrome que travava no
+    blob. Divergencia de TIPO nao passa: a identificacao esta errada, e insistir sao 21
+    aberturas de navegador para chegar na mesma recusa. Pior, a mensagem do teto
+    afirmava que o resultado existia e ja fora pago, e mandou o usuario procurar na
+    conta um video que nunca foi gerado.
+
+    Desistir na hora e o certo: e barato, e honesto, e quem decide o que fazer com um
+    job cuja identificacao furou e uma pessoa.
+    """
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 200; repo.salvar_conta(c)
+    jid = repo.criar_job(job_fast())
+    t = _TransporteComCardTrocado(saldos={cid: 200})
+
+    await ciclo(Orquestrador(repo, t, raiz=tmp_path))
+
+    final = repo.job(jid)
+    assert final.estado is EstadoJob.FALHOU
+    assert t.tentativas_de_download == 1, "uma tentativa, nao vinte e uma"
+    assert final.erro and "nao e o resultado deste job" in final.erro
+    # ⚠️ o que mandou o usuario procurar o que nao existia
+    assert "ja foi pago" not in (final.erro or "")
 
 
 async def test_conta_liberada_antecipa_o_job_que_esperava_a_janela(repo, tmp_path):

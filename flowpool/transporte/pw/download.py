@@ -19,7 +19,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from flowpool.nucleo.tipos import Modo
-from flowpool.transporte.base import GeracaoFalhou
+from flowpool.transporte.base import CardTrocado, GeracaoFalhou
 from flowpool.transporte.pw import acoes, analise, captura, dom
 from flowpool.transporte.pw import seletores as sel
 from flowpool.transporte.pw.cura import AutoCura
@@ -76,7 +76,11 @@ async def baixar(pagina, card, id_remoto: str, destino: Path, d: Diario,
     if modo is not None and tipo_na_tela is not None:
         esperado = "imagem" if modo is Modo.IMAGEM else "video"
         if tipo_na_tela != esperado:
-            raise GeracaoFalhou(
+            # `CardTrocado`, e nao `GeracaoFalhou` seca: o orquestrador tratava isto
+            # como falha de download e repetia ate o teto — 21 aberturas de navegador
+            # para chegar na mesma recusa, porque card de imagem nao vira video
+            # esperando. Ver o docstring de `CardTrocado`.
+            raise CardTrocado(
                 f"{id_remoto} e um card de {tipo_na_tela} e o job e {esperado}: "
                 f"o card aberto nao e o resultado deste job. Menu: {rotulos[:4]}")
 

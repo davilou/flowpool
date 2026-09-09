@@ -15,6 +15,7 @@ from flowpool.nucleo.credito import LIMIAR_DIVERGENCIA, liberar, reconciliar, re
 from flowpool.nucleo.escolha import apta, escolher
 from flowpool.nucleo.tipos import Conta, EstadoJob, Job, Modo, SaudeSessao
 from flowpool.transporte.base import (
+    CardTrocado,
     Estado,
     FlowTransport,
     GeracaoFalhou,
@@ -650,6 +651,23 @@ class Orquestrador:
             destino = self.raiz / job.destino / f"{job.nome}{_extensao(job.modo)}"
             try:
                 arquivo = await self.transporte.baixar(sessao, job.id_remoto, destino)
+            except CardTrocado as e:
+                # ⚠️ ISTO NAO E FALHA DE DOWNLOAD, E NAO ENTRA NO LACO DELE. O laco
+                # abaixo existe para a falha que passa sozinha (o Chrome travando no
+                # blob); um card do tipo errado nao vira o certo com o tempo — a
+                # identificacao e que furou. MEDIDO nos jobs 583-588 (2026-09-09): 21
+                # aberturas de navegador cada, todas parando na mesma recusa.
+                #
+                # Desiste na hora, e sem mexer em `id_remoto`: soltar ele mandaria
+                # gerar de novo, e se a geracao original EXISTIR (so mal identificada)
+                # isso paga duas vezes. Quem decide entre as duas coisas e uma pessoa
+                # olhando a conta — e agora a mensagem diz o que olhar.
+                self.repo.registrar_evento(
+                    job.id, conta.id, "card_trocado",
+                    json.dumps({"id_remoto": job.id_remoto, "erro": str(e)}))
+                self._devolver(job, f"{type(e).__name__}: {e}", gasta_tentativa=False,
+                               falha=sessao.falha if sessao else None, desistir=True)
+                return
             except Exception as e:
                 # BAIXAR DE NOVO NAO GASTA TENTATIVA — o resultado JA existe e JA foi
                 # pago. Gastar tentativa aqui jogaria fora o job inteiro por uma falha
@@ -884,7 +902,7 @@ class Orquestrador:
         return devolveu
 
     def _devolver(self, job: Job, erro: str, gasta_tentativa: bool,
-                  falha: dict | None = None) -> None:
+                  falha: dict | None = None, desistir: bool = False) -> None:
         """Devolve o job a fila.
 
         Com `id_remoto` preenchido, `id_remoto` e `conta_id` sao PRESERVADOS: existe
@@ -898,7 +916,11 @@ class Orquestrador:
         job.erro = erro
         if gasta_tentativa:
             job.tentativas += 1
-        if job.tentativas >= MAX_TENTATIVAS:
+        # `desistir` e para a falha que NAO melhora sozinha — hoje, o card trocado.
+        # Gastar as tentativas restantes ali seria abrir navegador duas vezes mais para
+        # chegar exatamente na mesma recusa, e adiar em minutos a noticia que a pessoa
+        # precisa ter agora.
+        if desistir or job.tentativas >= MAX_TENTATIVAS:
             job.estado = EstadoJob.FALHOU
         else:
             job.estado = EstadoJob.PENDENTE
