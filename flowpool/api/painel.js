@@ -40,10 +40,10 @@ const E = {
 const PREF = {
   ler(chave, padrao) {
     try { const v = localStorage.getItem(`flowpool:${chave}`); return v === null ? padrao : JSON.parse(v); }
-    catch (e) { return padrao; }
+    catch { return padrao; }
   },
   gravar(chave, valor) {
-    try { localStorage.setItem(`flowpool:${chave}`, JSON.stringify(valor)); } catch (e) { /* modo privado */ }
+    try { localStorage.setItem(`flowpool:${chave}`, JSON.stringify(valor)); } catch { /* modo privado */ }
   },
 };
 
@@ -1134,7 +1134,7 @@ async function pedirDiagnostico(id) {
     toast("erro", `Diagnóstico: ${e.message}`, 10000);
   } finally {
     diagnosticando = null;
-    try { eventosJob = { id, lista: await api(`/jobs/${id}/eventos`) }; } catch (e) { /* fica como estava */ }
+    try { eventosJob = { id, lista: await api(`/jobs/${id}/eventos`) }; } catch { /* fica como estava */ }
     delete assinaturas.detalhe; pintarDetalhe();
   }
 }
@@ -1157,7 +1157,7 @@ async function cancelarJob(id) {
 
 async function copiar(texto, rotulo) {
   try { await navigator.clipboard.writeText(texto); toast("ok", `${rotulo} copiado.`, 2500); }
-  catch (e) { toast("aviso", "O navegador não deixou copiar sozinho — selecione o campo e use Ctrl+C."); }
+  catch { toast("aviso", "O navegador não deixou copiar sozinho — selecione o campo e use Ctrl+C."); }
 }
 
 /* ---------------- gaveta da conta ---------------- */
@@ -1456,6 +1456,12 @@ async function enviarJob(ev) {
     PREF.gravar("produto", produto);
     $("job-prompt").value = "";
     $("job-produto-novo").value = "";
+    // `require-atomic-updates` acusa aqui, e a leitura dele esta certa: `anexos` e
+    // global e isto acontece DEPOIS do await. Nao e corrida mesmo assim — o retrato
+    // que vai para o servidor saiu de `corpoDoJob()` ANTES do await, e o composer
+    // fecha na linha seguinte. Zerar e o que se quer: o que a pessoa marcou enquanto
+    // o POST corria pertencia a um composer que ja esta indo embora.
+    // eslint-disable-next-line require-atomic-updates
     anexos = [];
     fecharComposer();
     toast("ok", `Job #${j.id} (${j.nome}) entrou na fila.`);
@@ -1561,7 +1567,7 @@ const RE_EXTENSAO_IMAGEM = /\.(png|jpe?g|webp|gif)$/i;
 function urlDeImagem(texto) {
   const t = (texto || "").trim();
   if (!/^https?:\/\//i.test(t) || /\s/.test(t)) return null;
-  try { return RE_EXTENSAO_IMAGEM.test(new URL(t).pathname) ? t : null; } catch (e) { return null; }
+  try { return RE_EXTENSAO_IMAGEM.test(new URL(t).pathname) ? t : null; } catch { return null; }
 }
 
 async function anexarColada(pedido) {
@@ -1812,7 +1818,7 @@ if (document.fonts) document.fonts.ready.then(medirGrade);
 /* ---------------- partida ---------------- */
 
 (async () => {
-  try { E.info = await api("/info"); } catch (e) { /* o painel funciona com os padroes; a tabela de custos fica vazia */ }
+  try { E.info = await api("/info"); } catch { /* o painel funciona com os padroes; a tabela de custos fica vazia */ }
   navegar();
   await atualizar();
   reagendar();

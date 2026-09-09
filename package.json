@@ -1,0 +1,11 @@
+{
+  "name": "flowpool-painel",
+  "private": true,
+  "description": "So o portao do painel. O FlowPool e Python; Node nao entra em producao — o painel e servido pelo proprio FastAPI, sem build step.",
+  "scripts": {
+    "lint": "eslint flowpool/api"
+  },
+  "devDependencies": {
+    "eslint": "10.10.0"
+  }
+}

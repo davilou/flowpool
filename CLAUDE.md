@@ -9,7 +9,8 @@ O desenho original: [`docs/superpowers/specs/2026-08-19-flowpool-design.md`](doc
 
 ## Comando de check
 
-Três comandos, todos têm que passar limpos. **Rode os três depois de cada mudança.**
+Quatro comandos, todos têm que passar limpos. **Rode os quatro depois de cada
+mudança** — o quarto só quando mexer no painel.
 
 ```bash
 .venv/Scripts/python.exe -m pytest -q
@@ -45,7 +46,16 @@ descer, nunca subir.** Quase todos são a mesma coisa: `repo.job(id)` devolve
 `Job | None` e o código segue como se nunca fosse None. O conserto certo é falhar alto
 com mensagem, não `assert`.
 
-> O 20º erro era bug de verdade e já foi consertado: `transporte.py` usava
+> ```bash
+npm run lint
+```
+
+O painel (`flowpool/api/*.js`). Zero achados hoje. Só precisa rodar quando mexer no
+painel, e exige `npm install` uma vez — **Node não entra em produção**: o painel é
+servido pelo próprio FastAPI, sem build step. A config está em `eslint.config.mjs`, com
+regras de correção e não de formatação, e o motivo de cada escolha ao lado.
+
+O 20º erro era bug de verdade e já foi consertado: `transporte.py` usava
 > `sel.BOTAO_UPLOAD_FRAME`, atributo que nunca existiu, num desvio herdado de uma
 > medição do popover do slot que foi corrigida no mesmo dia. **O popover do slot de
 > frame não envia arquivo** — só escolhe do acervo (`seletores.POPOVER_SLOT`), e é por
@@ -138,12 +148,18 @@ Auditado em 09/09/2026 contra as regras de estrutura (teto de 500 linhas por arq
 | arquivo | linhas | |
 |---|---|---|
 | `transporte/pw/transporte.py` | 1529 | corte parado na etapa 4 — ver abaixo |
-| `api/painel.js` | 1801 | |
+| `api/painel.js` | 1819 | longo, mas saudável — ver abaixo |
 | `motor/orquestrador.py` | 988 | `_executar` tem 202 linhas |
 | `transporte/pw/seletores.py` | 874 | mapa de seletores; cresce por natureza |
 | `transporte/pw/analise.py` | 640 | |
 | `transporte/pw/cura.py` | 544 | |
 | `api/esquemas.py` | 440 | acima do alvo de 400, abaixo do teto |
+
+**`painel.js` estoura o teto e mesmo assim NÃO deve ser quebrado** (medido 09/09/2026):
+124 funções de topo, só 3 acima de 50 linhas, zero código morto, zero `$("id")` órfão
+dos 97 usados, e o eslint com 26 regras de correção não acha nada. O motivo do teto —
+legibilidade — já está atendido. Quebrar significaria trocar script clássico por ES
+modules num arquivo sem teste automatizado, para consertar um número.
 
 **O corte do `transporte.py` parou na etapa 4** (09/09/2026), de 2315 para 1529:
 

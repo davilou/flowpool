@@ -39,3 +39,8 @@ flowpool.egg-info/
 # documentacao do projeto — o que vale para uma pessoa esta no CLAUDE.md e no LEIA-ME.
 # `.claude/launch.json` continua versionado: aquele e config do preview, e do repo.
 .claude/napkin.md
+
+# O eslint do painel. Node NAO entra em producao — o painel e servido pelo proprio
+# FastAPI, sem build step. Isto aqui existe so para `npm run lint` ter versao fixa;
+# quem clona roda `npm install` uma vez, e o `package-lock.json` diz qual arvore.
+node_modules/
