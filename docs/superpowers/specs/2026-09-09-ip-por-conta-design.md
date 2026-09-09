@@ -4,6 +4,21 @@ Data: 2026-09-09
 
 ## O problema
 
+> **CORRECAO, 09/09 as 15h — a premissa abaixo envelheceu antes da implementacao.**
+> Quando isto foi escrito, as nove contas estavam sem proxy. Na hora de implementar,
+> OITO DAS NOVE ja tinham proxy configurado (so a `daviright` continua sem), e a
+> primeira leitura de verdade — feita com o `ip_de_saida` deste desenho — deu **nove
+> IPs distintos para nove contas ativas, zero colisao**: cada proxy sai pelo proprio
+> endereco.
+>
+> O que isso muda: as tres suspeitas que motivaram o trabalho — proxy morto, proxy que
+> nao pegou, dois proxies caindo no mesmo IP — estao TODAS descartadas hoje. O que nao
+> muda: nada disso era observavel antes, e continua nao sendo sem esta conferencia. A
+> proxima troca de proxy volta a ser um palpite ate alguem apertar o botao.
+>
+> O "ja consumado" abaixo tambem continua valendo: as nove contas foram correlacionadas
+> pelo mesmo IP ANTES dos proxies existirem, e proxy novo nao desfaz grafo velho.
+
 As nove contas cadastradas estao todas com `proxy = NULL` — todas saem pelo IP desta
 maquina. Duas consequencias, e so uma delas e teorica:
 
@@ -159,6 +174,27 @@ resposta na mensagem; timeout levanta com o proxy na mensagem; proxy invalido le
 **Rota**: 200 grava conta e evento; 404 em conta inexistente; 400 em proxy invalido;
 502 quando a leitura falha, e nesse caso `ip_saida` **nao** e sobrescrito — leitura
 falha nao apaga a ultima leitura boa.
+
+## Como ficou
+
+Implementado em quatro commits, um por camada, na ordem das dependencias:
+`060a3cd` (nucleo + transporte), `fb3f99c` (banco), `a46b756` (rota), `f34fc2f`
+(painel). Tres coisas sairam diferentes do desenhado, e as tres por medicao:
+
+**`proxy=` e `transport=` nao convivem no httpx.** Com os dois, ele monta o transporte
+do proxy e ignora o injetado — o teste "sem rede" ia buscar DNS de verdade. O duplo
+agora substitui a rede inteira, e o custo esta escrito no modulo: a suite exercita a
+leitura, a validacao e a traducao da URL, mas NAO o roteamento pelo proxy. Isso so se
+prova com proxy de verdade, e foi o que a conferencia das nove contas fez.
+
+**O botao do painel nasceu morto.** O painel tem DOIS despachantes de clique, e a
+gaveta tem o proprio — registrar so no `cliqueNoConteudo` nao liga nada. Nem o eslint
+nem os testes pegam isso; achou-se abrindo o navegador e olhando se o evento
+`ip_conferido` aparecia na linha do tempo.
+
+**A migracao ganhou o primeiro teste de migracao do repositorio.** Monta um banco com o
+esquema antigo, poe uma conta dentro e confere que ela sobrevive com as colunas novas
+vazias. Conferido por mutacao.
 
 ## Consequencias
 
