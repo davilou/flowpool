@@ -15,7 +15,7 @@ import pytest
 
 from flowpool.nucleo.tipos import Conta, Modo, Tier
 from flowpool.transporte.base import GeracaoFalhou, Sessao
-from flowpool.transporte.pw import captura
+from flowpool.transporte.pw import captura, download
 from flowpool.transporte.pw import seletores as sel
 from flowpool.transporte.pw.diario import Diario
 from flowpool.transporte.pw.transporte import TransportePlaywright
@@ -253,16 +253,14 @@ async def test_submenu_e_achado_pelo_conteudo_e_nao_por_ser_o_ultimo():
     """JOBS 29 e 30: a versao antiga dormia 1,5 s e pegava `MENU_CARD.last`. Com o
     submenu demorando, o `.last` ainda era o menu de cima, que nao tem 720p."""
     pagina = _Pagina([], por_volta=[[["720p", "1080p"], MENU_VIDEO]])  # alvo e o PRIMEIRO
-    itens, indice = await TransportePlaywright()._esperar_submenu_com(
-        pagina, "720p", Diario(1))
+    itens, indice = await download.esperar_submenu_com(pagina, "720p", Diario(1))
     assert (await itens.all_inner_texts())[indice] == "720p"
 
 
 async def test_submenu_que_demora_e_esperado_em_vez_de_dar_erro():
     pagina = _Pagina([], por_volta=[[MENU_VIDEO], [MENU_VIDEO],
                                     [MENU_VIDEO, ["720p", "1080p"]]])
-    itens, indice = await TransportePlaywright()._esperar_submenu_com(
-        pagina, "720p", Diario(1))
+    itens, indice = await download.esperar_submenu_com(pagina, "720p", Diario(1))
     assert (await itens.all_inner_texts())[indice] == "720p"
     assert pagina.dormiu_ms > 0, "chegou tarde: tem que ter esperado"
 
@@ -271,8 +269,7 @@ async def test_submenu_que_nunca_vem_lista_o_que_havia_na_tela():
     """Sem isso a falha chegava como "achei 0" sem dizer o que existia."""
     pagina = _Pagina([MENU_VIDEO])
     with pytest.raises(GeracaoFalhou, match="adicionar ao cenario"):
-        await TransportePlaywright()._esperar_submenu_com(
-            pagina, "720p", Diario(1), teto_ms=1_000)
+        await download.esperar_submenu_com(pagina, "720p", Diario(1), teto_ms=1_000)
 
 
 # --------------------------------------------------------- _esperar_captura
@@ -291,14 +288,14 @@ async def test_download_nativo_vira_erro_que_nomeia_o_arquivo(captura_falsa):
 
     pagina.wait_for_timeout = dispara_o_nativo
     with pytest.raises(GeracaoFalhou, match="download NATIVO"):
-        await TransportePlaywright()._esperar_captura(pagina, Diario(1), teto_ms=2_000)
+        await download.esperar_captura(pagina, Diario(1), teto_ms=2_000)
 
 
 async def test_esperar_captura_nao_deixa_ouvinte_para_tras(captura_falsa):
     """Uma sessao baixa varias vezes: ouvinte a mais por chamada e vazamento com cara
     de bug intermitente."""
     pagina = _Pagina([MENU_VIDEO])
-    await TransportePlaywright()._esperar_captura(pagina, Diario(1))
+    await download.esperar_captura(pagina, Diario(1))
     assert pagina.ouvintes["download"] == []
 
 
@@ -306,4 +303,4 @@ async def test_captura_que_nunca_chega_falha_dizendo_quanto_esperou(captura_fals
     captura_falsa["capturas"] = []
     pagina = _Pagina([MENU_VIDEO])
     with pytest.raises(GeracaoFalhou, match="nenhum blob foi capturado em 2s"):
-        await TransportePlaywright()._esperar_captura(pagina, Diario(1), teto_ms=2_000)
+        await download.esperar_captura(pagina, Diario(1), teto_ms=2_000)
