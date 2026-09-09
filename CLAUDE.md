@@ -16,7 +16,7 @@ mudança** — o quarto só quando mexer no painel.
 .venv/Scripts/python.exe -m pytest -q
 ```
 
-757 testes, ~15 s. A suíte não abre navegador, não gasta crédito e não fala com o modelo
+806 testes, ~20 s. A suíte não abre navegador, não gasta crédito e não fala com o modelo
 de visão — se algum teste ficar lento ou pedir rede, alguma coisa vazou de camada.
 
 ```bash
@@ -181,7 +181,7 @@ modules num arquivo sem teste automatizado, para consertar um número.
 | 2 ✔ | `pw/grade.py` | 261 | 10 |
 | 3 ✔ | `pw/download.py` | 212 | 10 |
 | 4 ✔ | `pw/chip.py` | 422 | 12 |
-| 5 ✗ | anexos e mídia (~606 linhas) | — | — |
+| 5 ✗ | anexos e mídia (~606 linhas) | não movido | **42** — a rede veio sem o corte |
 
 A forma: função livre recebendo o que precisa; o transporte fica com o estado e vira
 costura de três linhas onde há estado a entregar (`_clicar_unico`, `_card`, `_baixar`,
@@ -190,14 +190,26 @@ arquivo — ver abaixo. **Rede antes do corte, e mutação para provar que a red
 três canais laterais viraram retorno no caminho (`_identidade_nova`, `_ultimo_custo`, o
 modo do download).
 
-**A etapa 5 foi decidida contra, e o motivo importa.** Os quatro cortes anteriores
-tinham regras enumeráveis, uma por teste. O bloco de mídia são ~18 métodos em cadeia
-com armadilhas de TEMPO E ORDEM — o retry que fechava o painel recém-aberto, o homônimo
-do acervo que passava por "upload terminou", a espera que terminava cedo demais. Duplo
-de página honesto para isso é bem mais caro, e duplo desonesto é pior que nenhum. Além
-disso a conta não fecha: 1529 − 606 ainda é 923, acima do teto. Se for investir nessa
-direção, **escreva a rede da mídia sem mover nada** — o ganho real das etapas 3 e 4 não
-foi o arquivo menor, foi `_baixar` e `_configurar` saírem de zero teste para 22.
+**A etapa 5 foi decidida contra, e o corte segue sem valer.** A conta não fecha:
+1551 − 606 ainda é 945, acima do teto — e medido em linhas de CÓDIGO o arquivo já está
+em 544. O que valia era a rede, e ela foi escrita **sem mover nada**
+(`tests/test_midia.py`, 42 testes): o ganho real das etapas 3 e 4 nunca foi o arquivo
+menor, foi `_baixar` e `_configurar` saírem de zero teste para 22.
+
+**E aqui mora a lição mais cara desta sessão.** Eu declarei TRÊS VEZES que um método do
+bloco de mídia não era testável — `_anexar`, `_incluir_do_acervo` e
+`_enviar_no_seletor_aberto` — dizendo que um duplo honesto teria que modelar a animação
+do overlay. Nas três eu estava errado, e sempre pelo mesmo erro de raciocínio: **uma
+parte** não dava (a mecânica do sistema operacional — seletor nativo de arquivo,
+`expect_file_chooser`) e eu estendi isso ao método inteiro.
+
+A saída foi sempre a mesma, e vale como receita: **isole a parte impossível num duplo e
+deixe a decisão rodar de verdade.** `_enviar_arquivos` e `captura` entram por duplo; o
+que se exercita é o que o método DECIDE — limpar antes, uma volta por referência,
+conferir QUAIS entraram, o que conta como "chegou no acervo".
+
+Do bloco, 15 dos 18 métodos têm rede. Os três de fora (`_ids_anexados`,
+`_itens_da_lista`, `_slot_cheio`) são uma linha de `evaluate` cada.
 
 **`_executar` foi de 242 para 74 linhas em 09/09/2026** sem quebrar o arquivo. Os sete
 tratadores de falha viraram métodos com nome — `_ao_perder_sessao`, `_ao_bater_limite`,
