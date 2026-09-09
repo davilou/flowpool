@@ -19,16 +19,22 @@ que ja aconteceu de verdade:
   a posicao sem conferencia  os dois slots de Frames sao escolhidos por posicao, e isso
                              so e aceitavel porque cada um e conferido depois.
 
-NAO ESTA COBERTO AQUI, e de proposito: `_anexar`, `_incluir_do_acervo` e
-`_enviar_no_seletor_aberto`. Os tres orquestram o ciclo inteiro do painel (abrir,
-enviar, esperar upload, marcar, incluir, fechar), e um duplo honesto para eles teria
-que modelar a animacao do overlay. Duplo desonesto e pior que nenhum: passaria verde
-sem guardar nada.
+`_anexar` e `_incluir_do_acervo` ENTRARAM depois, e a chave foi separar o que da para
+modelar do que nao da: a mecanica do envio (`_enviar_arquivos`) abre o seletor NATIVO
+de arquivo do sistema e entra por duplo, como o `captura` entrou nos testes de
+download. O que se exercita e a DECISAO — limpar antes, uma volta por referencia,
+conferir QUAIS entraram.
+
+CONTINUA FORA, e de proposito: `_enviar_no_seletor_aberto`. Ele depende de
+`expect_file_chooser` e da chegada assincrona das miniaturas no acervo; um duplo
+honesto para isso teria que modelar a animacao do overlay, e duplo desonesto e pior que
+nenhum — passaria verde sem guardar nada.
 """
 
 import pytest
 
-from flowpool.transporte.base import GeracaoFalhou
+from flowpool.nucleo.tipos import Modelo, Modo
+from flowpool.transporte.base import GeracaoFalhou, Pedido
 from flowpool.transporte.pw import dom
 from flowpool.transporte.pw import seletores as sel
 from flowpool.transporte.pw.diario import Diario
@@ -70,6 +76,11 @@ class _Loc:
         return self.pagina.atributos.get((self.seletor, nome))
 
     async def click(self, timeout=None):
+        # CLICAR NO VAZIO ESTOURA, como no Playwright de verdade. Sem isto o duplo
+        # aprova codigo que clica em elemento ausente — e foi exatamente o que
+        # deixou `test_o_botao_incluir_e_OPCIONAL` passar sem dente.
+        if self.pagina.quantos(self.seletor) == 0:
+            raise TimeoutError(f"nada casa {self.seletor}")
         self.pagina.clicar(self.seletor)
 
 
@@ -116,7 +127,8 @@ class _Pagina:
 
     def __init__(self, *, presentes=None, atributos=None, visivel=None,
                  itens=(), itens_por_volta=None, refs=(),
-                 slots_cheios=(), enche_ao_clicar=(), some_ao_tirar=True):
+                 slots_cheios=(), enche_ao_clicar=(), some_ao_tirar=True,
+                 entra_ao_clicar=(), proximas_fichas=()):
         self.presentes = dict(presentes or {})
         self.atributos = dict(atributos or {})
         self.visivel = dict(visivel or {})
@@ -126,6 +138,11 @@ class _Pagina:
         self.slots_cheios = set(slots_cheios)
         self.enche_ao_clicar = set(enche_ao_clicar)
         self.some_ao_tirar = some_ao_tirar
+        # que seletores, ao serem clicados, poem uma ficha na barra do prompt — e qual
+        # ficha. Com a lista vazia, nada entra: e assim que se exercita "a ficha nunca
+        # chegou", que e o erro que nomeia o arquivo.
+        self.entra_ao_clicar = set(entra_ao_clicar)
+        self.proximas_fichas = list(proximas_fichas)
         self.volta = 0
         self.clicados = []
         self.escapes = []
@@ -167,6 +184,8 @@ class _Pagina:
             self.presentes[sel.REFERENCIA_ANEXADA] -= 1
             if self.refs:
                 self.refs.pop()
+        if seletor in self.entra_ao_clicar and self.proximas_fichas:
+            self.refs.append(_src(self.proximas_fichas.pop(0)))
 
 
 def _aberto(**extra):
@@ -405,3 +424,201 @@ async def test_slot_que_nao_mostra_a_imagem_derruba_nomeando_o_arquivo():
                        match=r"a-inicial\.png nao entrou no slot inicio"):
         await TransportePlaywright()._preencher_slots(
             pagina, [{"id": "id-a", "nome": "a-inicial.png"}], Diario(1))
+
+
+# ============================================================================
+# `_incluir_do_acervo` — uma volta do seletor por referencia
+# ============================================================================
+
+def _com_seletor_aberto(**extra):
+    """O seletor de midia montado, para `_abrir_seletor_midia` sair pelo atalho."""
+    base = _aberto(**extra)
+    return base
+
+
+async def test_incluir_devolve_o_id_que_entrou():
+    """Devolve o ID, e nao None, porque quem chama precisa conferir QUAL entrou —
+    e a diferenca entre aprovar duas fichas iguais e reprovar."""
+    item = {"id": "midia-a", "nome": "a.png"}
+    pagina = _Pagina(
+        presentes=_com_seletor_aberto(**{sel.ITEM_MIDIA_POR_ID.format(id="midia-a"): 1,
+                                         sel.BOTAO_INCLUIR_NO_COMANDO: 1}),
+        atributos={(sel.BOTAO_ANEXAR, sel.ATRIBUTO_ANEXAR): sel.ANEXAR_ABERTO},
+        entra_ao_clicar={sel.BOTAO_INCLUIR_NO_COMANDO}, proximas_fichas=["midia-a"])
+
+    assert await TransportePlaywright()._incluir_do_acervo(
+        pagina, item, Diario(1)) == "midia-a"
+
+
+async def test_o_botao_incluir_e_OPCIONAL():
+    """Uma sonda viu o menu fechar sozinho num caso isolado: se o botao nao esta na
+    tela, o clique no item ja resolveu, e insistir seria clicar no vazio."""
+    item = {"id": "midia-a", "nome": "a.png"}
+    alvo = sel.ITEM_MIDIA_POR_ID.format(id="midia-a")
+    pagina = _Pagina(
+        presentes=_com_seletor_aberto(**{alvo: 1, sel.BOTAO_INCLUIR_NO_COMANDO: 0}),
+        atributos={(sel.BOTAO_ANEXAR, sel.ATRIBUTO_ANEXAR): sel.ANEXAR_ABERTO},
+        entra_ao_clicar={alvo}, proximas_fichas=["midia-a"])
+
+    assert await TransportePlaywright()._incluir_do_acervo(
+        pagina, item, Diario(1)) == "midia-a"
+
+
+async def test_item_que_nao_esta_no_acervo_e_erro():
+    item = {"id": "sumiu", "nome": "a.png"}
+    pagina = _Pagina(
+        presentes=_com_seletor_aberto(**{sel.ITEM_MIDIA_POR_ID.format(id="sumiu"): 0}),
+        atributos={(sel.BOTAO_ANEXAR, sel.ATRIBUTO_ANEXAR): sel.ANEXAR_ABERTO})
+
+    with pytest.raises(GeracaoFalhou, match="item sumiu"):
+        await TransportePlaywright()._incluir_do_acervo(pagina, item, Diario(1))
+
+
+async def test_item_AMBIGUO_no_acervo_e_erro_e_nao_desempate():
+    """Dois candidatos e ambiguidade. Escolher um no escuro poe a midia errada no
+    comando — e a geracao sai plausivel, com o arquivo errado."""
+    item = {"id": "midia-a", "nome": "a.png"}
+    pagina = _Pagina(
+        presentes=_com_seletor_aberto(**{sel.ITEM_MIDIA_POR_ID.format(id="midia-a"): 2}),
+        atributos={(sel.BOTAO_ANEXAR, sel.ATRIBUTO_ANEXAR): sel.ANEXAR_ABERTO})
+
+    with pytest.raises(GeracaoFalhou, match="achei 2"):
+        await TransportePlaywright()._incluir_do_acervo(pagina, item, Diario(1))
+
+
+async def test_ficha_que_nao_chega_na_barra_nomeia_o_arquivo():
+    """Sem o nome, a falha nao diz QUAL das referencias ficou pelo caminho."""
+    item = {"id": "midia-a", "nome": "a-roupa.png"}
+    pagina = _Pagina(
+        presentes=_com_seletor_aberto(**{sel.ITEM_MIDIA_POR_ID.format(id="midia-a"): 1,
+                                         sel.BOTAO_INCLUIR_NO_COMANDO: 1}),
+        atributos={(sel.BOTAO_ANEXAR, sel.ATRIBUTO_ANEXAR): sel.ANEXAR_ABERTO})
+        # `entra_ao_clicar` vazio: o clique acontece e a ficha nunca aparece
+
+    with pytest.raises(GeracaoFalhou, match=r"a-roupa\.png nao entrou na barra"):
+        await TransportePlaywright()._incluir_do_acervo(pagina, item, Diario(1))
+
+
+# ============================================================================
+# `_anexar` — a orquestracao: limpar, enviar, incluir uma a uma, CONFERIR quais
+# ============================================================================
+
+def _pedido(modo, referencias=(), frame_inicial=None, frame_final=None):
+    return Pedido(modo=modo, modelo=Modelo.NANO_BANANA_2, prompt="x",
+                  referencias=list(referencias),
+                  frame_inicial=frame_inicial, frame_final=frame_final)
+
+
+def _envio_falso(monkeypatch, novos):
+    """`_enviar_arquivos` entra por duplo: a mecanica dele e o seletor NATIVO de
+    arquivo do sistema, que nenhuma pagina falsa modela com honestidade. O que se
+    exercita aqui e a decisao — limpar antes, uma volta por referencia, conferir
+    QUAIS entraram."""
+    chamadas = []
+
+    async def falso(self, pagina, arquivos, d):
+        chamadas.append(list(arquivos))
+        return list(novos)
+
+    monkeypatch.setattr(TransportePlaywright, "_enviar_arquivos", falso)
+    return chamadas
+
+
+def _pagina_para_anexar(ids, fichas=None):
+    alvos = {sel.ITEM_MIDIA_POR_ID.format(id=i): 1 for i in ids}
+    return _Pagina(
+        presentes=_aberto(**{**alvos, sel.BOTAO_INCLUIR_NO_COMANDO: 1,
+                             sel.REFERENCIA_ANEXADA: 0}),
+        atributos={(sel.BOTAO_ANEXAR, sel.ATRIBUTO_ANEXAR): sel.ANEXAR_ABERTO},
+        entra_ao_clicar={sel.BOTAO_INCLUIR_NO_COMANDO},
+        proximas_fichas=list(ids if fichas is None else fichas))
+
+
+async def test_modo_que_EXIGE_arquivo_sem_arquivo_e_erro_nomeando_o_modo():
+    """`ingredients2v` sem referencia nao tem o que gerar."""
+    with pytest.raises(GeracaoFalhou, match="ingredients2v sem arquivo"):
+        await TransportePlaywright()._anexar(
+            _Pagina(), _pedido(Modo.INGREDIENTS2V), Diario(1))
+
+
+async def test_imagem_sem_referencia_volta_sem_tocar_em_nada():
+    """Imagem sem referencia e o caso COMUM: geracao por texto puro. Confundir com o
+    modo que exige transformaria toda geracao de imagem em erro."""
+    pagina = _Pagina()
+    await TransportePlaywright()._anexar(pagina, _pedido(Modo.IMAGEM), Diario(1))
+    assert pagina.clicados == []
+
+
+async def test_frames2v_nao_passa_por_aqui():
+    """Os arquivos do frames sobem ANTES de trocar de modo, e os slots sao preenchidos
+    por `_preencher_slots`. Deixar passar aqui geraria envio em duplicidade."""
+    with pytest.raises(GeracaoFalhou, match="frames2v nao usa"):
+        await TransportePlaywright()._anexar(
+            _Pagina(), _pedido(Modo.FRAMES2V, frame_inicial="a.png"), Diario(1))
+
+
+async def test_limpa_o_rascunho_ANTES_de_anexar(monkeypatch):
+    """Referencia herdada de uma tentativa que morreu no meio: o Flow SOMA a proxima
+    em vez de trocar, e a segunda tentativa geraria com o dobro das referencias."""
+    _envio_falso(monkeypatch, [{"id": "midia-a", "nome": "a.png"}])
+    pagina = _pagina_para_anexar(["midia-a"])
+    pagina.presentes[sel.REFERENCIA_ANEXADA] = 2
+    pagina.presentes[sel.BOTAO_TIRAR_REFERENCIA] = 1
+    pagina.refs = [_src("velha-1"), _src("velha-2")]
+
+    await TransportePlaywright()._anexar(
+        pagina, _pedido(Modo.IMAGEM, ["a.png"]), Diario(1))
+
+    assert pagina.clicados[0] == sel.BOTAO_TIRAR_REFERENCIA, "limpar vem primeiro"
+    assert pagina.clicados.count(sel.BOTAO_TIRAR_REFERENCIA) == 2
+
+
+async def test_uma_volta_do_seletor_por_referencia(monkeypatch):
+    """MEDIDO que a selecao do seletor e EXCLUSIVA: nao ha como marcar tres e incluir
+    de uma vez."""
+    _envio_falso(monkeypatch, [{"id": "midia-a", "nome": "a.png"},
+                               {"id": "midia-b", "nome": "b.png"}])
+    pagina = _pagina_para_anexar(["midia-a", "midia-b"])
+
+    await TransportePlaywright()._anexar(
+        pagina, _pedido(Modo.IMAGEM, ["a.png", "b.png"]), Diario(1))
+
+    assert pagina.clicados.count(sel.BOTAO_INCLUIR_NO_COMANDO) == 2
+
+
+async def test_o_envio_vira_UMA_tacada_so(monkeypatch):
+    """MEDIDO 2026-09-05: o input criado pelo "enviar midia" tem `multiple`, e dois
+    arquivos subiram juntos em 11,2 s. Uma volta por arquivo era da aplicacao antiga."""
+    chamadas = _envio_falso(monkeypatch, [{"id": "midia-a", "nome": "a.png"},
+                                          {"id": "midia-b", "nome": "b.png"}])
+    pagina = _pagina_para_anexar(["midia-a", "midia-b"])
+
+    await TransportePlaywright()._anexar(
+        pagina, _pedido(Modo.IMAGEM, ["a.png", "b.png"]), Diario(1))
+
+    assert chamadas == [["a.png", "b.png"]], "os dois num envio so"
+
+
+async def test_DUAS_FICHAS_IGUAIS_reprovam(monkeypatch):
+    """O defeito de 21/08: a versao por CONTAGEM aprovava duas fichas iguais, e um job
+    real saiu com a mesma foto duas vezes — sem erro, credito gasto, resultado
+    plausivel. O usuario so descobriu conferindo a conta."""
+    _envio_falso(monkeypatch, [{"id": "midia-a", "nome": "a.png"},
+                               {"id": "midia-b", "nome": "b.png"}])
+    # o acervo entrega a MESMA ficha nas duas voltas
+    pagina = _pagina_para_anexar(["midia-a", "midia-b"], fichas=["midia-a", "midia-a"])
+
+    with pytest.raises(GeracaoFalhou, match="anexo REPETIDO"):
+        await TransportePlaywright()._anexar(
+            pagina, _pedido(Modo.IMAGEM, ["a.png", "b.png"]), Diario(1))
+
+
+async def test_ficha_TROCADA_reprova(monkeypatch):
+    """Entrou midia que nao e de nenhum dos arquivos enviados: a geracao sairia com a
+    foto errada, e sem sintoma nenhum."""
+    _envio_falso(monkeypatch, [{"id": "midia-a", "nome": "a.png"}])
+    pagina = _pagina_para_anexar(["midia-a"], fichas=["intrusa"])
+
+    with pytest.raises(GeracaoFalhou, match="anexo TROCADO"):
+        await TransportePlaywright()._anexar(
+            pagina, _pedido(Modo.IMAGEM, ["a.png"]), Diario(1))
