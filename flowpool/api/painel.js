@@ -309,6 +309,19 @@ function linhaDoTempo(eventos) {
 
 /* ---------------- estado do sistema e atencao ---------------- */
 
+/* Duas contas ATIVAS saindo pelo mesmo IP. Espelha `nucleo.proxy.colisoes`, e pela
+   mesma razao ignora quem nunca foi conferido: ausência de leitura não é evidência, e
+   juntar os nunca-conferidos faria o aviso gritar sobre o que ninguém mediu. */
+function colisoesDeIp() {
+  const por = new Map();
+  for (const c of E.contas) {
+    if (!c.ativa || !c.ip_saida) continue;
+    if (!por.has(c.ip_saida)) por.set(c.ip_saida, []);
+    por.get(c.ip_saida).push(c);
+  }
+  return [...por.entries()].filter(([, cs]) => cs.length > 1);
+}
+
 function itensAtencao() {
   const itens = [];
   const agora = new Date();
@@ -769,6 +782,7 @@ function cascaContas() {
   return `<div class="pagina">
     <div class="pagina-cabeca"><div><h1>Contas</h1><p id="contas-sub">O pool. Cada conta tem sessão própria, saldo próprio e, se quiser, IP próprio.</p></div>
       <div class="acoes"><button type="button" class="botao primario" data-nova-conta>${icone("mais")}Adicionar conta</button></div></div>
+    <div id="aviso-colisao"></div>
     <div class="cartao"><div class="tabela-envelope" id="tabela-contas"></div></div>
   </div>`;
 }
@@ -808,6 +822,12 @@ function pintarContas() {
   $("contas-sub").textContent = E.contas.length
     ? `${E.contas.length} no pool · ${vivas} viva${vivas === 1 ? "" : "s"} · ${E.saude ? E.saude.credito_total : "—"} créditos somados (mas cada job cabe em uma conta só)`
     : "Nenhuma conta ainda. Cadastre a primeira — o cadastro abre um Chrome para você logar.";
+  const batem = colisoesDeIp();
+  $("aviso-colisao").innerHTML = batem.length ? batem.map(([ip, cs]) =>
+    `<div class="alerta aviso">${icone("alerta")}<div class="alerta-texto"><strong>${cs.length} contas saem pelo mesmo IP (${esc(ip)}).</strong>
+      ${cs.map((c) => esc(c.email)).join(", ")} — é isso que o proxy por conta existe para evitar. Sem proxy, todas saem pelo IP desta máquina.</div></div>`).join("")
+    : "";
+
   const ass = JSON.stringify(E.contas) + sessaoEmCurso + Math.floor(Date.now() / 60000);
   if (!mudou("contas", ass)) return;
   const foco = document.activeElement;
@@ -1214,6 +1234,7 @@ function pintarGaveta() {
       <button type="button" class="botao mini ${c.saude !== "viva" ? "aviso" : ""}" data-revalidar="${c.id}" ${sessaoEmCurso ? "disabled" : ""}>${icone("atualizar")}Revalidar sessão</button>
       <button type="button" class="botao mini" data-saldo="${c.id}">${icone("saldo")}Ler saldo agora</button>
       <button type="button" class="botao mini" data-abrir-conta="${c.id}">${icone("janela")}Abrir o Chrome</button>
+      <button type="button" class="botao mini" data-conferir-ip="${c.id}">${icone("janela")}Conferir IP</button>
     </div><p class="dica">Ler saldo abre uma janela e não gasta crédito. Abrir o Chrome deixa a conta ocupada até você fechar a janela.</p></div>
     <div class="detalhe-secao"><h3>Editar</h3><div class="campos">
       <div class="campos-linha">
@@ -1224,6 +1245,9 @@ function pintarGaveta() {
         <span class="mono pequeno leve">${c.proxy ? esc(c.proxy) : "sem proxy — sai pelo IP desta máquina"}</span>
         <div class="linha-arquivo"><input type="text" class="campo-proxy" data-id="${c.id}" placeholder="http://host:porta ou socks5://host:porta"><button type="button" class="botao mini" data-salvar-proxy="${c.id}">Salvar</button>${c.proxy ? `<button type="button" class="botao mini" data-tirar-proxy="${c.id}">Tirar</button>` : ""}</div>
         <p class="dica">O valor atual chega mascarado; por isso o campo nasce vazio. Trocar o proxy troca o IP por onde a conta sai — e o Google repara em mudança de IP.</p></label>
+      <label class="campo"><span>IP de saída</span>
+        <span class="mono pequeno leve">${c.ip_saida ? `${esc(c.ip_saida)} · lido ${esc(relativo(c.ip_lido_em))}` : "nunca conferido"}</span>
+        <p class="dica">“Conferir IP” faz um GET e lê o endereço — não abre navegador, leva menos de um segundo. Mede por onde o proxy sai, e não o que o Chrome mostra ao Google: vazamento de WebRTC ou DNS fora do túnel não aparece aqui.</p></label>
     </div></div>
     <div class="detalhe-secao"><h3>Linha do tempo</h3>${linhaDoTempo(eventosConta.lista)}</div>`;
 }
@@ -1234,6 +1258,15 @@ async function alterarConta(id, corpo) {
     toast("ok", "Conta atualizada.", 2500);
     await atualizar();
   } catch (e) { toast("erro", e.message); }
+}
+
+async function conferirIp(id, email) {
+  toast("info", `Conferindo por qual IP ${email} sai…`, 3000);
+  try {
+    const c = await api(`/contas/${id}/conferir-ip`, { metodo: "POST" });
+    toast("ok", `${email} sai por ${c.ip_saida}.`);
+  } catch (e) { toast("erro", `Não deu para ler o IP de ${email}: ${e.message}`, 10000); }
+  await atualizar();
 }
 
 async function lerSaldo(id, email) {
@@ -1755,6 +1788,7 @@ $("gaveta").addEventListener("click", (ev) => {
   if (d.revalidar) revalidar(Number(d.revalidar), emailDaConta(Number(d.revalidar)));
   else if (d.saldo) lerSaldo(Number(d.saldo), emailDaConta(Number(d.saldo)));
   else if (d.abrirConta) abrirConta(Number(d.abrirConta), emailDaConta(Number(d.abrirConta)));
+  else if (d.conferirIp) conferirIp(Number(d.conferirIp), emailDaConta(Number(d.conferirIp)));
   else if (d.salvarProxy) {
     const campo = $("gaveta").querySelector(`.campo-proxy[data-id="${d.salvarProxy}"]`);
     const novo = campo.value.trim();
