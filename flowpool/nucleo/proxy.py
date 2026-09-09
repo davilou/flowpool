@@ -1,4 +1,4 @@
-"""Traducao da URL de proxy de uma conta. Puro: sem rede, sem I/O, sem navegador.
+"""Por onde a conta sai. Puro: sem rede, sem I/O, sem navegador.
 
 Cada conta do pool sai por um IP proprio para o Google nao correlacionar as contas
 entre si. Medicao de campo (20/08): o Flow ja recusa geracao a partir do IP domestico
@@ -7,11 +7,18 @@ barra e baixa. Nao e preciso proxy residencial premium; e preciso OUTRO IP.
 
 Isto mora no nucleo porque e logica pura e precisa de teste sem rede. O transporte le
 o resultado; a decisao inteira sobre o que e uma URL usavel acontece aqui.
+
+Duas coisas moram aqui, e sao o mesmo assunto: traduzir a URL que a conta usa
+(`analisar`, `argumento_chrome`, `mascarar`) e dizer quando duas contas acabaram no
+MESMO IP (`agrupar_por_ip`, `colisoes`). Quem le o IP de verdade e `transporte/ip.py`;
+daqui nao sai pacote nenhum.
 """
 
 from __future__ import annotations
 
 import re
+from collections import defaultdict
+from collections.abc import Mapping
 from urllib.parse import SplitResult, unquote, urlsplit
 
 from flowpool.nucleo.erros import ProxyInvalido
@@ -127,3 +134,35 @@ def mascarar(url: str | None) -> str | None:
     if host:
         return bruto
     return re.sub(r"(//)[^/@]*@", rf"\1{SENHA_MASCARADA}@", bruto)
+
+
+def agrupar_por_ip(ips: Mapping[int, str | None]) -> dict[str, list[int]]:
+    """Quais contas saem por cada IP. `None` fica de fora.
+
+    ⚠️ CONTA NUNCA CONFERIDA NAO ENTRA. Ausencia de leitura nao e evidencia de nada, e
+    juntar todos os `None` num balde faria as nove contas de hoje — nenhuma conferida —
+    aparecerem como se dividissem um IP. O aviso nasceria gritando sobre o que ninguem
+    mediu, e aviso que grita sempre e aviso que ninguem le.
+
+    As listas saem ordenadas para a mensagem ser estavel entre duas leituras: "contas
+    1 e 4" nao pode virar "4 e 1" so porque o dicionario mudou de ordem.
+    """
+    por_ip: dict[str, list[int]] = defaultdict(list)
+    for conta_id, ip in ips.items():
+        if ip:
+            por_ip[ip].append(conta_id)
+    return {ip: sorted(contas) for ip, contas in por_ip.items()}
+
+
+def colisoes(ips: Mapping[int, str | None]) -> dict[str, list[int]]:
+    """So os IPs com DUAS OU MAIS contas — o recorte que pede acao.
+
+    E a checagem que o proxy existe para permitir e que ninguem fazia: proxy morto
+    falha alto, porque o Chrome nao conecta; proxy vivo e repetido entre duas contas
+    passa em silencio. Duas contas correlacionadas pelo IP e exatamente o que o proxy
+    por conta existe para evitar.
+
+    Quem decide QUAIS contas entram no mapa e o chamador. A regra "so as ativas" mora
+    na rota, porque depende do estado do banco — aqui nao ha banco.
+    """
+    return {ip: contas for ip, contas in agrupar_por_ip(ips).items() if len(contas) > 1}

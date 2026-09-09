@@ -6,7 +6,11 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "playwright>=1.48",
-    "httpx>=0.27",
+    # `[socks]` traz o `socksio`, e sem ele o httpx nao fala SOCKS5. `socks5` e
+    # `socks5h` sao dois dos quatro esquemas que `nucleo.proxy.ESQUEMAS` aceita:
+    # confirmacao de IP que funciona em metade dos casos e pior que nenhuma, porque
+    # falha justamente onde ninguem desconfia.
+    "httpx[socks]>=0.27",
     "pydantic>=2.9",
 ]
 
