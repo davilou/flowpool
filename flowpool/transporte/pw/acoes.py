@@ -117,7 +117,7 @@ async def quantos(escopo, seletor: str) -> int:
     transforma um sinal que faltava numa falha do job.
 
     ⚠️ E PRECISA SER CODIGO, NAO DISCIPLINA. `grade.falhou`, `grade.sem_credito` e
-    `grade.por_limite_de_uso` ja escreviam essa guarda cada uma a sua maneira; em
+    `grade.recusa_sem_cobranca` ja escreviam essa guarda cada uma a sua maneira; em
     `_consultar` ela faltou em dois lugares, e `sel.PENDENTE` ("...") foi para o
     Playwright, que o le como XPath. MEDIDO 2026-09-09, jobs 583-588: `Locator.count:
     SyntaxError: The string '...' is not a valid XPath expression` derrubou `consultar`

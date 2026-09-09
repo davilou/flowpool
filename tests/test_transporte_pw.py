@@ -1031,30 +1031,56 @@ async def test_seletor_pendente_nao_vira_falha_nem_vai_para_o_playwright():
     assert sel.CARD_FALHA_TITULO in card.vistos
 
 
-async def test_limite_de_uso_exige_as_duas_marcas():
+class _CardParcial:
+    """Um card de falha em que so algumas marcas casam."""
+
+    def __init__(self, casam):
+        self.casam = casam
+
+    def locator(self, seletor):
+        return _ContaFixa(1 if seletor in self.casam else 0)
+
+
+class _ContaFixa:
+    def __init__(self, n):
+        self.n = n
+
+    async def count(self):
+        return self.n
+
+
+async def test_recusa_sem_cobranca_exige_a_marca_do_motivo_E_a_da_nao_cobranca():
     """Uma marca so nao basta: "limite" aparece noutros avisos do Flow, e concluir
-    limite de uso por engano tiraria uma conta boa do pool por ESPERA_RESET inteiro."""
-    class _CardParcial:
-        def __init__(self, casam):
-            self.casam = casam
-
-        def locator(self, seletor):
-            return _Conta(1 if seletor in self.casam else 0)
-
-    class _Conta:
-        def __init__(self, n):
-            self.n = n
-
-        async def count(self):
-            return self.n
-
-    # so a frase do limite, sem "nao houve cobranca": nao decide
-    assert await grade.por_limite_de_uso(_CardParcial({sel.CARD_LIMITE_DE_USO})) is False
+    recusa por engano tiraria uma conta boa do pool por ESPERA_RESET inteiro."""
+    # so a frase do motivo, sem "nao houve cobranca": nao decide
+    assert await grade.recusa_sem_cobranca(_CardParcial({sel.CARD_LIMITE_DE_USO})) is False
     # so "nao houve cobranca": tambem nao
-    assert await grade.por_limite_de_uso(_CardParcial({sel.CARD_SEM_COBRANCA})) is False
-    # as duas: e limite de uso
-    assert await grade.por_limite_de_uso(
+    assert await grade.recusa_sem_cobranca(_CardParcial({sel.CARD_SEM_COBRANCA})) is False
+    # as duas: e recusa
+    assert await grade.recusa_sem_cobranca(
         _CardParcial({sel.CARD_LIMITE_DE_USO, sel.CARD_SEM_COBRANCA})) is True
+
+
+async def test_atividade_incomum_tambem_e_recusa_sem_cobranca():
+    """⚠️ MEDIDO por print 2026-09-09, e custou os jobs 583-588 inteiros.
+
+    O card dizia:
+
+        Falha
+        Notamos uma atividade incomum. Aguarde alguns instantes antes de tentar de
+        novo ou acesse a Central de Ajuda para mais informacoes.
+        Nao houve cobranca por esta geracao.
+
+    E o bloqueio antiabuso do Google — as tres contas dispararam no mesmo segundo,
+    todas sem proxy. A acao certa e a MESMA do limite de uso: nao houve cobranca,
+    repetir nesta conta nao adianta, troca-se de conta. Como a frase nao casava, o
+    codigo caia no ramo do repetir e morria no seletor PENDENTE.
+    """
+    assert await grade.recusa_sem_cobranca(
+        _CardParcial({sel.CARD_ATIVIDADE_INCOMUM, sel.CARD_SEM_COBRANCA})) is True
+    # sem a marca de nao-cobranca continua sendo falha comum, que se repete pelo card
+    assert await grade.recusa_sem_cobranca(
+        _CardParcial({sel.CARD_ATIVIDADE_INCOMUM})) is False
 
 
 def test_desligar_o_audio_continua_por_medir():
@@ -1745,6 +1771,24 @@ async def test_card_de_falha_nao_manda_o_botao_repetir_pendente_ao_playwright():
                     handle=(None, None, pagina))
 
     assert await TransportePlaywright().consultar(sessao, "card-0") is Estado.FALHOU
+
+
+async def test_consultar_troca_de_conta_no_card_de_atividade_incomum():
+    """O caminho inteiro: card de atividade incomum -> `LimiteDeUso`.
+
+    E `LimiteDeUso` porque e ele que o orquestrador ja trata do jeito certo — estorna,
+    poe a conta de molho, SOLTA `id_remoto` e `conta_id` e devolve o job a fila sem
+    gastar tentativa. Foi exatamente o que faltou nos jobs 583-588: sem soltar o
+    `id_remoto`, as tentativas seguintes vieram como retomada e nunca regeraram.
+    """
+    card = _EscopoQueRecusaPendente(
+        marcas={sel.CARD_FALHA_TITULO, sel.CARD_ATIVIDADE_INCOMUM, sel.CARD_SEM_COBRANCA})
+    pagina = _PaginaQueRecusaPendente(card)
+    sessao = Sessao(conta=Conta(id=1, email="a@b.com", tier=Tier.FREE, perfil=Path(".")),
+                    handle=(None, None, pagina))
+
+    with pytest.raises(LimiteDeUso, match="atividade incomum"):
+        await TransportePlaywright().consultar(sessao, "card-0")
 
 
 class _BarraSemEnviar:

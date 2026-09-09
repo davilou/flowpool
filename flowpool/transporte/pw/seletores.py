@@ -504,6 +504,21 @@ CARD_FALHA_TITULO = 'text=/^\\s*Falha\\s*$/i'
 CARD_LIMITE_DE_USO = 'text=/limite de uso|usage limit/i'
 CARD_SEM_COBRANCA = 'text=/n[ãa]o houve cobran[çc]a|no charge/i'
 
+# ⚠️ O BLOQUEIO ANTIABUSO — O SEGUNDO MOTIVO DE RECUSA SEM COBRANÇA, e ele custou os
+# jobs 583-588 inteiros. MEDIDO por print em 2026-09-09
+# (`scratch/falhas/consultar-error.png`), o card tem as três linhas:
+#
+#     Falha
+#     Notamos uma atividade incomum. Aguarde alguns instantes antes de tentar de novo
+#     ou acesse a Central de Ajuda para mais informações.
+#     Não houve cobrança por esta geração.
+#
+# É o Google reagindo à concorrência: três contas disparando no mesmo segundo, todas
+# pelo mesmo IP (`proxy` vazio em todas). A ação é a MESMA do limite de uso — nada
+# foi cobrado, repetir nesta conta não adianta, troca-se de conta —, e por isso as
+# duas frases entram na MESMA decisão (`grade.recusa_sem_cobranca`).
+CARD_ATIVIDADE_INCOMUM = 'text=/atividade incomum|unusual activity/i'
+
 BOTAO_REPETIR_CARD = PENDENTE
 
 # MEDIDO: os menus são `mat-menu` renderizados no overlay do CDK.

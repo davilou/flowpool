@@ -1374,12 +1374,22 @@ class TransportePlaywright:
             # estorna o credito reservado (o card confirma "Nao houve cobranca"), marca
             # a conta com prazo em `seca_ate`, NAO gasta tentativa do job e devolve para
             # a fila — outra conta pega na hora.
-            if await grade.por_limite_de_uso(card):
+            if await grade.recusa_sem_cobranca(card):
+                # A MENSAGEM DIZ QUAL DOS DOIS MOTIVOS FOI, porque eles se resolvem de
+                # jeitos diferentes: limite de uso passa com o reset da conta;
+                # atividade incomum e o antiabuso do Google reagindo a concorrencia, e
+                # passa afrouxando o paralelismo. Um texto so mandaria olhar o lugar
+                # errado — e foi o que aconteceu nos jobs 583-588.
+                motivo = await grade.motivo_da_recusa(card)
+                porque = ("atividade incomum (o antiabuso do Google; costuma ser "
+                          "concorrencia demais no mesmo IP)"
+                          if motivo == sel.CARD_ATIVIDADE_INCOMUM else
+                          "limite de uso da conta")
                 self._diario(s.conta.id).passo(
-                    f"{id_remoto}: o Flow recusou por LIMITE DE USO, nao por falta de "
-                    f"credito. Repetir aqui nao adianta — trocando de conta.")
+                    f"{id_remoto}: o Flow RECUSOU por {porque}, e nao cobrou. "
+                    f"Repetir aqui nao adianta — trocando de conta.")
                 raise LimiteDeUso(
-                    f"conta {s.conta.email} atingiu o limite de uso do Flow "
+                    f"conta {s.conta.email}: o Flow recusou por {porque} "
                     f"(sem cobranca por esta geracao; o saldo continua valendo)")
 
             vezes = self._repeticoes.get((s.conta.id, id_remoto), 0)

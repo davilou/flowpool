@@ -186,23 +186,47 @@ async def achar(pagina, id_remoto: str, conta_id: int | None = None,
     return cards.nth(indice)
 
 
-async def por_limite_de_uso(card) -> bool:
-    """Se aquele card de falha e LIMITE DE USO da conta, e nao falha da geracao.
+# Os motivos MEDIDOS de recusa sem cobranca. Sao dois textos e uma decisao so, porque
+# a acao que eles pedem e a mesma: trocar de conta. Motivo novo entra aqui.
+_MOTIVOS_DE_RECUSA = (sel.CARD_LIMITE_DE_USO, sel.CARD_ATIVIDADE_INCOMUM)
+
+
+async def motivo_da_recusa(card) -> str | None:
+    """Qual motivo de recusa esta no card, para a mensagem dizer a verdade.
+
+    Devolve o seletor que casou, ou None. Existe porque "atingiu o limite de uso" e
+    "atividade incomum" pedem a mesma acao mas sao problemas DIFERENTES do ponto de
+    vista de quem opera: um passa com o reset do dia, o outro passa afrouxando o
+    paralelismo. Reportar os dois com o mesmo texto mandaria olhar o lugar errado.
+    """
+    for seletor in _MOTIVOS_DE_RECUSA:
+        if await acoes.quantos(card, seletor) > 0:
+            return seletor
+    return None
+
+
+async def recusa_sem_cobranca(card) -> bool:
+    """Se aquele card de falha e RECUSA DA CONTA, e nao falha da geracao.
 
     Distingue duas coisas que o codigo tratava igual e pedem acoes OPOSTAS:
-    falha de geracao pede `redo` na mesma conta; limite de uso pede trocar de
-    conta, porque repetir bate no mesmo limite.
+    falha de geracao pede `redo` na mesma conta; recusa pede trocar de conta,
+    porque repetir bate no mesmo bloqueio.
 
-    Exige as DUAS marcas — a frase do limite e a de "nao houve cobranca". Uma so
-    seria frágil: "limite" aparece em outros avisos do Flow, e concluir limite de
-    uso por engano tiraria uma conta boa do pool por `ESPERA_RESET` inteiro.
+    Exige DUAS marcas — a frase do motivo e a de "nao houve cobranca". Uma so
+    seria frágil: "limite" aparece em outros avisos do Flow, e concluir recusa
+    por engano tiraria uma conta boa do pool por `ESPERA_RESET` inteiro.
+
+    ⚠️ CHAMAVA-SE `por_limite_de_uso`, E O NOME ESTREITO ERA O DEFEITO. Ele descrevia
+    o unico motivo medido ate entao, e quando o Google recusou por OUTRO motivo — o
+    antiabuso, "Notamos uma atividade incomum" — nada aqui casou. A recusa virou falha
+    comum, o codigo foi tentar clicar em `redo` e morreu no seletor pendente. Jobs
+    583-588, 2026-09-09: seis geracoes perdidas, nenhuma cobrada, e o painel dizendo
+    que o resultado existia. O que decide e "o Flow recusou E nao cobrou"; o motivo e
+    detalhe da mensagem.
     """
-    for seletor in (sel.CARD_LIMITE_DE_USO, sel.CARD_SEM_COBRANCA):
-        if not seletor or seletor == sel.PENDENTE:
-            return False
-        if await card.locator(seletor).count() == 0:
-            return False
-    return True
+    if not await motivo_da_recusa(card):
+        return False
+    return await acoes.quantos(card, sel.CARD_SEM_COBRANCA) > 0
 
 
 async def falhou(card) -> bool:
