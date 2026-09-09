@@ -75,4 +75,5 @@ def resposta_conta(c: Conta) -> RespostaConta:
     return RespostaConta(id=c.id, email=c.email, tier=c.tier, saldo=c.saldo,
                          saldo_confiavel=c.saldo_confiavel, saude=c.saude,
                          ativa=c.ativa, falhas=c.falhas, proxy=mascarar(c.proxy),
-                         saldo_lido_em=c.saldo_lido_em, seca_ate=c.seca_ate)
+                         saldo_lido_em=c.saldo_lido_em, seca_ate=c.seca_ate,
+                         ip_saida=c.ip_saida, ip_lido_em=c.ip_lido_em)

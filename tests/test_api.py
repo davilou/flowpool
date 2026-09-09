@@ -1027,3 +1027,106 @@ def test_diagnosticar_sem_modelo_da_503(cliente):
                                 "nome": "n"}).json()["id"]
     j = repo.job(jid); j.estado = EstadoJob.FALHOU; j.erro = "x"; repo.salvar_job(j)
     assert c.post(f"/jobs/{jid}/diagnosticar").status_code == 503
+
+
+# --- conferir o IP de saida de uma conta -------------------------------------
+
+
+def _ip_falso(monkeypatch, valor=None, erro=None):
+    """Troca a leitura de IP por um duplo. A rota importa o nome no modulo dela."""
+    chamadas = []
+
+    async def falsa(proxy, transporte=None):
+        chamadas.append(proxy)
+        if erro:
+            raise erro
+        return valor
+
+    monkeypatch.setattr("flowpool.api.rotas.contas.ip_de_saida", falsa)
+    return chamadas
+
+
+def test_conferir_ip_grava_na_conta_e_na_linha_do_tempo(cliente, monkeypatch):
+    c, repo = cliente
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    chamadas = _ip_falso(monkeypatch, valor="203.0.113.7")
+
+    r = c.post(f"/contas/{cid}/conferir-ip")
+
+    assert r.status_code == 200
+    assert r.json()["ip_saida"] == "203.0.113.7"
+    assert r.json()["ip_lido_em"]
+    assert repo.conta(cid).ip_saida == "203.0.113.7"
+    assert chamadas == [None], "conta sem proxy mede o IP da maquina, e isso vale"
+    tipos = [e["tipo"] for e in repo.eventos_da_conta(cid)]
+    assert "ip_conferido" in tipos
+
+
+def test_conferir_ip_usa_o_proxy_da_conta(cliente, monkeypatch):
+    c, repo = cliente
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    conta = repo.conta(cid)
+    conta.proxy = "http://proxy.exemplo:8080"
+    repo.salvar_conta(conta)
+    chamadas = _ip_falso(monkeypatch, valor="198.51.100.4")
+
+    c.post(f"/contas/{cid}/conferir-ip")
+
+    assert chamadas == ["http://proxy.exemplo:8080"]
+
+
+def test_conferir_ip_de_conta_inexistente_da_404(cliente, monkeypatch):
+    c, _ = cliente
+    _ip_falso(monkeypatch, valor="203.0.113.7")
+    assert c.post("/contas/999/conferir-ip").status_code == 404
+
+
+def test_proxy_invalido_da_400_com_a_url_na_mensagem(cliente, monkeypatch):
+    from flowpool.nucleo.erros import ProxyInvalido
+    c, repo = cliente
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    _ip_falso(monkeypatch, erro=ProxyInvalido("proxy 'torto' sem esquema"))
+
+    r = c.post(f"/contas/{cid}/conferir-ip")
+
+    assert r.status_code == 400
+    assert "torto" in r.json()["detail"], "quem conserta e quem digitou: precisa ver a URL"
+
+
+def test_leitura_que_falha_da_502_e_NAO_APAGA_a_ultima_leitura_boa(cliente, monkeypatch):
+    """Leitura que falhou nao e evidencia de nada. Sobrescrever trocaria informacao
+    velha por nenhuma — a conta voltaria a "nunca conferido" justamente quando alguem
+    foi conferir."""
+    from flowpool.transporte.ip import LeituraDeIpFalhou
+    c, repo = cliente
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    conta = repo.conta(cid)
+    conta.ip_saida = "203.0.113.7"
+    conta.ip_lido_em = datetime(2026, 9, 9, 12, 0, tzinfo=timezone.utc)
+    repo.salvar_conta(conta)
+    _ip_falso(monkeypatch, erro=LeituraDeIpFalhou("o proxy nao respondeu"))
+
+    r = c.post(f"/contas/{cid}/conferir-ip")
+
+    assert r.status_code == 502
+    assert repo.conta(cid).ip_saida == "203.0.113.7", "a leitura boa continua la"
+    assert repo.conta(cid).ip_lido_em == datetime(2026, 9, 9, 12, 0, tzinfo=timezone.utc)
+
+
+def test_listar_contas_traz_o_ip_e_a_data(cliente, monkeypatch):
+    c, repo = cliente
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    _ip_falso(monkeypatch, valor="203.0.113.7")
+    c.post(f"/contas/{cid}/conferir-ip")
+
+    linha = c.get("/contas").json()[0]
+
+    assert linha["ip_saida"] == "203.0.113.7"
+    assert linha["ip_lido_em"]
+
+
+def test_conta_nunca_conferida_vem_com_ip_nulo(cliente):
+    c, repo = cliente
+    repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    linha = c.get("/contas").json()[0]
+    assert linha["ip_saida"] is None and linha["ip_lido_em"] is None

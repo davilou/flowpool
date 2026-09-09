@@ -354,6 +354,12 @@ class RespostaConta(BaseModel):
     saldo_lido_em: datetime | None = None
     # Ate quando o Flow recusou gerar apesar do saldo. No futuro = conta fora da escolha.
     seca_ate: datetime | None = None
+    # Por qual IP a conta saiu na ultima conferencia, e quando. NAO HA O QUE MASCARAR:
+    # IP de saida e publico por definicao — e exatamente o que o mundo ja ve. O que se
+    # mascara e a credencial do proxy, que e outra coisa e continua em `proxy`.
+    # `None` = nunca conferido, que e diferente de "sai pelo IP da maquina".
+    ip_saida: str | None = None
+    ip_lido_em: datetime | None = None
 
 
 class PatchConta(BaseModel):

@@ -1,9 +1,10 @@
-"""O pool: cadastrar, revalidar, reler saldo e abrir para conferir."""
+"""O pool: cadastrar, revalidar, reler saldo, conferir o IP e abrir na tela."""
 
 from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
@@ -22,6 +23,7 @@ from flowpool.nucleo.tipos import (
     SaudeSessao,
 )
 from flowpool.transporte.base import SessaoMorta
+from flowpool.transporte.ip import LeituraDeIpFalhou, ip_de_saida
 from flowpool.transporte.pw.sessao import (
     ChromeAusente,
     PerfilOcupado,
@@ -176,6 +178,42 @@ def rotas_contas(repo: Repo, orq: Orquestrador, raiz: Path | str) -> APIRouter:
             raise HTTPException(
                 409, f"nao deu para ler o saldo de {c.email}; "
                      "a sessao pode ter caido — revalide a conta")
+        return resposta_conta(c)
+
+    @rota.post("/contas/{id_}/conferir-ip", response_model=RespostaConta)
+    async def conferir_ip(id_: int) -> RespostaConta:
+        """Le por qual IP esta conta sai AGORA, e grava o resultado.
+
+        Sob comando do operador, e nao sozinho: e uma pergunta de diagnostico, feita
+        quando ha motivo para desconfiar — conta recusada, proxy recem-trocado, duvida
+        sobre colisao.
+
+        NAO ABRE NAVEGADOR. Sao ~300 ms de HTTP contra ~8 s de Chrome, e por isso da
+        para conferir ate uma conta que esta gerando — nao ha perfil disputado.
+
+        Conta sem proxy tambem se confere: o IP desta maquina e uma resposta valida, e
+        e por ele que as nove contas de hoje saem.
+        """
+        c = repo.conta(id_)
+        if c is None:
+            raise HTTPException(404, "conta nao existe")
+        try:
+            achado = await ip_de_saida(c.proxy)
+        except ProxyInvalido as e:
+            # a URL nao serve nem para tentar: 400, porque quem conserta e quem digitou
+            raise HTTPException(400, str(e)) from e
+        except LeituraDeIpFalhou as e:
+            # ⚠️ `ip_saida` NAO E SOBRESCRITO AQUI. Leitura que falhou nao e evidencia
+            # de nada, e apagar a ultima leitura boa trocaria uma informacao velha por
+            # nenhuma — a conta voltaria a "nunca conferido" justamente quando alguem
+            # foi conferir.
+            raise HTTPException(502, str(e)) from e
+
+        c.ip_saida = achado
+        c.ip_lido_em = datetime.now(timezone.utc)
+        repo.salvar_conta(c)
+        repo.registrar_evento(None, c.id, "ip_conferido",
+                              json.dumps({"ip": achado, "com_proxy": bool(c.proxy)}))
         return resposta_conta(c)
 
     @rota.get("/contas/{id_}/eventos", response_model=list[RespostaEvento])
