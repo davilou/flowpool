@@ -710,72 +710,10 @@ class Orquestrador:
             try:
                 arquivo = await self.transporte.baixar(sessao, job.id_remoto, destino)
             except CardTrocado as e:
-                # ⚠️ ISTO NAO E FALHA DE DOWNLOAD, E NAO ENTRA NO LACO DELE. O laco
-                # abaixo existe para a falha que passa sozinha (o Chrome travando no
-                # blob); um card do tipo errado nao vira o certo com o tempo — a
-                # identificacao e que furou. MEDIDO nos jobs 583-588 (2026-09-09): 21
-                # aberturas de navegador cada, todas parando na mesma recusa.
-                #
-                # Desiste na hora, e sem mexer em `id_remoto`: soltar ele mandaria
-                # gerar de novo, e se a geracao original EXISTIR (so mal identificada)
-                # isso paga duas vezes. Quem decide entre as duas coisas e uma pessoa
-                # olhando a conta — e agora a mensagem diz o que olhar.
-                self.repo.registrar_evento(
-                    job.id, conta.id, "card_trocado",
-                    json.dumps({"id_remoto": job.id_remoto, "erro": str(e)}))
-                self._devolver(job, f"{type(e).__name__}: {e}", gasta_tentativa=False,
-                               falha=sessao.falha if sessao else None, desistir=True)
+                self._apos_card_trocado(job, conta, sessao, e)
                 return
             except Exception as e:
-                # BAIXAR DE NOVO NAO GASTA TENTATIVA — o resultado JA existe e JA foi
-                # pago. Gastar tentativa aqui jogaria fora o job inteiro por uma falha
-                # DEPOIS da cobranca; repetir so o download custa tempo e um navegador.
-                #
-                # A causa raiz da intermitencia de 2026-09-05 foi encontrada em
-                # 2026-09-06: o processo do Chrome TRAVAVA no download nativo de blob
-                # (ver `transporte/pw/captura.py`). O transporte deixou de usar o
-                # download do Chrome, e este caminho passou a ser a excecao — fica pelo
-                # mesmo motivo de sempre: uma falha depois da cobranca nao pode custar
-                # o job.
-                vezes = self._downloads_falhos.get(job.id, 0) + 1
-                self._downloads_falhos[job.id] = vezes
-                self.repo.registrar_evento(
-                    job.id, conta.id, "download_falhou",
-                    json.dumps({"erro": f"{type(e).__name__}: {e}", "vezes": vezes}))
-                # TETO. Sem ele isto vira laco quente: um download que nunca funciona
-                # abriria e fecharia navegador para sempre, sem gastar tentativa e sem
-                # nunca desistir. Chegando aqui, a falha e de verdade e o job para —
-                # com o video ainda la, e a mensagem dizendo isso.
-                if vezes >= MAX_DOWNLOADS:
-                    # NAO zera o contador. Zerando, a tentativa seguinte do job
-                    # recomecaria a contagem e o teto viraria MAX_DOWNLOADS vezes o
-                    # numero de tentativas — 24 aberturas de navegador para um
-                    # download que nunca vai funcionar.
-                    # ⚠️ A MENSAGEM DIZ O QUE SE SABE, E NAO MAIS DO QUE ISSO.
-                    #
-                    # Ela afirmava, categorica, "o resultado EXISTE e ja foi pago". Nos
-                    # jobs 583-588 (2026-09-09) isso era FALSO: o Flow tinha recusado a
-                    # geracao sem cobrar, e o robo estava tentando baixar uma imagem de
-                    # referencia que a posicao `card-0` entregou no lugar do video. O
-                    # usuario leu a frase, foi procurar o video na conta e nao achou —
-                    # meia tarde perdida por causa de uma certeza que ninguem verificou.
-                    #
-                    # O que se sabe de verdade aqui: o card passou na conferencia de
-                    # TIPO (divergencia sai por `CardTrocado`, acima) e o download nao
-                    # trouxe os bytes. Isso torna provavel que o resultado esteja la —
-                    # provavel o bastante para NAO gerar de novo por reflexo, e nao o
-                    # bastante para mandar alguem procurar sem avisar que e preciso
-                    # conferir.
-                    raise GeracaoFalhou(
-                        f"o download falhou {vezes} vezes seguidas e o job para aqui. "
-                        f"O card {job.id_remoto} da conta {conta.email} passou na "
-                        f"conferencia de tipo, entao o resultado provavelmente esta la "
-                        f"e ja foi pago: CONFIRA na conta antes de gerar de novo, para "
-                        f"nao pagar duas vezes. "
-                        f"Ultimo erro: {type(e).__name__}: {e}"
-                    ) from e
-                job.reavaliar_em = None
-                self._devolver(job, f"{type(e).__name__}: {e}", gasta_tentativa=False)
+                self._apos_download_falho(job, conta, e)
                 return
 
             self._downloads_falhos.pop(job.id, None)
@@ -786,126 +724,218 @@ class Orquestrador:
             self.repo.registrar_evento(job.id, conta.id, "pronto")
 
         except SessaoMorta as e:
-            # A sessao nao morre so em `abrir_sessao`: no transporte real ela cai no
-            # meio de `gerar`/`consultar`/`baixar`. Como este e o primeiro `except`,
-            # sem estornar aqui o credito reservado sumiria do saldo local para
-            # sempre. `_estornar` e no-op depois que o Flow aceitou, entao nao infla.
-            if self._estornar(job, conta):
-                self.repo.salvar_conta(conta)
-            conta.saude = SaudeSessao.EXPIRADA
-            # escrita de campo especifico: `salvar_conta` grava a linha inteira a
-            # partir de uma copia velha, e outro worker ressuscitaria a sessao
-            self.repo.marcar_sessao(conta.id, SaudeSessao.EXPIRADA)
-            self._evento_de_falha(job, conta, "sessao_morta")
-            self._devolver(job, str(e), gasta_tentativa=False,
-                           falha=sessao.falha if sessao else None)
+            self._ao_perder_sessao(job, conta, sessao, e)
 
         except LimiteDeUso as e:
-            # ⚠️ LIMITE DE USO NAO E FALTA DE CREDITO, e a diferenca aparece na tela.
-            # RELATADO pelo usuario 2026-09-09: geracao de IMAGEM custa zero, entao a
-            # conta bate no limite COM credito sobrando. Reportar isso como saldo
-            # faria o painel acusar problema de credito numa conta cheia, e mandaria
-            # ele investigar a coisa errada.
-            #
-            # A ACAO e a mesma do saldo — prazo de descanso, job de volta a fila sem
-            # gastar tentativa, outra conta pega. O que muda e o nome e o evento.
-            # E `saldo_confiavel` continua TRUE: nada foi cobrado, o numero local
-            # segue valendo, e derruba-lo forcaria uma reconciliacao inutil.
-            #
-            # ⚠️ `sem_cobranca=True`: o card exigiu a frase "Nao houve cobranca" para
-            # chegar aqui, entao a regra "aceitou, logo cobrou" nao vale — ver
-            # `_estornar`. O `salvar_conta` logo abaixo grava o saldo devolvido junto
-            # com o `limite_ate`.
-            self._estornar(job, conta, sem_cobranca=True)
-            # ⚠️ `limite_ate`, NAO `seca_ate`. `seca_ate` e sobre credito e libera de
-            # proposito o que e de graca — com ele, `apta` seguia devolvendo True para
-            # imagem e o motor reescolhia a conta que acabara de recusar.
-            conta.limite_ate = datetime.now(timezone.utc) + ESPERA_RESET
-            self.repo.salvar_conta(conta)
-
-            # ⚠️ QUEM DESCANSA E A CONTA, NAO O JOB. A primeira versao disto copiou o
-            # `job.reavaliar_em = conta.seca_ate` do saldo e ESTACIONOU O JOB POR UMA
-            # HORA com outras contas livres do lado — visto em 2026-09-09 no job 439,
-            # parado enquanto as contas 3 e 5 estavam com saldo 50 e sem descanso.
-            # `reivindicar` so pega job com `reavaliar_em` nulo ou vencido, e a escolha
-            # de conta ja pula quem tem `seca_ate` no futuro: marcar a conta basta.
-            job.reavaliar_em = self._quando_reavaliar(job, datetime.now(timezone.utc))
-
-            # ⚠️ E SOLTA A CONTA E O CARD. `_devolver` preserva `conta_id` sempre que
-            # `id_remoto` esta preenchido, porque isso normalmente significa "existe
-            # geracao PAGA em curso, retome aquela em vez de pagar de novo". Aqui e o
-            # oposto: o card e o de FALHA, e ele mesmo diz "nao houve cobranca". Manter
-            # os dois prendia o job justamente na conta que acabou de recusar.
-            job.id_remoto = None
-            job.conta_id = None
-
-            self._evento_de_falha(job, conta, "conta_no_limite")
-            self._devolver(job, str(e), gasta_tentativa=False,
-                           falha=sessao.falha if sessao else None)
+            self._ao_bater_limite(job, conta, sessao, e)
 
         except SaldoInsuficiente as e:
-            # Vem de duas fontes: o guarda local em `reservar` (a conta tem credito
-            # real, so nao o bastante para este modelo) ou o proprio Flow. Estornar e
-            # deixar a reconciliacao do `finally` adotar o numero verdadeiro — zerar o
-            # saldo na mao apagaria credito que existe e tiraria a conta do pool.
-            #
-            # Marcar a conta seca COM PRAZO e o que impede o laco quente: se o Flow
-            # mostra saldo mas recusa gerar (cota diaria, throttle), sem prazo o job
-            # volta a fila na mesma hora, para a mesma conta, abrindo e fechando um
-            # Chrome por iteracao, sem gastar tentativa e sem nunca desistir.
-            self._estornar(job, conta)
-            agora = datetime.now(timezone.utc)
-            conta.seca_ate = agora + ESPERA_RESET
-            conta.saldo_confiavel = False
-            self.repo.salvar_conta(conta)
-            # ⚠️ NAO e mais `= conta.seca_ate`. Ver `_quando_reavaliar`: adiar o job
-            # por uma hora com outras contas livres foi defeito medido em 2026-09-09.
-            # A conta continua descansando; o JOB so espera se ninguem puder pega-lo.
-            job.reavaliar_em = self._quando_reavaliar(job, agora)
-            self._evento_de_falha(job, conta, "conta_seca")
-            self._devolver(job, str(e), gasta_tentativa=False,
-                           falha=sessao.falha if sessao else None)
+            self._ao_secar(job, conta, sessao, e)
 
         except Exception as e:  # falha de rede, timeout, geracao errada
-            # `_estornar` decide sozinho se devolve: so devolve enquanto o Flow ainda
-            # nao aceitou o pedido. Falha de download ou geracao recusada acontece
-            # depois da cobranca, e ali estornar inflaria o saldo.
-            self._estornar(job, conta)
-            conta.falhas += 1
-            self.repo.salvar_conta(conta)
-            self._evento_de_falha(job, conta, "falhou", {"erro": str(e)})
-            self._devolver(job, f"{type(e).__name__}: {e}", gasta_tentativa=True,
-                           falha=sessao.falha if sessao else None)
+            self._ao_falhar(job, conta, sessao, e)
 
         finally:
             if sessao is not None:
-                saudavel = False
-                try:
-                    lido = await self.transporte.saldo(sessao)
-                    delta = reconciliar(conta, lido, datetime.now(timezone.utc))
-                    conta.falhas = 0 if job.estado is EstadoJob.PRONTO else conta.falhas
-                    self.repo.salvar_conta(conta)
-                    if abs(delta) >= LIMIAR_DIVERGENCIA:
-                        # a medicao que responde se imagem custa credito ou sai de
-                        # graca. Calcular o delta com sinal e joga-lo fora apagava o
-                        # unico dado real que o projeto tem sobre custo.
-                        self.repo.registrar_evento(
-                            job.id, conta.id, "divergencia",
-                            json.dumps({"delta": delta, "lido": lido}))
-                    saudavel = True
-                except Exception as e:
-                    # o `except: pass` daqui engolia tambem falha de `salvar_conta` —
-                    # o silencio que transformava conta seca em laco infinito
-                    self.repo.registrar_evento(job.id, conta.id, "reconciliacao_falhou",
-                                               json.dumps({"erro": str(e)}))
-                # A leitura de saldo e a PROVA de que a sessao ainda responde: ela
-                # abre e fecha o menu do avatar. Sessao que passou fica guardada para
-                # o proximo job da conta; sessao que falhou ali e fechada — o proximo
-                # job abre uma nova em vez de herdar um navegador suspeito.
-                if saudavel:
-                    self._guardar_sessao(conta, sessao)
-                else:
-                    await self._fechar_sessao(sessao, conta.id, job.id)
+                await self._encerrar_ciclo(job, conta, sessao)
+
+    def _apos_card_trocado(self, job: Job, conta: Conta, sessao, e: Exception) -> None:
+        """O card aberto nao e o resultado deste job. Desiste, sem gastar tentativa."""
+        # ⚠️ ISTO NAO E FALHA DE DOWNLOAD, E NAO ENTRA NO LACO DELE. O laco
+        # abaixo existe para a falha que passa sozinha (o Chrome travando no
+        # blob); um card do tipo errado nao vira o certo com o tempo — a
+        # identificacao e que furou. MEDIDO nos jobs 583-588 (2026-09-09): 21
+        # aberturas de navegador cada, todas parando na mesma recusa.
+        #
+        # Desiste na hora, e sem mexer em `id_remoto`: soltar ele mandaria
+        # gerar de novo, e se a geracao original EXISTIR (so mal identificada)
+        # isso paga duas vezes. Quem decide entre as duas coisas e uma pessoa
+        # olhando a conta — e agora a mensagem diz o que olhar.
+        self.repo.registrar_evento(
+            job.id, conta.id, "card_trocado",
+            json.dumps({"id_remoto": job.id_remoto, "erro": str(e)}))
+        self._devolver(job, f"{type(e).__name__}: {e}", gasta_tentativa=False,
+                       falha=sessao.falha if sessao else None, desistir=True)
+        return
+
+    def _apos_download_falho(self, job: Job, conta: Conta, e: Exception) -> None:
+        """O download nao trouxe os bytes. Conta, respeita o teto, devolve o job."""
+        # BAIXAR DE NOVO NAO GASTA TENTATIVA — o resultado JA existe e JA foi
+        # pago. Gastar tentativa aqui jogaria fora o job inteiro por uma falha
+        # DEPOIS da cobranca; repetir so o download custa tempo e um navegador.
+        #
+        # A causa raiz da intermitencia de 2026-09-05 foi encontrada em
+        # 2026-09-06: o processo do Chrome TRAVAVA no download nativo de blob
+        # (ver `transporte/pw/captura.py`). O transporte deixou de usar o
+        # download do Chrome, e este caminho passou a ser a excecao — fica pelo
+        # mesmo motivo de sempre: uma falha depois da cobranca nao pode custar
+        # o job.
+        vezes = self._downloads_falhos.get(job.id, 0) + 1
+        self._downloads_falhos[job.id] = vezes
+        self.repo.registrar_evento(
+            job.id, conta.id, "download_falhou",
+            json.dumps({"erro": f"{type(e).__name__}: {e}", "vezes": vezes}))
+        # TETO. Sem ele isto vira laco quente: um download que nunca funciona
+        # abriria e fecharia navegador para sempre, sem gastar tentativa e sem
+        # nunca desistir. Chegando aqui, a falha e de verdade e o job para —
+        # com o video ainda la, e a mensagem dizendo isso.
+        if vezes >= MAX_DOWNLOADS:
+            # NAO zera o contador. Zerando, a tentativa seguinte do job
+            # recomecaria a contagem e o teto viraria MAX_DOWNLOADS vezes o
+            # numero de tentativas — 24 aberturas de navegador para um
+            # download que nunca vai funcionar.
+            # ⚠️ A MENSAGEM DIZ O QUE SE SABE, E NAO MAIS DO QUE ISSO.
+            #
+            # Ela afirmava, categorica, "o resultado EXISTE e ja foi pago". Nos
+            # jobs 583-588 (2026-09-09) isso era FALSO: o Flow tinha recusado a
+            # geracao sem cobrar, e o robo estava tentando baixar uma imagem de
+            # referencia que a posicao `card-0` entregou no lugar do video. O
+            # usuario leu a frase, foi procurar o video na conta e nao achou —
+            # meia tarde perdida por causa de uma certeza que ninguem verificou.
+            #
+            # O que se sabe de verdade aqui: o card passou na conferencia de
+            # TIPO (divergencia sai por `CardTrocado`, acima) e o download nao
+            # trouxe os bytes. Isso torna provavel que o resultado esteja la —
+            # provavel o bastante para NAO gerar de novo por reflexo, e nao o
+            # bastante para mandar alguem procurar sem avisar que e preciso
+            # conferir.
+            raise GeracaoFalhou(
+                f"o download falhou {vezes} vezes seguidas e o job para aqui. "
+                f"O card {job.id_remoto} da conta {conta.email} passou na "
+                f"conferencia de tipo, entao o resultado provavelmente esta la "
+                f"e ja foi pago: CONFIRA na conta antes de gerar de novo, para "
+                f"nao pagar duas vezes. "
+                f"Ultimo erro: {type(e).__name__}: {e}"
+            ) from e
+        job.reavaliar_em = None
+        self._devolver(job, f"{type(e).__name__}: {e}", gasta_tentativa=False)
+        return
+
+    def _ao_perder_sessao(self, job: Job, conta: Conta, sessao, e: Exception) -> None:
+        """A sessao caiu no meio. Estorna, marca a conta expirada, devolve o job."""
+        # A sessao nao morre so em `abrir_sessao`: no transporte real ela cai no
+        # meio de `gerar`/`consultar`/`baixar`. Como este e o primeiro `except`,
+        # sem estornar aqui o credito reservado sumiria do saldo local para
+        # sempre. `_estornar` e no-op depois que o Flow aceitou, entao nao infla.
+        if self._estornar(job, conta):
+            self.repo.salvar_conta(conta)
+        conta.saude = SaudeSessao.EXPIRADA
+        # escrita de campo especifico: `salvar_conta` grava a linha inteira a
+        # partir de uma copia velha, e outro worker ressuscitaria a sessao
+        self.repo.marcar_sessao(conta.id, SaudeSessao.EXPIRADA)
+        self._evento_de_falha(job, conta, "sessao_morta")
+        self._devolver(job, str(e), gasta_tentativa=False,
+                       falha=sessao.falha if sessao else None)
+
+    def _ao_bater_limite(self, job: Job, conta: Conta, sessao, e: Exception) -> None:
+        """O Flow recusou por limite de uso, sem cobrar. A CONTA descansa, o job nao."""
+        # ⚠️ LIMITE DE USO NAO E FALTA DE CREDITO, e a diferenca aparece na tela.
+        # RELATADO pelo usuario 2026-09-09: geracao de IMAGEM custa zero, entao a
+        # conta bate no limite COM credito sobrando. Reportar isso como saldo
+        # faria o painel acusar problema de credito numa conta cheia, e mandaria
+        # ele investigar a coisa errada.
+        #
+        # A ACAO e a mesma do saldo — prazo de descanso, job de volta a fila sem
+        # gastar tentativa, outra conta pega. O que muda e o nome e o evento.
+        # E `saldo_confiavel` continua TRUE: nada foi cobrado, o numero local
+        # segue valendo, e derruba-lo forcaria uma reconciliacao inutil.
+        #
+        # ⚠️ `sem_cobranca=True`: o card exigiu a frase "Nao houve cobranca" para
+        # chegar aqui, entao a regra "aceitou, logo cobrou" nao vale — ver
+        # `_estornar`. O `salvar_conta` logo abaixo grava o saldo devolvido junto
+        # com o `limite_ate`.
+        self._estornar(job, conta, sem_cobranca=True)
+        # ⚠️ `limite_ate`, NAO `seca_ate`. `seca_ate` e sobre credito e libera de
+        # proposito o que e de graca — com ele, `apta` seguia devolvendo True para
+        # imagem e o motor reescolhia a conta que acabara de recusar.
+        conta.limite_ate = datetime.now(timezone.utc) + ESPERA_RESET
+        self.repo.salvar_conta(conta)
+
+        # ⚠️ QUEM DESCANSA E A CONTA, NAO O JOB. A primeira versao disto copiou o
+        # `job.reavaliar_em = conta.seca_ate` do saldo e ESTACIONOU O JOB POR UMA
+        # HORA com outras contas livres do lado — visto em 2026-09-09 no job 439,
+        # parado enquanto as contas 3 e 5 estavam com saldo 50 e sem descanso.
+        # `reivindicar` so pega job com `reavaliar_em` nulo ou vencido, e a escolha
+        # de conta ja pula quem tem `seca_ate` no futuro: marcar a conta basta.
+        job.reavaliar_em = self._quando_reavaliar(job, datetime.now(timezone.utc))
+
+        # ⚠️ E SOLTA A CONTA E O CARD. `_devolver` preserva `conta_id` sempre que
+        # `id_remoto` esta preenchido, porque isso normalmente significa "existe
+        # geracao PAGA em curso, retome aquela em vez de pagar de novo". Aqui e o
+        # oposto: o card e o de FALHA, e ele mesmo diz "nao houve cobranca". Manter
+        # os dois prendia o job justamente na conta que acabou de recusar.
+        job.id_remoto = None
+        job.conta_id = None
+
+        self._evento_de_falha(job, conta, "conta_no_limite")
+        self._devolver(job, str(e), gasta_tentativa=False,
+                       falha=sessao.falha if sessao else None)
+
+    def _ao_secar(self, job: Job, conta: Conta, sessao, e: Exception) -> None:
+        """Nao ha credito para este pedido. A conta seca com prazo, o job volta."""
+        # Vem de duas fontes: o guarda local em `reservar` (a conta tem credito
+        # real, so nao o bastante para este modelo) ou o proprio Flow. Estornar e
+        # deixar a reconciliacao do `finally` adotar o numero verdadeiro — zerar o
+        # saldo na mao apagaria credito que existe e tiraria a conta do pool.
+        #
+        # Marcar a conta seca COM PRAZO e o que impede o laco quente: se o Flow
+        # mostra saldo mas recusa gerar (cota diaria, throttle), sem prazo o job
+        # volta a fila na mesma hora, para a mesma conta, abrindo e fechando um
+        # Chrome por iteracao, sem gastar tentativa e sem nunca desistir.
+        self._estornar(job, conta)
+        agora = datetime.now(timezone.utc)
+        conta.seca_ate = agora + ESPERA_RESET
+        conta.saldo_confiavel = False
+        self.repo.salvar_conta(conta)
+        # ⚠️ NAO e mais `= conta.seca_ate`. Ver `_quando_reavaliar`: adiar o job
+        # por uma hora com outras contas livres foi defeito medido em 2026-09-09.
+        # A conta continua descansando; o JOB so espera se ninguem puder pega-lo.
+        job.reavaliar_em = self._quando_reavaliar(job, agora)
+        self._evento_de_falha(job, conta, "conta_seca")
+        self._devolver(job, str(e), gasta_tentativa=False,
+                       falha=sessao.falha if sessao else None)
+
+    def _ao_falhar(self, job: Job, conta: Conta, sessao, e: Exception) -> None:
+        """Falha de rede, timeout, geracao errada. A unica que GASTA tentativa."""
+        # `_estornar` decide sozinho se devolve: so devolve enquanto o Flow ainda
+        # nao aceitou o pedido. Falha de download ou geracao recusada acontece
+        # depois da cobranca, e ali estornar inflaria o saldo.
+        self._estornar(job, conta)
+        conta.falhas += 1
+        self.repo.salvar_conta(conta)
+        self._evento_de_falha(job, conta, "falhou", {"erro": str(e)})
+        self._devolver(job, f"{type(e).__name__}: {e}", gasta_tentativa=True,
+                       falha=sessao.falha if sessao else None)
+
+    async def _encerrar_ciclo(self, job: Job, conta: Conta, sessao) -> None:
+        """Reconcilia o saldo e decide se a sessao fica guardada ou e fechada."""
+        saudavel = False
+        try:
+            lido = await self.transporte.saldo(sessao)
+            delta = reconciliar(conta, lido, datetime.now(timezone.utc))
+            conta.falhas = 0 if job.estado is EstadoJob.PRONTO else conta.falhas
+            self.repo.salvar_conta(conta)
+            if abs(delta) >= LIMIAR_DIVERGENCIA:
+                # a medicao que responde se imagem custa credito ou sai de
+                # graca. Calcular o delta com sinal e joga-lo fora apagava o
+                # unico dado real que o projeto tem sobre custo.
+                self.repo.registrar_evento(
+                    job.id, conta.id, "divergencia",
+                    json.dumps({"delta": delta, "lido": lido}))
+            saudavel = True
+        except Exception as e:
+            # o `except: pass` daqui engolia tambem falha de `salvar_conta` —
+            # o silencio que transformava conta seca em laco infinito
+            self.repo.registrar_evento(job.id, conta.id, "reconciliacao_falhou",
+                                       json.dumps({"erro": str(e)}))
+        # A leitura de saldo e a PROVA de que a sessao ainda responde: ela
+        # abre e fecha o menu do avatar. Sessao que passou fica guardada para
+        # o proximo job da conta; sessao que falhou ali e fechada — o proximo
+        # job abre uma nova em vez de herdar um navegador suspeito.
+        if saudavel:
+            self._guardar_sessao(conta, sessao)
+        else:
+            await self._fechar_sessao(sessao, conta.id, job.id)
 
     async def _resolver_projeto(self, sessao, job: Job, conta: Conta) -> None:
         """Deixa a sessao dentro do projeto certo antes de gerar.

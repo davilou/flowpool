@@ -16,7 +16,7 @@ from flowpool.nucleo.custos import custo_de
 from flowpool.nucleo.erros import LimiteDeUso, SaldoInsuficiente
 from flowpool.nucleo.escolha import escolher
 from flowpool.nucleo.tipos import EstadoJob, Job, Modelo, Modo, SaudeSessao, Tier
-from flowpool.transporte.base import CardTrocado, ErroTransporte
+from flowpool.transporte.base import CardTrocado, ErroTransporte, SessaoMorta
 from flowpool.transporte.falso import TransporteFalso
 
 
@@ -1483,3 +1483,31 @@ def test_sem_nenhum_marco_cai_no_prazo_padrao(repo, tmp_path):
     quando = orq._quando_reavaliar(job_fast(), agora)
 
     assert quando is not None and quando > agora
+
+
+async def test_sessao_que_morre_no_gerar_nao_ressuscita_no_finally(repo, tmp_path):
+    """⚠️ LACUNA ACHADA POR MUTACAO (2026-09-09): apagar `conta.saude = EXPIRADA` de
+    `_ao_perder_sessao` nao quebrava teste nenhum.
+
+    `marcar_sessao` grava o campo direto no banco, e e ela que faz o trabalho quando a
+    sessao morre logo no `abrir_sessao` — o caso que o duplo comum exercita. Mas quando
+    a sessao morre no MEIO (no `gerar`) e a leitura de saldo do `_encerrar_ciclo` ainda
+    funciona, aquele `salvar_conta` grava a LINHA INTEIRA a partir da copia em memoria
+    — e sem a atribuicao local a copia ainda diz `viva`, desfazendo o `marcar_sessao`.
+
+    A conta voltaria ao pool com a sessao morta, e o proximo job iria bater na mesma.
+    """
+    class _MorreNoGerar(TransporteFalso):
+        async def gerar(self, s, p):
+            raise SessaoMorta("a sessao caiu no meio da geracao")
+        # `saldo` continua funcionando: e o menu do avatar, e nao a geracao
+
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 50; repo.salvar_conta(c)
+    repo.criar_job(job_fast())
+
+    orq = Orquestrador(repo, _MorreNoGerar(saldos={cid: 50}), raiz=tmp_path)
+    await ciclo(orq)
+
+    assert repo.conta(cid).saude is SaudeSessao.EXPIRADA, \
+        "o `salvar_conta` do finally ressuscitou a sessao a partir da copia em memoria"
