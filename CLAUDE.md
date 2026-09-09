@@ -121,13 +121,28 @@ Auditado em 09/09/2026 contra as regras de estrutura (teto de 500 linhas por arq
 
 | arquivo | linhas | |
 |---|---|---|
-| `transporte/pw/transporte.py` | 2315 | ~70 métodos numa classe |
+| `transporte/pw/transporte.py` | 1869 | corte em andamento — ver abaixo |
 | `api/painel.js` | 1801 | |
-| `motor/orquestrador.py` | 983 | `_executar` tem 202 linhas |
+| `motor/orquestrador.py` | 988 | `_executar` tem 202 linhas |
 | `transporte/pw/seletores.py` | 874 | mapa de seletores; cresce por natureza |
-| `transporte/pw/analise.py` | 639 | |
-| `transporte/pw/cura.py` | 545 | |
+| `transporte/pw/analise.py` | 640 | |
+| `transporte/pw/cura.py` | 544 | |
 | `api/esquemas.py` | 440 | acima do alvo de 400, abaixo do teto |
+
+**O corte do `transporte.py` vai em 3 de 5 etapas** (09/09/2026), de 2315 para 1869:
+
+| etapa | módulo | o quê |
+|---|---|---|
+| 1 ✔ | `pw/acoes.py` | clicar, esperar, olhar, provar — o que todo caminho usa |
+| 2 ✔ | `pw/grade.py` | achar o card, ler estado, esperar card novo |
+| 3 ✔ | `pw/download.py` | menu do card, resolução, bytes do blob |
+| 4 | `pw/painel.py` | configuração e chip (~337 linhas, `_configurar` sem teste) |
+| 5 | `pw/midia.py` | anexos (~606 linhas, o maior) |
+
+A forma: função livre recebendo o que precisa; o transporte fica com o estado e vira
+costura de três linhas onde há estado a entregar (`_clicar_unico`, `_card`, `_baixar`).
+**Rede antes do corte, e mutação para provar que a rede tem dente** — as etapas 4 e 5
+começam por escrever os duplos de página, como a 3 fez.
 
 `api/app.py` saiu da lista em 09/09/2026: as 29 rotas foram para `api/rotas/`, uma
 fábrica de `APIRouter` por grupo, e o `app.py` ficou com 62 linhas de composição. Cada
