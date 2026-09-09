@@ -183,3 +183,93 @@ async def test_clicar_unico_clica_no_seletor_que_a_cura_devolveu():
     await acoes.clicar_unico(pagina, "#b", "o botao", _CuraQueAcha())
     assert pagina.locs["#curado"].clicado is True
     assert pagina.locs["#b"].clicado is False
+
+
+# ------------------------------------------------- banner de cookies do labs.google
+
+
+class _Banner:
+    """A barra de cookies, que existe no DOM esteja ela na tela ou nao.
+
+    MEDIDO 2026-09-09 por sonda: na conta 2 ela vinha com `inert=true`,
+    `aria-hidden=true` e ALTURA ZERO — presente e inerte. Na conta 6, visivel, cobrindo
+    o rodape bem em cima da barra do prompt.
+    """
+
+    def __init__(self, existe=True, visivel=True):
+        self.existe = existe
+        self.visivel = visivel
+        self.clicado = False
+
+    @property
+    def first(self):
+        return self
+
+    async def count(self):
+        return 1 if self.existe else 0
+
+    async def is_visible(self):
+        return self.visivel
+
+    async def click(self, timeout=None):
+        self.clicado = True
+
+
+class _PaginaComBanner:
+    def __init__(self, barra, recusar):
+        self.barra, self.recusar = barra, recusar
+        self.pedidos = []
+
+    def locator(self, seletor):
+        self.pedidos.append(seletor)
+        if seletor == sel.BANNER_COOKIES:
+            return self.barra
+        if seletor == sel.BANNER_COOKIES_RECUSAR:
+            return self.recusar
+        raise AssertionError(f"seletor inesperado: {seletor!r}")
+
+
+async def test_banner_visivel_e_recusado_com_agora_nao():
+    """⚠️ "Agora nao", NUNCA "Concordo". A escolha e do Davi (2026-09-09) e e a que
+    preserva privacidade — recusa os cookies nao essenciais.
+
+    O banner cobre o rodape, que e onde vivem o chip e o botao de enviar. E o suspeito
+    de "o painel de configuracao nao abriu" na conta 6.
+    """
+    pagina = _PaginaComBanner(_Banner(), _Banner())
+
+    assert await acoes.dispensar_banner_cookies(pagina, _diario()) is True
+    assert pagina.recusar.clicado is True
+    # o seletor de recusa e o unico alvo: "Concordo" e vizinho na mesma barra
+    assert sel.BANNER_COOKIES_RECUSAR in pagina.pedidos
+
+
+async def test_banner_inerte_nao_se_clica():
+    """PRESENTE NAO E VISIVEL. Clicar num botao `inert` de altura zero falha — e falha
+    por um motivo que nao e o de verdade, mandando quem le procurar o erro errado."""
+    pagina = _PaginaComBanner(_Banner(visivel=False), _Banner(visivel=False))
+
+    assert await acoes.dispensar_banner_cookies(pagina, _diario()) is False
+    assert pagina.recusar.clicado is False
+
+
+async def test_sem_banner_nao_faz_nada():
+    pagina = _PaginaComBanner(_Banner(existe=False), _Banner(existe=False))
+
+    assert await acoes.dispensar_banner_cookies(pagina, _diario()) is False
+    assert pagina.recusar.clicado is False
+
+
+async def test_banner_que_nao_some_nao_derruba_a_geracao():
+    """O banner e um estorvo, nao um requisito: se o clique nao o dispensar, a geracao
+    segue e tenta assim mesmo. Levantar aqui trocaria um problema possivel por uma
+    falha certa."""
+    barra = _Banner()
+
+    class _RecusaQueFalha(_Banner):
+        async def click(self, timeout=None):
+            raise RuntimeError("o botao sumiu no meio do clique")
+
+    pagina = _PaginaComBanner(barra, _RecusaQueFalha())
+
+    assert await acoes.dispensar_banner_cookies(pagina, _diario()) is False

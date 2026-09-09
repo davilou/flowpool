@@ -647,6 +647,32 @@ BOTAO_INFO_BARRA = f'{BARRA_PROMPT} button:has-text("info")'
 AVISO_SEM_CREDITO = PENDENTE
 AVISO_ALTA_DEMANDA = PENDENTE
 AVISO_DIREITOS = PENDENTE
+
+# O BANNER DE COOKIES DO `labs.google/fx`. MEDIDO 2026-09-09 por sonda no perfil da
+# conta 2, lendo o DOM sem clicar em nada:
+#
+#     <div class="glue-cookie-notification-bar" id="glue-cookie-notification-bar-1"
+#          aria-hidden="true" inert="true" role="region" data-nosnippet>
+#       <p class="glue-cookie-notification-bar__text">labs.google/fx usa cookies ...</p>
+#       <a  class="glue-cookie-notification-bar__more">Saiba mais</a>
+#       <button class="glue-cookie-notification-bar__accept">Concordo</button>
+#       <button class="glue-cookie-notification-bar__reject">Agora não</button>
+#     </div>
+#
+# ⚠️ ELE EXISTE NO DOM MESMO QUANDO NÃO ESTÁ NA TELA. Na conta 2 a medição pegou o
+# banner com `inert=true`, `aria-hidden=true` e ALTURA ZERO — inerte, sem cobrir nada.
+# Na conta 6 ele estava visível, ocupando o rodapé bem em cima da barra do prompt (ver
+# `scratch/falhas/gerar-ingredients2v-geracaofalhou.png`). Depende do perfil ter ou não
+# o consentimento gravado. Por isso quem dispensa PERGUNTA SE ESTÁ VISÍVEL, e não se
+# existe: clicar num botão inerte falha, e falha por um motivo que não é o de verdade.
+BANNER_COOKIES = "div.glue-cookie-notification-bar"
+
+# ⚠️ `__reject`, "Agora não" — NUNCA `__accept`. A escolha é do Davi, dada em
+# 2026-09-09, e é a que preserva privacidade: recusa os cookies não essenciais. O
+# vizinho na mesma barra é "Concordo", e é por isso que este seletor mira a classe
+# exata do botão e não a posição.
+BANNER_COOKIES_RECUSAR = (
+    f"{BANNER_COOKIES} button.glue-cookie-notification-bar__reject")
 BOTAO_CONCORDO = PENDENTE
 # O VÉU DO OVERLAY. MEDIDO por um clique que falhou: com um menu aberto, o Playwright
 # recusa o clique seguinte com
@@ -696,8 +722,11 @@ NAO_CURAVEIS = {
     # projetos: apagar e renomear pelo cartão
     "BOTAO_EXCLUIR_PROJETO", "BOTAO_APAGAR_CARTAO", "BOTAO_EDITAR_CARTAO",
     "MENU_EXCLUIR_PROJETO", "MENU_VER_LIXEIRA",
-    # aceite em nome do usuário
+    # aceite em nome do usuário — e recusa também: escolher por alguém o que fazer com
+    # os cookies dele não é conserto de interface, e um substituto proposto pelo modelo
+    # poderia acabar sendo o "Concordo" ao lado
     "BOTAO_CONCORDO", "CAIXA_CONSENTIMENTO",
+    "BANNER_COOKIES", "BANNER_COOKIES_RECUSAR",
     # o interruptor do Agente — vizinho do botão de enviar
     "BOTAO_AGENTE",
     # repetir mora numa fila de botões dentro do card de falha, e um deles apaga

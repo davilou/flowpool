@@ -569,6 +569,10 @@ class TransportePlaywright:
             frames = await self._enviar_arquivos(pagina, arquivos, d)
             await chip.fechar(pagina)
 
+        # O BANNER DE COOKIES SAI ANTES DO CHIP, e por posicao na tela: ele ocupa o
+        # rodape, que e onde vivem o chip e o botao de enviar. Custa uma checagem de
+        # visibilidade quando nao ha banner nenhum. Ver `acoes.dispensar_banner_cookies`.
+        await acoes.dispensar_banner_cookies(pagina, d)
         await self._configurar(pagina, p, d)
         if p.modo is Modo.FRAMES2V:
             await self._preencher_slots(pagina, frames, d)

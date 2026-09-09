@@ -15,7 +15,7 @@ Três comandos, todos têm que passar limpos. **Rode os três depois de cada mud
 .venv/Scripts/python.exe -m pytest -q
 ```
 
-752 testes, ~15 s. A suíte não abre navegador, não gasta crédito e não fala com o modelo
+757 testes, ~15 s. A suíte não abre navegador, não gasta crédito e não fala com o modelo
 de visão — se algum teste ficar lento ou pedir rede, alguma coisa vazou de camada.
 
 ```bash

@@ -134,6 +134,41 @@ async def tem(pagina, seletor: str) -> bool:
     return await quantos(pagina, seletor) > 0
 
 
+async def dispensar_banner_cookies(pagina, d: Diario) -> bool:
+    """Recusa o banner de cookies do `labs.google/fx` com "Agora nao". Devolve se clicou.
+
+    ⚠️ "AGORA NAO", NUNCA "CONCORDO". Escolha do Davi, 2026-09-09, e a que preserva
+    privacidade: recusa os cookies nao essenciais. O "Concordo" e vizinho na MESMA
+    barra, e por isso o alvo e a classe exata do botao — nunca posicao.
+
+    POR QUE ISTO EXISTE: o banner ocupa o rodape da pagina, que e exatamente onde vivem
+    o chip de configuracao e o botao de enviar. Na conta 6, em 2026-09-09, ele estava na
+    tela quando `chip.garantir` desistiu com "o painel de configuracao nao abriu" (ver
+    `scratch/falhas/gerar-ingredients2v-geracaofalhou.png`). Nao esta PROVADO que ele foi
+    a causa — o que esta provado e que ele estava por cima, e tirar uma variavel dessas
+    do caminho custa um clique.
+
+    ⚠️ PERGUNTA SE ESTA VISIVEL, e nao se existe. MEDIDO na mesma sonda: no perfil da
+    conta 2 a barra estava no DOM com `inert=true`, `aria-hidden=true` e ALTURA ZERO.
+    Clicar num botao inerte falha, e falharia com uma mensagem sobre o cookie quando o
+    problema seria outro.
+
+    NUNCA LEVANTA. O banner e um estorvo, nao um requisito: se o clique nao pegar, a
+    geracao segue e tenta assim mesmo. Trocar um problema possivel por uma falha certa
+    seria pior.
+    """
+    try:
+        barra = pagina.locator(sel.BANNER_COOKIES)
+        if await barra.count() == 0 or not await barra.first.is_visible():
+            return False
+        await pagina.locator(sel.BANNER_COOKIES_RECUSAR).first.click(timeout=5_000)
+        d.passo("banner de cookies do labs.google dispensado com 'Agora nao'")
+        return True
+    except Exception as e:
+        d.passo(f"o banner de cookies nao saiu ({type(e).__name__}); seguindo assim mesmo")
+        return False
+
+
 async def sem_veu(pagina, tentativas: int = 16) -> bool:
     """Fecha o que estiver aberto ate o veu do overlay sair da tela.
 
