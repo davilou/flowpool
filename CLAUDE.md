@@ -125,9 +125,15 @@ Auditado em 09/09/2026 contra as regras de estrutura (teto de 500 linhas por arq
 | `api/painel.js` | 1801 | |
 | `motor/orquestrador.py` | 983 | `_executar` tem 202 linhas |
 | `transporte/pw/seletores.py` | 874 | mapa de seletores; cresce por natureza |
-| `api/app.py` | 696 | `criar_app` tem 588 — 25 rotas numa closure |
 | `transporte/pw/analise.py` | 639 | |
 | `transporte/pw/cura.py` | 545 | |
+| `api/esquemas.py` | 440 | acima do alvo de 400, abaixo do teto |
+
+`api/app.py` saiu da lista em 09/09/2026: as 29 rotas foram para `api/rotas/`, uma
+fábrica de `APIRouter` por grupo, e o `app.py` ficou com 62 linhas de composição. Cada
+handler tem no máximo 45 linhas. **A métrica de função vai reclamar das fábricas**
+(`rotas_contas` tem 180 linhas) — é artefato do padrão: a fábrica é um contêiner de
+rotas, como um corpo de classe, e o que se lê é cada handler.
 
 Também: ~85 funções com argumento sem tipo (quase todas recebendo `pagina`/`escopo` do
 Playwright, que é por que `transporte/pw` não está em modo estrito), e `api/app.py` e

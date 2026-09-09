@@ -462,7 +462,7 @@ def _fingir_cadastro(monkeypatch):
     async def falso(raiz_perfis, email, proxy=None):
         return Path(raiz_perfis) / email, datetime(2026, 8, 22, tzinfo=timezone.utc)
 
-    monkeypatch.setattr("flowpool.api.app.cadastrar", falso)
+    monkeypatch.setattr("flowpool.api.rotas.contas.cadastrar", falso)
 
 
 def _cliente_com(tmp_path, monkeypatch, transporte):
@@ -898,7 +898,7 @@ def test_abrir_conta_sobe_o_chrome_no_perfil_dela(cliente, monkeypatch):
     cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
     con = repo.conta(cid); con.proxy = "socks5h://h:1"; repo.salvar_conta(con)
     chamadas = []
-    monkeypatch.setattr("flowpool.api.app.abrir_para_conferir",
+    monkeypatch.setattr("flowpool.api.rotas.contas.abrir_para_conferir",
                         lambda perfil, proxy=None: chamadas.append((str(perfil), proxy)))
 
     r = c.post(f"/contas/{cid}/abrir")
@@ -922,7 +922,7 @@ def test_abrir_conta_ocupada_e_409_e_diz_o_motivo_certo(cliente, monkeypatch):
     c, repo = cliente
     cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
     c.app.state.orq._ocupadas.add(cid)
-    monkeypatch.setattr("flowpool.api.app.abrir_para_conferir",
+    monkeypatch.setattr("flowpool.api.rotas.contas.abrir_para_conferir",
                         lambda *a, **k: pytest.fail("nao podia ter aberto"))
 
     r = c.post(f"/contas/{cid}/abrir")
@@ -945,7 +945,7 @@ def test_abrir_conta_sem_chrome_vira_409_em_vez_de_500(cliente, monkeypatch):
 
     def sem_chrome(*a, **k):
         raise ChromeAusente("nao achei o chrome.exe")
-    monkeypatch.setattr("flowpool.api.app.abrir_para_conferir", sem_chrome)
+    monkeypatch.setattr("flowpool.api.rotas.contas.abrir_para_conferir", sem_chrome)
 
     r = c.post(f"/contas/{cid}/abrir")
 
