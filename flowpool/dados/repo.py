@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from flowpool.nucleo.tipos import (
     Conta,
@@ -20,6 +22,11 @@ from flowpool.nucleo.tipos import (
 )
 
 _ESQUEMA = Path(__file__).parent / "esquema.sql"
+
+# O que o sqlite aceita como parametro ligado. Anotar isto e o que faz o checador
+# enxergar DENTRO do Repo: sem o tipo, o retorno de `execute` fica desconhecido e os 26
+# lugares que o chamam deixam de ser verificados.
+type ValorSQL = str | int | float | bytes | None
 
 
 def _dt(s: str | None) -> datetime | None:
@@ -56,6 +63,17 @@ class _Resultado:
         self._linhas = linhas
         self.lastrowid = lastrowid
 
+    def id_inserido(self) -> int:
+        """O id que o INSERT gerou.
+
+        `lastrowid` e `int | None`: e None quando o comando nao inseriu linha nenhuma.
+        Chamar isto num SELECT devolvia `TypeError: int() argument must be...` la na
+        frente, sem dizer qual comando falhou.
+        """
+        if self.lastrowid is None:
+            raise RuntimeError("o comando nao inseriu linha: nao ha id para devolver")
+        return self.lastrowid
+
     def fetchone(self) -> sqlite3.Row | None:
         return self._linhas[0] if self._linhas else None
 
@@ -91,7 +109,7 @@ class _Conexao:
         # "database is locked" na hora em vez de esperar a transacao curta do outro.
         self._con.execute("PRAGMA busy_timeout = 5000")
 
-    def execute(self, sql: str, parametros=()) -> _Resultado:
+    def execute(self, sql: str, parametros: Sequence[ValorSQL] = ()) -> _Resultado:
         with self._trava:
             cur = self._con.execute(sql, parametros)
             return _Resultado(cur.fetchall(), cur.lastrowid)
@@ -148,7 +166,7 @@ class Repo:
         except sqlite3.IntegrityError as e:
             raise ValueError(f"conta {email} ja cadastrada") from e
         self.con.commit()
-        return int(cur.lastrowid)
+        return cur.id_inserido()
 
     def conta(self, id_: int) -> Conta | None:
         r = self.con.execute("SELECT * FROM conta WHERE id = ?", (id_,)).fetchone()
@@ -214,7 +232,7 @@ class Repo:
              _txt(j.reavaliar_em), agora, agora),
         )
         self.con.commit()
-        return int(cur.lastrowid)
+        return cur.id_inserido()
 
     def job(self, id_: int) -> Job | None:
         r = self.con.execute("SELECT * FROM job WHERE id = ?", (id_,)).fetchone()
@@ -356,7 +374,10 @@ class Repo:
             (conta_id, produto, id_remoto, nome_remoto,
              _txt(datetime.now(timezone.utc))),
         )
-        id_ = int(cur.fetchone()["id"])
+        linha = cur.fetchone()
+        if linha is None:
+            raise RuntimeError("o UPSERT de projeto nao devolveu id — RETURNING vazio")
+        id_ = int(linha["id"])
         self.con.commit()
         return id_
 
@@ -392,7 +413,7 @@ class Repo:
         )
         self.con.commit()
 
-    def eventos(self, job_id: int | None = None) -> list[dict]:
+    def eventos(self, job_id: int | None = None) -> list[dict[str, Any]]:
         if job_id is not None:
             rs = self.con.execute(
                 "SELECT * FROM evento WHERE job_id = ? ORDER BY id", (job_id,)
@@ -401,7 +422,7 @@ class Repo:
             rs = self.con.execute("SELECT * FROM evento ORDER BY id DESC LIMIT 200").fetchall()
         return [dict(r) for r in rs]
 
-    def eventos_da_conta(self, conta_id: int, limite: int = 100) -> list[dict]:
+    def eventos_da_conta(self, conta_id: int, limite: int = 100) -> list[dict[str, Any]]:
         """Os ultimos eventos daquela conta — de qualquer job, e os sem job.
 
         Existe para o painel: quando uma conta esta `expirada` ou com `~` no saldo, a

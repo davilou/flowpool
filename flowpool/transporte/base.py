@@ -44,7 +44,7 @@ class Pedido:
     modo: Modo
     modelo: Modelo
     prompt: str
-    referencias: list[str] = field(default_factory=list)
+    referencias: list[str] = field(default_factory=list[str])
     frame_inicial: str | None = None
     frame_final: str | None = None
     # Tres configuracoes do painel de geracao do Flow. Precisam atravessar a fronteira

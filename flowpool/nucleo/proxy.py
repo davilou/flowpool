@@ -12,7 +12,7 @@ o resultado; a decisao inteira sobre o que e uma URL usavel acontece aqui.
 from __future__ import annotations
 
 import re
-from urllib.parse import unquote, urlsplit
+from urllib.parse import SplitResult, unquote, urlsplit
 
 from flowpool.nucleo.erros import ProxyInvalido
 
@@ -25,7 +25,7 @@ ESQUEMAS = ("http", "https", "socks5", "socks5h")
 SENHA_MASCARADA = "***"
 
 
-def _partes(url: str):
+def _partes(url: str) -> tuple[SplitResult, int]:
     """`urlsplit` com os erros dele traduzidos para `ProxyInvalido`.
 
     `.port` levanta `ValueError` para porta fora da faixa, e so na hora em que alguem
@@ -52,7 +52,7 @@ def _partes(url: str):
     return partes, porta
 
 
-def analisar(url: str | None) -> dict | None:
+def analisar(url: str | None) -> dict[str, str] | None:
     """Converte a URL de proxy no formato que o Playwright espera.
 
     Devolve None quando nao ha proxy (o caso comum hoje).
@@ -66,7 +66,7 @@ def analisar(url: str | None) -> dict | None:
         return None
     partes, porta = _partes(url.strip())
 
-    cfg: dict = {"server": f"{partes.scheme}://{partes.hostname}:{porta}"}
+    cfg: dict[str, str] = {"server": f"{partes.scheme}://{partes.hostname}:{porta}"}
     # a credencial so cabe na URL escapada quando tem `@` ou `:`; mandar o escape cru
     # para o Playwright autenticaria com a senha errada e o proxy recusaria calado
     if partes.username:
@@ -116,12 +116,14 @@ def mascarar(url: str | None) -> str | None:
     bruto = url.strip()
     try:
         partes = urlsplit(bruto)
+        esquema = partes.scheme
         usuario, host, porta = partes.username, partes.hostname, partes.port
     except ValueError:
+        esquema = ""
         usuario = host = porta = None
     if usuario and host:
         sufixo = f":{porta}" if porta else ""
-        return f"{partes.scheme}://{unquote(usuario)}:{SENHA_MASCARADA}@{host}{sufixo}"
+        return f"{esquema}://{unquote(usuario)}:{SENHA_MASCARADA}@{host}{sufixo}"
     if host:
         return bruto
     return re.sub(r"(//)[^/@]*@", rf"\1{SENHA_MASCARADA}@", bruto)

@@ -224,7 +224,7 @@ class Job:
     # do projeto no Flow. Tem default so para nao quebrar a ordem dos campos da
     # dataclass; a API exige.
     produto: str = ""
-    referencias: list[str] = field(default_factory=list)
+    referencias: list[str] = field(default_factory=list[str])
     frame_inicial: str | None = None
     frame_final: str | None = None
     # Formato da saida, um dos `PROPORCOES`. Vertical por padrao — ver a constante.
