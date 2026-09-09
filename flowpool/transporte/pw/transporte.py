@@ -26,7 +26,7 @@ from flowpool.transporte.base import (
     Sessao,
     SessaoMorta,
 )
-from flowpool.transporte.pw import analise, captura, dom
+from flowpool.transporte.pw import acoes, analise, captura, dom
 from flowpool.transporte.pw import seletores as sel
 from flowpool.transporte.pw.cura import AutoCura
 from flowpool.transporte.pw.diario import (
@@ -99,17 +99,6 @@ def _medido(nome: str, seletor: str) -> str:
             f"Rode `python -m flowpool.transporte.pw.conferir <perfil> <uuid>`, anote o "
             f"valor real em seletores.py e repita.")
     return seletor
-
-
-def _pagina_de(escopo):
-    """A pagina por tras de um escopo de clique.
-
-    `_clicar_unico` recebe ora a pagina, ora um localizador (o painel do chip, o menu
-    do card, um item da grade) — e a cura precisa da PAGINA para tirar print e varrer
-    o DOM, enquanto a validacao continua acontecendo no escopo estreito. Localizador
-    expoe `.page`; a pagina nao expoe, e e ela mesma.
-    """
-    return getattr(escopo, "page", escopo)
 
 
 class TransportePlaywright:
@@ -300,7 +289,7 @@ class TransportePlaywright:
         # E preciso o VEU FORA antes: com qualquer overlay aberto, o Playwright recusa
         # o clique dizendo "intercepts pointer events" e fala do elemento coberto,
         # nunca do que o cobre.
-        await self._sem_veu(pagina)
+        await acoes.sem_veu(pagina)
         await pagina.locator(sel.BOTAO_AVATAR).first.click(timeout=15_000)
         try:
             # ESPERA PELO CONTEUDO, nao por tempo. A versao anterior dormia 1200ms
@@ -369,7 +358,7 @@ class TransportePlaywright:
         """
         _, _, pagina = s.handle
         await pagina.goto(sel.URL_FLOW, wait_until="domcontentloaded")
-        await self._sem_veu(pagina)
+        await acoes.sem_veu(pagina)
         await self._clicar_unico(pagina, sel.BOTAO_NOVO_PROJETO, "novo projeto")
         await pagina.wait_for_url(re.compile(re.escape(sel.PADRAO_PROJETO)), timeout=30_000)
         id_remoto = analise.id_do_href(pagina.url)
@@ -381,7 +370,7 @@ class TransportePlaywright:
         # destrutivos e estao em NAO_CURAVEIS; aqui so se usa o primeiro, escolhido
         # por TEXTO, porque escolher por posicao num menu que tem "excluir" e o erro
         # que ja apagou trabalho do usuario uma vez.
-        await self._sem_veu(pagina)
+        await acoes.sem_veu(pagina)
         await self._clicar_unico(pagina, sel.BOTAO_MAIS_OPCOES, "mais opcoes do projeto")
         await self._clicar_unico(pagina, sel.MENU_RENOMEAR, "renomear")
 
@@ -405,7 +394,7 @@ class TransportePlaywright:
                 return False
             return dom.sem_acento(nome) in dom.sem_acento(atual)
 
-        if not await self._esperar(pagina, renomeou, self._diario(s.conta.id),
+        if not await acoes.esperar(pagina, renomeou, self._diario(s.conta.id),
                                    f"o titulo virar {nome!r}", teto_ms=20_000):
             raise GeracaoFalhou(
                 f"projeto {id_remoto} criado, mas o titulo nao virou {nome!r}")
@@ -448,23 +437,6 @@ class TransportePlaywright:
     # -------------------------------------------------------------------- chip
     def _painel(self, pagina):
         return pagina.locator(_medido("PAINEL_CHIP", sel.PAINEL_CHIP)).first
-
-    @staticmethod
-    async def _sem_veu(pagina, tentativas: int = 16) -> bool:
-        """Fecha o que estiver aberto ate o veu do overlay sair da tela.
-
-        MEDIDO 2026-09-05: com um menu aberto, o Playwright recusa o clique seguinte
-        com `<div class="cdk-overlay-backdrop ..."> intercepts pointer events`. O veu
-        bloqueia TUDO, e o erro nomeia o elemento coberto e nunca o que o cobre — foi
-        assim que o aviso de direitos travou a geracao na aplicacao antiga, e custou
-        horas antes de alguem olhar um print.
-        """
-        for _ in range(tentativas):
-            if await pagina.locator(sel.VEU_ABERTO).count() == 0:
-                return True
-            await pagina.keyboard.press("Escape")
-            await pagina.wait_for_timeout(400)
-        return False
 
     @staticmethod
     async def _painel_aberto(pagina) -> bool:
@@ -546,39 +518,12 @@ class TransportePlaywright:
         return dom.seguro(bruto.replace("\n", " "))
 
     async def _clicar_unico(self, escopo, seletor: str, o_que: str) -> None:
-        """Clica so quando ha EXATAMENTE um candidato.
+        """`acoes.clicar_unico` com a cura DESTE transporte.
 
-        E aqui que a regra "nunca por posicao" vira codigo. Um `.first`/`.last` num
-        menu ambiguo ja mandou um video do usuario para a lixeira, porque o ultimo item
-        do menu do card e "Mover para a lixeira". Ambiguidade e erro, nao escolha.
+        Fica aqui, e nao no ponto de chamada, porque a cura e estado do transporte e os
+        catorze lugares que clicam nao tem por que saber disso.
         """
-        loc = escopo.locator(seletor)
-        # ESPERAR antes de contar. `count()` responde na hora, e no Flow quase tudo
-        # aparece depois de uma animacao: menu que abre, painel que troca de modo, lista
-        # que carrega. Contar primeiro da zero e vira "achei 0 candidatos" — mensagem
-        # que manda procurar um seletor errado quando o seletor estava certo e so
-        # chegou cedo. Este mesmo engano custou tres execucoes: saldo, lista de
-        # projetos e menu de modelo.
-        # falhar aqui e esperado: segue para o exigir_unico, que da a mensagem boa
-        with suppress(Exception):
-            await loc.first.wait_for(timeout=15_000)
-        quantos = await loc.count()
-
-        # AUTO-CURA, e SO com zero candidatos. Dois candidatos e AMBIGUIDADE, e
-        # ambiguidade nao se cura: foi um desempate automatico que mandou um video do
-        # usuario para a lixeira. Zero e outra coisa — e o Google ter mexido no botao —,
-        # e ai perguntar tem sentido. `cura` recusa sozinha tudo o que for destrutivo,
-        # tudo o que nao tiver descricao e tudo o que passar do teto da execucao; ela
-        # nunca levanta, entao o pior caso continua sendo o erro de sempre.
-        if quantos == 0:
-            novo = await self.cura.curar(
-                _pagina_de(escopo), escopo, seletor, o_que, self.print_de_falha)
-            if novo:
-                loc = escopo.locator(novo)
-                quantos = await loc.count()
-
-        analise.exigir_unico(quantos, seletor, o_que)
-        await loc.click(timeout=15_000)
+        await acoes.clicar_unico(escopo, seletor, o_que, self.cura)
 
     async def _escolher_modo(self, pagina, painel, modo: str) -> None:
         """Frames e Elementos so existem no painel DEPOIS de ele estar em video.
@@ -604,29 +549,13 @@ class TransportePlaywright:
             await pagina.wait_for_timeout(1200)
 
     async def print_de_falha(self, pagina, motivo: str) -> Path | None:
-        """Salva um print quando alguma coisa da errado. Devolve o caminho.
+        """`acoes.print_de_falha`, exposta no objeto.
 
-        Existe porque diagnosticar interface pelo DOM e adivinhar. Duas tentativas
-        foram perdidas deduzindo que um `<div data-state=open aria-hidden>` era o painel
-        do chip; era um modal de aviso do Google, e UM PRINT teria mostrado isso em dois
-        segundos. Quem diagnostica sem ver a tela conserta o elemento errado.
-
-        Nunca levanta: um print que falha nao pode virar o erro que se estava tentando
-        explicar.
+        Continua sendo metodo porque e por aqui que a suite troca o print por um duplo
+        na instancia, e porque `gerar`, `consultar` e `baixar` a passam adiante como
+        retorno de chamada.
         """
-        try:
-            destino = Path("scratch/falhas")
-            destino.mkdir(parents=True, exist_ok=True)
-            # sem timestamp: o Playwright nao expoe relogio e importar `time` aqui so
-            # para nomear arquivo nao paga. O motivo ja distingue os casos, e o ultimo
-            # print de cada motivo e o que interessa.
-            limpo = re.sub(r"[^a-z0-9]+", "-", dom.sem_acento(motivo))[:50].strip("-")
-            caminho = destino / f"{limpo or 'falha'}.png"
-            await pagina.screenshot(path=str(caminho))
-            print(f"print da falha: {caminho}")
-            return caminho
-        except Exception:
-            return None
+        return await acoes.print_de_falha(pagina, motivo)
 
     async def _painel_fechado(self, pagina) -> bool:
         """Fechado = o PAINEL sumiu da tela E nao sobrou veu.
@@ -1290,12 +1219,12 @@ class TransportePlaywright:
             qual = "inicio" if n == 0 else "fim"
             d.passo(f"frame {qual}: {item['nome']}")
             quanto = d.cronometro()
-            await self._sem_veu(pagina)
+            await acoes.sem_veu(pagina)
             await slots.nth(n).click(timeout=15_000)
 
             # o popover do slot NAO tem abas — o sinal e o elemento nomeado
-            if not await self._esperar(
-                    pagina, lambda: self._tem(pagina, sel.POPOVER_SLOT), d,
+            if not await acoes.esperar(
+                    pagina, lambda: acoes.tem(pagina, sel.POPOVER_SLOT), d,
                     f"o popover do slot {qual}", teto_ms=30_000):
                 raise GeracaoFalhou(f"o slot {qual} nao abriu o seletor de midia")
 
@@ -1308,7 +1237,7 @@ class TransportePlaywright:
             if await incluir.count() == 1:
                 await incluir.first.click(timeout=15_000)
 
-            if not await self._esperar(
+            if not await acoes.esperar(
                     pagina, lambda n=n: self._slot_cheio(pagina, n), d,
                     f"o slot {qual} mostrar a imagem", teto_ms=30_000):
                 raise GeracaoFalhou(f"{item['nome']} nao entrou no slot {qual}")
@@ -1427,7 +1356,7 @@ class TransportePlaywright:
             novos = achados
             return len(novos) >= len(arquivos)
 
-        if not await self._esperar(pagina, subiram, d, "as miniaturas do envio",
+        if not await acoes.esperar(pagina, subiram, d, "as miniaturas do envio",
                                    teto_ms=240_000, cada=1000):
             raise GeracaoFalhou(
                 f"so {len(novos)} de {len(arquivos)} arquivo(s) ficaram prontos "
@@ -1435,27 +1364,6 @@ class TransportePlaywright:
         if len({i["id"] for i in novos}) != len(novos):
             raise GeracaoFalhou(f"os itens enviados repetem id: {[i['id'] for i in novos]}")
         return novos[:len(arquivos)]
-
-    @staticmethod
-    async def _esperar(pagina, condicao, d: Diario, o_que: str,
-                       teto_ms: int = 60_000, cada: int = 500) -> bool:
-        """Gira ate a condicao valer, dando sinal de vida. Devolve se valeu.
-
-        Devolve `bool` em vez de levantar porque a ausencia significa coisas
-        diferentes em cada ponto, e a mensagem certa e a de quem chama.
-        """
-        gasto = 0
-        while gasto < teto_ms:
-            if await condicao():
-                return True
-            await pagina.wait_for_timeout(cada)
-            gasto += cada
-            d.esperando(o_que)
-        return False
-
-    @staticmethod
-    async def _tem(pagina, seletor: str) -> bool:
-        return await pagina.locator(seletor).count() > 0
 
     async def _acervo_assentado(self, pagina, d: Diario) -> list[dict]:
         """O retrato do acervo, SO depois de a lista parar de mudar.
@@ -1507,7 +1415,7 @@ class TransportePlaywright:
         async def entrou() -> bool:
             return len(await self._ids_anexados(pagina)) > antes
 
-        if not await self._esperar(pagina, entrou, d,
+        if not await acoes.esperar(pagina, entrou, d,
                                    f"a ficha de {item['nome']}", teto_ms=30_000):
             raise GeracaoFalhou(
                 f"{item['nome']} nao entrou na barra do prompt depois de incluido")
