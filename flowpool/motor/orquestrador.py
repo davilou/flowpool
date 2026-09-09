@@ -693,10 +693,28 @@ class Orquestrador:
                     # recomecaria a contagem e o teto viraria MAX_DOWNLOADS vezes o
                     # numero de tentativas — 24 aberturas de navegador para um
                     # download que nunca vai funcionar.
+                    # ⚠️ A MENSAGEM DIZ O QUE SE SABE, E NAO MAIS DO QUE ISSO.
+                    #
+                    # Ela afirmava, categorica, "o resultado EXISTE e ja foi pago". Nos
+                    # jobs 583-588 (2026-09-09) isso era FALSO: o Flow tinha recusado a
+                    # geracao sem cobrar, e o robo estava tentando baixar uma imagem de
+                    # referencia que a posicao `card-0` entregou no lugar do video. O
+                    # usuario leu a frase, foi procurar o video na conta e nao achou —
+                    # meia tarde perdida por causa de uma certeza que ninguem verificou.
+                    #
+                    # O que se sabe de verdade aqui: o card passou na conferencia de
+                    # TIPO (divergencia sai por `CardTrocado`, acima) e o download nao
+                    # trouxe os bytes. Isso torna provavel que o resultado esteja la —
+                    # provavel o bastante para NAO gerar de novo por reflexo, e nao o
+                    # bastante para mandar alguem procurar sem avisar que e preciso
+                    # conferir.
                     raise GeracaoFalhou(
-                        f"o download falhou {vezes} vezes seguidas. O resultado EXISTE "
-                        f"na conta {conta.email} (card {job.id_remoto}) e ja foi pago — "
-                        f"da para baixar na mao. Ultimo erro: {type(e).__name__}: {e}"
+                        f"o download falhou {vezes} vezes seguidas e o job para aqui. "
+                        f"O card {job.id_remoto} da conta {conta.email} passou na "
+                        f"conferencia de tipo, entao o resultado provavelmente esta la "
+                        f"e ja foi pago: CONFIRA na conta antes de gerar de novo, para "
+                        f"nao pagar duas vezes. "
+                        f"Ultimo erro: {type(e).__name__}: {e}"
                     ) from e
                 job.reavaliar_em = None
                 self._devolver(job, f"{type(e).__name__}: {e}", gasta_tentativa=False)

@@ -1075,8 +1075,14 @@ async def test_download_que_nunca_funciona_desiste_e_diz_onde_esta_o_video(repo,
     # antes de morrer — dai o `+ 3`. O que importa e ser LIMITADO: sem o teto isto
     # abriria navegador para sempre.
     assert t.tentativas_de_download <= MAX_DOWNLOADS + 3
-    # a mensagem tem que dizer que o video existe — senao o usuario refaz e paga de novo
-    assert final.erro and "ja foi pago" in final.erro
+    # A mensagem precisa fazer DUAS coisas ao mesmo tempo, e antes fazia so a primeira:
+    #   proteger contra pagar de novo  -> diz que o resultado provavelmente esta la
+    #   nao mentir sobre o que sabe    -> manda CONFERIR, porque ninguem verificou
+    # Afirmar "o resultado EXISTE e ja foi pago" era categorico e, nos jobs 583-588,
+    # falso: mandou o usuario procurar na conta um video que nunca foi gerado.
+    assert final.erro
+    assert "a@b.com" in final.erro and str(final.id_remoto) in final.erro
+    assert "confira" in final.erro.lower()
 
 
 class _TransporteComCardTrocado(TransporteFalso):

@@ -52,7 +52,17 @@ CAUSAS_CONHECIDAS = """\
   So o dono da conta resolve; revalidar nao adianta.
 - "download falhou N vezes" / "Download.path: Target page ... closed": o Chrome travava
   ao iniciar o download nativo de blob (corrigido em 2026-09-06; o arquivo agora e lido do
-  blob da pagina). O resultado EXISTE no Flow e ja foi pago: nao gerar de novo.
+  blob da pagina). O card passou na conferencia de tipo, entao o resultado PROVAVELMENTE
+  esta na conta e ja foi pago — mandar CONFERIR antes de gerar de novo, nunca afirmar
+  que esta la. Afirmar isso categoricamente ja mandou o usuario procurar por meia tarde
+  um video que nunca tinha sido gerado (jobs 583-588, 2026-09-09).
+- "CardTrocado" / "o card aberto nao e o resultado deste job": a identificacao furou —
+  `card-0` e posicional, e referencia enviada tambem vira tile na grade. NAO afirmar que
+  o resultado existe: pode nunca ter sido gerado. Mandar olhar a grade do projeto na
+  conta e ver se ha card do tipo certo.
+- "o Flow recusou por atividade incomum": o antiabuso do Google, nao a conta. O card diz
+  "Nao houve cobranca", e nada foi cobrado mesmo. Costuma ser concorrencia demais no
+  mesmo IP — varias contas gerando ao mesmo tempo sem proxy. A conta descansa sozinha.
 - "download NATIVO" / "nenhum blob foi capturado": o Flow mudou o jeito de baixar; o
   interceptador de blob precisa ser medido de novo. O resultado existe no Flow.
 - "TargetClosedError" fora de download: alguem fechou a janela do Chrome a mao.
