@@ -18,7 +18,7 @@ from flowpool.transporte.base import (
     SaldoInsuficiente,
     Sessao,
 )
-from flowpool.transporte.pw import analise, grade
+from flowpool.transporte.pw import analise, chip, grade
 from flowpool.transporte.pw import seletores as sel
 from flowpool.transporte.pw.analise import (
     achar_no_submenu,
@@ -388,7 +388,7 @@ class _PaginaComAgente:
 
 async def test_agente_ligado_e_clicado_antes_de_configurar():
     botao = _BotaoAgenteFalso(sel.AGENTE_LIGADO)
-    desligou = await TransportePlaywright()._exigir_agente_desligado(
+    desligou = await chip.exigir_agente_desligado(
         _PaginaComAgente(botao))
     assert (desligou, botao.cliques, botao.pressed) == (
         True, 1, sel.AGENTE_DESLIGADO)
@@ -397,7 +397,7 @@ async def test_agente_ligado_e_clicado_antes_de_configurar():
 async def test_agente_desligado_nao_e_tocado():
     # clicar "por garantia" LIGARIA o agente — interruptor nao tem clique inofensivo
     botao = _BotaoAgenteFalso(sel.AGENTE_DESLIGADO)
-    desligou = await TransportePlaywright()._exigir_agente_desligado(
+    desligou = await chip.exigir_agente_desligado(
         _PaginaComAgente(botao))
     assert (desligou, botao.cliques) == (False, 0)
 
@@ -405,7 +405,7 @@ async def test_agente_desligado_nao_e_tocado():
 async def test_clique_que_nao_pegou_derruba_a_geracao():
     botao = _BotaoAgenteFalso(sel.AGENTE_LIGADO, gruda=True)
     with pytest.raises(GeracaoFalhou, match="continuou LIGADO"):
-        await TransportePlaywright()._exigir_agente_desligado(_PaginaComAgente(botao))
+        await chip.exigir_agente_desligado(_PaginaComAgente(botao))
 
 
 async def test_interruptor_ambiguo_ou_ausente_e_erro():
@@ -417,7 +417,7 @@ async def test_interruptor_ambiguo_ou_ausente_e_erro():
 
     botao = _Sumido(sel.AGENTE_DESLIGADO)
     with pytest.raises(GeracaoFalhou, match="esperava 1 candidato"):
-        await TransportePlaywright()._exigir_agente_desligado(_PaginaComAgente(botao))
+        await chip.exigir_agente_desligado(_PaginaComAgente(botao))
     assert botao.cliques == 0
 
 

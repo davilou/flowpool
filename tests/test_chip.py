@@ -18,6 +18,7 @@ import pytest
 
 from flowpool.nucleo.tipos import Modelo, Modo
 from flowpool.transporte.base import GeracaoFalhou, Pedido
+from flowpool.transporte.pw import chip
 from flowpool.transporte.pw import seletores as sel
 from flowpool.transporte.pw.diario import Diario
 from flowpool.transporte.pw.transporte import TransportePlaywright
@@ -236,14 +237,14 @@ async def test_imagem_nunca_procura_grupo_de_duracao():
 async def test_painel_ja_aberto_nao_leva_clique():
     """Clicar no chip com ele aberto FECHA. Por isso se pergunta antes de clicar."""
     pagina = _Pagina(presentes=_presentes_de_imagem())
-    assert await TransportePlaywright()._garantir_painel(pagina, Diario(1)) is True
+    assert await chip.garantir(pagina, Diario(1)) is True
     assert sel.CHIP_CONFIG not in pagina.clicados
 
 
 async def test_painel_fechado_e_aberto_pelo_chip():
     pagina = _Pagina(presentes=_presentes_de_imagem())
     pagina.fechar()
-    assert await TransportePlaywright()._garantir_painel(pagina, Diario(1)) is True
+    assert await chip.garantir(pagina, Diario(1)) is True
     assert sel.CHIP_CONFIG in pagina.clicados
 
 
@@ -253,14 +254,14 @@ async def test_fechar_insiste_porque_ha_dois_niveis_de_overlay():
     """O dropdown de modelo abre por cima do painel: o primeiro Escape fecha so o de
     cima."""
     pagina = _Pagina(presentes=_presentes_de_imagem(), escapes_para_fechar=2)
-    await TransportePlaywright()._fechar_painel(pagina)
+    await chip.fechar(pagina)
     assert pagina.escapes == 2
 
 
 async def test_painel_que_nao_fecha_e_erro_e_nao_segue_calado():
     pagina = _Pagina(presentes=_presentes_de_imagem(), escapes_para_fechar=99)
     with pytest.raises(GeracaoFalhou, match="nao fechou"):
-        await TransportePlaywright()._fechar_painel(pagina)
+        await chip.fechar(pagina)
 
 
 async def test_veu_que_sobra_conta_como_painel_aberto():
@@ -269,7 +270,7 @@ async def test_veu_que_sobra_conta_como_painel_aberto():
     pagina = _Pagina(presentes=_presentes_de_imagem())
     pagina.fechar()
     pagina.presentes[sel.VEU_ABERTO] = 1
-    assert await TransportePlaywright()._painel_fechado(pagina) is False
+    assert await chip.fechado(pagina) is False
 
 
 # ------------------------------------------------------- leitura de instrumento
