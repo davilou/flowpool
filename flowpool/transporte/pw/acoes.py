@@ -20,10 +20,27 @@ import re
 from contextlib import suppress
 from pathlib import Path
 
+from flowpool.transporte.base import GeracaoFalhou
 from flowpool.transporte.pw import analise, dom
 from flowpool.transporte.pw import seletores as sel
 from flowpool.transporte.pw.cura import AutoCura
 from flowpool.transporte.pw.diario import Diario
+
+
+def medido(nome: str, seletor: str) -> str:
+    """Recusa usar um seletor que ainda nao foi medido ao vivo.
+
+    `sel.PENDENTE` vale "..." — mandar isso para o Playwright estoura com "unknown
+    engine ..." no meio de `gerar`, e a mensagem manda procurar no lugar errado. Aqui
+    o erro nomeia o seletor e o que fazer, e acontece ANTES de qualquer clique que
+    gaste credito.
+    """
+    if not seletor or seletor == sel.PENDENTE:
+        raise GeracaoFalhou(
+            f"seletor {nome} ainda nao foi medido ao vivo (esta como {sel.PENDENTE!r}). "
+            f"Rode `python -m flowpool.transporte.pw.conferir <perfil> <uuid>`, anote o "
+            f"valor real em seletores.py e repita.")
+    return seletor
 
 
 def pagina_de(escopo):

@@ -18,7 +18,7 @@ from flowpool.transporte.base import (
     SaldoInsuficiente,
     Sessao,
 )
-from flowpool.transporte.pw import analise
+from flowpool.transporte.pw import analise, grade
 from flowpool.transporte.pw import seletores as sel
 from flowpool.transporte.pw.analise import (
     achar_no_submenu,
@@ -988,14 +988,13 @@ async def test_as_duas_frases_de_falha_sao_reconhecidas(monkeypatch):
     """
     monkeypatch.setattr(sel, "CARD_FALHA", 'text="Ops! Algo deu errado"')
     monkeypatch.setattr(sel, "CARD_FALHA_TITULO", r"text=/^\s*Falha\s*$/")
-    t = TransportePlaywright()
-    assert await t._card_falhou(_CardFalso({sel.CARD_FALHA})) is True
-    assert await t._card_falhou(_CardFalso({sel.CARD_FALHA_TITULO})) is True
-    assert await t._card_falhou(_CardFalso(set())) is False
+    assert await grade.falhou(_CardFalso({sel.CARD_FALHA})) is True
+    assert await grade.falhou(_CardFalso({sel.CARD_FALHA_TITULO})) is True
+    assert await grade.falhou(_CardFalso(set())) is False
 
 
 async def test_card_normal_nao_e_falha():
-    assert await TransportePlaywright()._card_falhou(_CardFalso(set())) is False
+    assert await grade.falhou(_CardFalso(set())) is False
 
 
 async def test_seletor_pendente_nao_vira_falha_nem_vai_para_o_playwright():
@@ -1025,7 +1024,7 @@ async def test_seletor_pendente_nao_vira_falha_nem_vai_para_o_playwright():
             return 0
 
     card = _So_o_medido()
-    assert await TransportePlaywright()._card_falhou(card) is False
+    assert await grade.falhou(card) is False
     # os dois medidos foram consultados de verdade — sem isto o teste passaria
     # mesmo se alguem devolvesse os seletores para PENDENTE
     assert sel.CARD_FALHA in card.vistos
@@ -1049,13 +1048,12 @@ async def test_limite_de_uso_exige_as_duas_marcas():
         async def count(self):
             return self.n
 
-    t = TransportePlaywright()
     # so a frase do limite, sem "nao houve cobranca": nao decide
-    assert await t._card_por_limite_de_uso(_CardParcial({sel.CARD_LIMITE_DE_USO})) is False
+    assert await grade.por_limite_de_uso(_CardParcial({sel.CARD_LIMITE_DE_USO})) is False
     # so "nao houve cobranca": tambem nao
-    assert await t._card_por_limite_de_uso(_CardParcial({sel.CARD_SEM_COBRANCA})) is False
+    assert await grade.por_limite_de_uso(_CardParcial({sel.CARD_SEM_COBRANCA})) is False
     # as duas: e limite de uso
-    assert await t._card_por_limite_de_uso(
+    assert await grade.por_limite_de_uso(
         _CardParcial({sel.CARD_LIMITE_DE_USO, sel.CARD_SEM_COBRANCA})) is True
 
 
