@@ -33,3 +33,9 @@ __pycache__/
 scratch/
 flowpool.egg-info/
 *.bak.*
+
+# Runbook do agente: notas de execucao acumuladas sessao a sessao (armadilhas de
+# ferramenta, comando de check, o que explode um grep). E anotacao de trabalho, nao
+# documentacao do projeto — o que vale para uma pessoa esta no CLAUDE.md e no LEIA-ME.
+# `.claude/launch.json` continua versionado: aquele e config do preview, e do repo.
+.claude/napkin.md
