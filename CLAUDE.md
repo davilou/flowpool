@@ -15,7 +15,7 @@ Três comandos, todos têm que passar limpos. **Rode os três depois de cada mud
 .venv/Scripts/python.exe -m pytest -q
 ```
 
-676 testes, ~15 s. A suíte não abre navegador, não gasta crédito e não fala com o modelo
+751 testes, ~15 s. A suíte não abre navegador, não gasta crédito e não fala com o modelo
 de visão — se algum teste ficar lento ou pedir rede, alguma coisa vazou de camada.
 
 ```bash
@@ -106,6 +106,22 @@ Esta é a lista que justifica o arquivo. Cada item já custou caro uma vez.
 8. **Duas sessões no mesmo perfil do Chrome são impossíveis.** O segundo processo
    entrega a URL ao primeiro e morre. O teto de paralelismo é o número de contas livres,
    não de janelas.
+9. **`sel.PENDENTE` vale `"..."`, que o Playwright lê como XPath — e é *truthy*.** Os dois
+   jeitos de se machucar com isso já aconteceram. Mandá-lo a um locator estoura com
+   `SyntaxError: The string '...' is not a valid XPath expression`, uma mensagem que fala
+   de sintaxe quando o problema é medição: use `acoes.quantos` ("não sei" = zero) ou
+   `acoes.medido` (recusa antes de gastar crédito), nunca `.locator(sel.X).count()` cru.
+   E usá-lo como booleano responde **sim** — é o que `CARDS_NOVOS_PRIMEIRO` faz hoje na
+   linha `indice = 0 if sel.CARDS_NOVOS_PRIMEIRO else antes`, acertando por sorte.
+10. **Recusa do Flow não é falha de geração, e ela tem mais de uma redação.**
+   `grade.recusa_sem_cobranca` decide por "o Flow recusou **E** não cobrou"; o motivo
+   (limite de uso, atividade incomum) é detalhe da mensagem. Motivo novo entra em
+   `_MOTIVOS_DE_RECUSA`, e não num `if` no transporte — foi o nome estreito
+   (`por_limite_de_uso`) que deixou o antiabuso passar por falha comum nos jobs 583-588.
+11. **Mensagem de erro não afirma o que ninguém verificou.** "O resultado EXISTE na conta
+   X e já foi pago" era categórico e falso: a geração tinha sido recusada sem cobrança, e
+   o usuário passou meia tarde procurando um vídeo que nunca houve. O que se sabe se
+   afirma; o resto manda **conferir**.
 
 Quando alguma coisa parar de funcionar contra o Flow real, o primeiro comando é o
 `conferir` — ele diz qual seletor morreu e não gasta crédito:
