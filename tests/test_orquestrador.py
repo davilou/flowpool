@@ -13,7 +13,7 @@ from flowpool.motor.orquestrador import (
     teto_do_ambiente,
 )
 from flowpool.nucleo.custos import custo_de
-from flowpool.nucleo.erros import SaldoInsuficiente
+from flowpool.nucleo.erros import LimiteDeUso, SaldoInsuficiente
 from flowpool.nucleo.escolha import escolher
 from flowpool.nucleo.tipos import EstadoJob, Job, Modelo, Modo, SaudeSessao, Tier
 from flowpool.transporte.base import CardTrocado, ErroTransporte
@@ -1124,6 +1124,54 @@ async def test_card_trocado_desiste_na_hora_em_vez_de_baixar_21_vezes(repo, tmp_
     assert final.erro and "nao e o resultado deste job" in final.erro
     # ⚠️ o que mandou o usuario procurar o que nao existia
     assert "ja foi pago" not in (final.erro or "")
+
+
+# --- recusa sem cobranca devolve o credito reservado --------------------------
+
+
+class _TransporteQueRecusa(TransporteFalso):
+    """Gera, e o Flow recusa a geracao no `consultar` — sem cobrar.
+
+    `saldo` estoura de proposito: a reconciliacao do `finally` e a rede que MASCARA o
+    defeito, e ela usa a mesma sessao que acabou de dar problema. O que este teste
+    quer ver e a contabilidade LOCAL, sozinha.
+    """
+
+    async def consultar(self, s, id_remoto):
+        raise LimiteDeUso(f"conta {s.conta.email}: o Flow recusou por atividade incomum")
+
+    async def saldo(self, s):
+        raise RuntimeError("a leitura de saldo tambem falhou")
+
+
+async def test_recusa_sem_cobranca_devolve_o_credito_ao_saldo_local(repo, tmp_path):
+    """⚠️ O card DIZ "Nao houve cobranca" — e e requisito para se chegar aqui.
+
+    `_estornar` so devolve enquanto `id_remoto is None`, pela regra geral "depois que o
+    Flow aceitou, provavelmente ja cobrou". Neste ramo a regra nao vale: ha prova na
+    tela de que nao cobrou. Estornando ANTES de soltar o `id_remoto`, o credito nao
+    voltava e `custo_estimado` ia a None — sem segunda chance.
+
+    Quem consertava era a reconciliacao lendo o saldo real (foi o `divergencia
+    delta=+15` dos jobs 583-588). Mas ela usa a sessao que acabou de dar problema:
+    quando falha, a conta fica com saldo local menor que o verdadeiro e pode deixar de
+    ser escolhida para um modelo caro — por uma geracao que nunca foi cobrada.
+    """
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 200; repo.salvar_conta(c)
+    jid = repo.criar_job(job_fast())
+
+    await ciclo(Orquestrador(repo, _TransporteQueRecusa(saldos={cid: 200}),
+                             raiz=tmp_path))
+
+    assert repo.conta(cid).saldo == 200, "o credito reservado tem que voltar"
+
+    # e o contrato do "pula para outra conta" continua de pe
+    final = repo.job(jid)
+    assert final.estado is EstadoJob.PENDENTE
+    assert final.tentativas == 0, "recusa da conta nao gasta tentativa do job"
+    assert final.id_remoto is None and final.conta_id is None
+    assert repo.conta(cid).limite_ate is not None
 
 
 # --- os despachos nao saem todos no mesmo instante ---------------------------

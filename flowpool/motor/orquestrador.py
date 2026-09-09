@@ -811,7 +811,12 @@ class Orquestrador:
             # gastar tentativa, outra conta pega. O que muda e o nome e o evento.
             # E `saldo_confiavel` continua TRUE: nada foi cobrado, o numero local
             # segue valendo, e derruba-lo forcaria uma reconciliacao inutil.
-            self._estornar(job, conta)
+            #
+            # ⚠️ `sem_cobranca=True`: o card exigiu a frase "Nao houve cobranca" para
+            # chegar aqui, entao a regra "aceitou, logo cobrou" nao vale — ver
+            # `_estornar`. O `salvar_conta` logo abaixo grava o saldo devolvido junto
+            # com o `limite_ate`.
+            self._estornar(job, conta, sem_cobranca=True)
             # ⚠️ `limite_ate`, NAO `seca_ate`. `seca_ate` e sobre credito e libera de
             # proposito o que e de graca — com ele, `apta` seguia devolvendo True para
             # imagem e o motor reescolhia a conta que acabara de recusar.
@@ -953,7 +958,7 @@ class Orquestrador:
             payload.update(extra)
         self.repo.registrar_evento(job.id, conta.id, tipo, json.dumps(payload))
 
-    def _estornar(self, job: Job, conta: Conta) -> bool:
+    def _estornar(self, job: Job, conta: Conta, sem_cobranca: bool = False) -> bool:
         """Devolve ao saldo a reserva de um job que nao chegou a virar geracao.
 
         So estorna enquanto `id_remoto is None` — ou seja, enquanto o Flow ainda nao
@@ -963,6 +968,20 @@ class Orquestrador:
         rede, e a leitura de saldo falha junto. O saldo inflado sobreviveria, a conta
         seria escolhida de novo, o Flow recusaria, e o ciclo se repetiria.
 
+        ⚠️ `sem_cobranca` E A UNICA COISA QUE DERRUBA ESSA REGRA, e ela so vem de UMA
+        evidencia: o proprio card na tela dizendo "Nao houve cobranca por esta geracao"
+        (`grade.recusa_sem_cobranca` exige essa frase para existir). Ali o "provavelmente
+        cobrou" e falso com prova, e nao estornar deixa o saldo local ABAIXO do real.
+        MEDIDO nos jobs 583-588 (2026-09-09): a reconciliacao do `finally` adotava o
+        numero verdadeiro e a divergencia saia como `delta=+15` — mas ela le o saldo com
+        a MESMA sessao que acabou de dar problema, e quando essa leitura falha a conta
+        fica parecendo mais pobre do que e, e some das escolhas de modelo caro por uma
+        geracao que nunca foi cobrada.
+
+        A alternativa era limpar `id_remoto` antes de chamar isto, e seria pior: fazer a
+        condicao virar verdadeira a mao esconde o motivo, e quem ler depois nao sabe se
+        o campo foi solto para estornar ou para o job voltar a fila.
+
         Idempotente: zera `custo_estimado` para nao estornar duas vezes. Quem chama
         salva o job logo em seguida (`_devolver`), entao o zero chega ao banco.
 
@@ -971,7 +990,7 @@ class Orquestrador:
         """
         if job.custo_estimado is None:
             return False
-        devolveu = job.id_remoto is None
+        devolveu = sem_cobranca or job.id_remoto is None
         if devolveu:
             liberar(conta, job.custo_estimado)
         job.custo_estimado = None
