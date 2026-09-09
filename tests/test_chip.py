@@ -139,8 +139,8 @@ class _Pagina:
 
 
 def _pedido(**extra):
-    base = dict(modo=Modo.IMAGEM, modelo=Modelo.NANO_BANANA_2, prompt="x",
-                proporcao="9:16", quantidade=1)
+    base = {"modo": Modo.IMAGEM, "modelo": Modelo.NANO_BANANA_2, "prompt": "x",
+            "proporcao": "9:16", "quantidade": 1}
     base.update(extra)
     return Pedido(**base)
 
