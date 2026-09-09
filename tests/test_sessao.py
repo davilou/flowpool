@@ -5,8 +5,12 @@ import pytest
 from flowpool.nucleo.erros import ProxyInvalido
 from flowpool.transporte.base import SessaoMorta
 from flowpool.transporte.pw.sessao import (
-    ChromeAusente, argumentos_chrome, caminho_perfil, checar_chrome,
-    interpretar_sessao, perfil_em_uso,
+    ChromeAusente,
+    argumentos_chrome,
+    caminho_perfil,
+    checar_chrome,
+    interpretar_sessao,
+    perfil_em_uso,
 )
 
 TOKEN = "ya29.a0AfB_byQFAKE_TOKEN_DE_TESTE"

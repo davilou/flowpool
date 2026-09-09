@@ -10,7 +10,11 @@ import sys
 import pytest
 
 from flowpool.api.arquivos import (
-    CaminhoForaDaRaiz, arquivo_de_imagem, e_ruido, listar, resolver,
+    CaminhoForaDaRaiz,
+    arquivo_de_imagem,
+    e_ruido,
+    listar,
+    resolver,
 )
 
 

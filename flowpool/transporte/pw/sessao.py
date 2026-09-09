@@ -133,7 +133,7 @@ def _linhas_de_comando() -> list[str]:
     saida = subprocess.run(
         ["powershell", "-NoProfile", "-NonInteractive", "-Command", consulta],
         capture_output=True, text=True, timeout=60)
-    return [l for l in saida.stdout.splitlines() if l.strip()]
+    return [linha for linha in saida.stdout.splitlines() if linha.strip()]
 
 
 def perfil_em_uso(perfil: Path) -> bool:

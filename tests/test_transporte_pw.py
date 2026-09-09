@@ -11,25 +11,51 @@ import pytest
 
 from flowpool.nucleo.tipos import Conta, Modelo, Modo, Tier
 from flowpool.transporte.base import (
-    Estado, GeracaoFalhou, LimiteDeUso, Pedido, SaldoInsuficiente, Sessao)
+    Estado,
+    GeracaoFalhou,
+    LimiteDeUso,
+    Pedido,
+    SaldoInsuficiente,
+    Sessao,
+)
 from flowpool.transporte.pw import analise
 from flowpool.transporte.pw import seletores as sel
+from flowpool.transporte.pw.analise import (
+    achar_no_submenu,
+    agente_ligado,
+    apareceu_na_lista,
+    arquivos_do_pedido,
+    caminho_final,
+    confirmacao_fraca,
+    custo_do_texto,
+    escolher_item_enviado,
+    escolher_opcao,
+    etapas_ate_o_modo,
+    exigir_agente_desligado,
+    exigir_proporcao_do_modo,
+    exigir_referencia_incluida,
+    exigir_referencias_completas,
+    exigir_selecao,
+    exigir_unico,
+    faltando_no_chip,
+    id_da_midia,
+    id_do_href,
+    item_pronto,
+    nome_do_item,
+    saldo_do_texto,
+)
 from flowpool.transporte.pw.diario import (
-    Diario, descartar_traco, guardar_traco, iniciar_traco, proximo_traco,
+    Diario,
+    descartar_traco,
+    guardar_traco,
+    iniciar_traco,
+    proximo_traco,
     traco_ligado,
 )
 from flowpool.transporte.pw.dom import seguro
-from flowpool.transporte.pw.analise import (
-    agente_ligado, arquivos_do_pedido, caminho_final, confirmacao_fraca,
-    achar_no_submenu, apareceu_na_lista, custo_do_texto, escolher_item_enviado,
-    escolher_opcao,
-    etapas_ate_o_modo, exigir_agente_desligado, exigir_proporcao_do_modo,
-    exigir_referencia_incluida, exigir_referencias_completas, exigir_selecao,
-    exigir_unico, faltando_no_chip, id_da_midia, id_do_href, item_pronto,
-    nome_do_item, saldo_do_texto,
-)
 from flowpool.transporte.pw.transporte import (
-    MAX_REPETICOES, TransportePlaywright,
+    MAX_REPETICOES,
+    TransportePlaywright,
 )
 
 # --- saldo: o texto do menu do avatar -----------------------------------
@@ -1635,7 +1661,8 @@ async def test_video_a_8_por_cento_com_miniatura_borrada_esta_rodando():
     # MEDIDO por print em 2026-09-06 (job 189): o card de video em andamento tem
     # <img> borrada E "8%". Olhar a midia antes da porcentagem dava PRONTO.
     t = TransportePlaywright()
-    assert await _consultar(t, _CardDaGrade(midia=True, texto="8% The scene moves")) is Estado.RODANDO
+    assert await _consultar(
+        t, _CardDaGrade(midia=True, texto="8% The scene moves")) is Estado.RODANDO
 
 
 # --- saldo curto se reconhece ANTES do clique --------------------------------
@@ -1669,7 +1696,6 @@ async def test_sem_botao_de_enviar_e_saldo_insuficiente():
     do card que um job voltou para a fila com o video ja gerado e pago. Reconhecer
     antes do clique deixa a reserva estornavel.
     """
-    from flowpool.transporte.base import SaldoInsuficiente
     t = TransportePlaywright()
     t._ultimo_custo = 100
     with pytest.raises(SaldoInsuficiente) as erro:
@@ -1770,7 +1796,7 @@ class _PaginaNoTeto:
             return list(self.base)
         novo = "src-do-card-novo" if self.com_midia else "sem-midia:"
         # card novo entra na frente e o mais velho sai da renderizacao
-        return [novo] + self.base[:-1]
+        return [novo, *self.base[:-1]]
 
     async def wait_for_timeout(self, ms):
         self.voltas += 1

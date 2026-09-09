@@ -18,7 +18,6 @@ o que a suite exercita e o caminho de producao inteiro menos o transporte HTTP.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 
@@ -27,7 +26,6 @@ from flowpool.transporte.pw import cura
 from flowpool.transporte.pw import seletores as sel
 from flowpool.transporte.pw.cura import AutoCura, Proposta
 from flowpool.transporte.pw.transporte import TransportePlaywright
-
 
 # --- dublês -------------------------------------------------------------
 
@@ -137,7 +135,7 @@ async def test_proposta_que_casa_um_elemento_e_gravada_e_a_acao_repete(tmp_path)
     assert entrada["porque"] == "o icone virou expand_more"
     assert entrada["em"]
     # e passou a valer na leitura, sem reiniciar o processo
-    assert sel.DROPDOWN_MODELO == novo
+    assert novo == sel.DROPDOWN_MODELO
 
 
 async def test_alternativas_sao_validadas_na_ordem(tmp_path):
@@ -154,7 +152,7 @@ async def test_alternativas_sao_validadas_na_ordem(tmp_path):
         pagina, sel.DROPDOWN_MODELO, "dropdown de modelo")
 
     assert pagina.locator(bom).clicado is True
-    assert sel.DROPDOWN_MODELO == bom
+    assert bom == sel.DROPDOWN_MODELO
 
 
 async def test_cura_vale_para_seletor_de_dentro_de_um_mapa(tmp_path):

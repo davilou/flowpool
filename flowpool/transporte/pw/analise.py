@@ -553,7 +553,8 @@ def indice_por_sufixo(rotulos, alvo: str) -> int:
     Existe porque nenhum seletor CSS do Playwright da conta do menu de modelos, e
     MEDIDO em 2026-08-20 e o que prova cada tentativa:
 
-      textos crus: '\U0001f34c Nano Banana Pro', '\U0001f34c Nano Banana 2', '\U0001f34c Nano Banana 2 Lite'
+      textos crus: '\U0001f34c Nano Banana Pro', '\U0001f34c Nano Banana 2',
+                   '\U0001f34c Nano Banana 2 Lite'
         :text-is("\U0001f34c Nano Banana 2 Lite")  -> 0   (o emoji atrapalha)
         :text-matches("Nano Banana 2 Lite$")       -> 0   (nao ancora como se espera)
         :has-text("Nano Banana 2 Lite")            -> 1   (casa, mas...)

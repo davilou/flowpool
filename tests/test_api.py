@@ -959,7 +959,8 @@ def test_diagnosticar_job_pela_rota(tmp_path):
     app = criar_app(repo=repo, transporte=TransporteFalso(saldos={}), raiz=tmp_path,
                     diagnosticador=ModeloFalso(resposta="a conta caiu no portao de idade"))
     c = TestClient(app)
-    jid = c.post("/jobs", json={"modo": "imagem", "prompt": "x", "produto": "P", "nome": "n"}).json()["id"]
+    jid = c.post("/jobs", json={"modo": "imagem", "prompt": "x", "produto": "P",
+                                "nome": "n"}).json()["id"]
     assert c.post(f"/jobs/{jid}/diagnosticar").status_code == 409      # sem falha ainda
     j = repo.job(jid); j.estado = EstadoJob.FALHOU; j.erro = "age-restricted"; repo.salvar_job(j)
     r = c.post(f"/jobs/{jid}/diagnosticar")
@@ -971,6 +972,7 @@ def test_diagnosticar_job_pela_rota(tmp_path):
 
 def test_diagnosticar_sem_modelo_da_503(cliente):
     c, repo = cliente
-    jid = c.post("/jobs", json={"modo": "imagem", "prompt": "x", "produto": "P", "nome": "n"}).json()["id"]
+    jid = c.post("/jobs", json={"modo": "imagem", "prompt": "x", "produto": "P",
+                                "nome": "n"}).json()["id"]
     j = repo.job(jid); j.estado = EstadoJob.FALHOU; j.erro = "x"; repo.salvar_job(j)
     assert c.post(f"/jobs/{jid}/diagnosticar").status_code == 503

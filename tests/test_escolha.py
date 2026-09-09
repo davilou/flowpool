@@ -61,7 +61,8 @@ def test_pula_conta_desativada():
 
 
 def test_pool_todo_seco_devolve_none():
-    assert escolher([conta(1, Tier.FREE, 5), conta(2, Tier.FREE, 0)], Modelo.VEO_FAST, AGORA) is None
+    assert escolher([conta(1, Tier.FREE, 5), conta(2, Tier.FREE, 0)],
+                    Modelo.VEO_FAST, AGORA) is None
 
 
 def test_ultra_paga_menos_e_por_isso_consegue_onde_pro_nao_conseguiria():
@@ -78,7 +79,8 @@ def test_desempate_entre_pagas_e_por_saldo():
 def test_desempate_nao_depende_da_ordem_da_lista():
     # a lista vem de um SELECT sem ORDER BY garantido; a escolha nao pode variar
     a, b = conta(1, Tier.FREE, 50), conta(2, Tier.FREE, 50)
-    assert escolher([a, b], Modelo.VEO_FAST, AGORA).id == escolher([b, a], Modelo.VEO_FAST, AGORA).id
+    assert (escolher([a, b], Modelo.VEO_FAST, AGORA).id
+            == escolher([b, a], Modelo.VEO_FAST, AGORA).id)
 
 
 def test_saldo_exatamente_igual_ao_custo_serve():
@@ -246,8 +248,8 @@ def test_imagem_nao_escolhe_conta_expirada_nem_desativada():
 
 
 def _conta_livre(**kw):
-    base = dict(id=1, email="a@b.c", tier=Tier.FREE, perfil="p", saldo=50,
-                saude=SaudeSessao.VIVA, ativa=True)
+    base = {"id": 1, "email": "a@b.c", "tier": Tier.FREE, "perfil": "p", "saldo": 50,
+            "saude": SaudeSessao.VIVA, "ativa": True}
     base.update(kw)
     return Conta(**base)
 

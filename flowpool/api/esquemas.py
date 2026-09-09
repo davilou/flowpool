@@ -8,9 +8,21 @@ from flowpool.nucleo.custos import CUSTO_DURACAO_BASE
 from flowpool.nucleo.erros import ProxyInvalido
 from flowpool.nucleo.proxy import analisar
 from flowpool.nucleo.tipos import (
-    DURACAO_PADRAO, DURACOES, PROPORCAO_PADRAO, PROPORCOES, SEM_DURACAO, EstadoJob,
-    Modelo, Modo, SaudeSessao, Tier, duracao_valida, max_referencias, modelo_valido,
-    modelos_do_modo, quantidade_maxima,
+    DURACAO_PADRAO,
+    DURACOES,
+    PROPORCAO_PADRAO,
+    PROPORCOES,
+    SEM_DURACAO,
+    EstadoJob,
+    Modelo,
+    Modo,
+    SaudeSessao,
+    Tier,
+    duracao_valida,
+    max_referencias,
+    modelo_valido,
+    modelos_do_modo,
+    quantidade_maxima,
 )
 
 

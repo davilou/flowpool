@@ -5,16 +5,23 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from flowpool.dados.repo import Repo
+from flowpool.motor import diagnostico
 from flowpool.nucleo.credito import LIMIAR_DIVERGENCIA, liberar, reconciliar, reservar
 from flowpool.nucleo.escolha import apta, escolher
 from flowpool.nucleo.tipos import Conta, EstadoJob, Job, Modo, SaudeSessao
-from flowpool.motor import diagnostico
 from flowpool.transporte.base import (
-    Estado, FlowTransport, GeracaoFalhou, LimiteDeUso, Pedido, SaldoInsuficiente, Sessao,
+    Estado,
+    FlowTransport,
+    GeracaoFalhou,
+    LimiteDeUso,
+    Pedido,
+    SaldoInsuficiente,
+    Sessao,
     SessaoMorta,
 )
 
@@ -468,10 +475,8 @@ class Orquestrador:
 
     async def _dormir(self, intervalo: float) -> None:
         """Dorme ate `intervalo` segundos — ou ate alguem acordar o motor."""
-        try:
+        with suppress(TimeoutError):
             await asyncio.wait_for(self._acordar.wait(), timeout=intervalo)
-        except asyncio.TimeoutError:
-            pass
         self._acordar.clear()
 
     async def drenar(self) -> None:

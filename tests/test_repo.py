@@ -1,9 +1,10 @@
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from flowpool.dados.repo import Repo
-from flowpool.nucleo.tipos import Conta, EstadoJob, Job, Modelo, Modo, SaudeSessao, Tier
+from flowpool.nucleo.tipos import EstadoJob, Job, Modelo, Modo, SaudeSessao, Tier
 
 
 @pytest.fixture
@@ -138,7 +139,7 @@ def test_txt_normaliza_o_datetime_para_utc(repo):
 
 def test_close_libera_a_conexao(repo):
     repo.close()
-    with pytest.raises(Exception):
+    with pytest.raises(sqlite3.ProgrammingError):
         repo.contas()
 
 
@@ -286,7 +287,7 @@ def test_leitura_de_varias_threads_nao_embaralha_linha(repo):
             try:
                 assert len(repo.contas()) == 8
                 assert len(repo.jobs()) == 8
-            except Exception as e:               # noqa: BLE001 — o teste E sobre isso
+            except Exception as e:
                 falhas.append(f"{type(e).__name__}: {e}")
 
     fios = [threading.Thread(target=ler) for _ in range(4)]

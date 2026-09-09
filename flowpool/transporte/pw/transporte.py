@@ -11,20 +11,32 @@ from __future__ import annotations
 
 import re
 import time
+from contextlib import suppress
 from pathlib import Path
 
 from flowpool.nucleo import tipos
 from flowpool.nucleo.tipos import Conta, Modo
 from flowpool.transporte.base import (
-    Estado, GeracaoFalhou, Pedido, ProjetoRemoto, LimiteDeUso, SaldoInsuficiente, Sessao, SessaoMorta,
+    Estado,
+    GeracaoFalhou,
+    LimiteDeUso,
+    Pedido,
+    ProjetoRemoto,
+    SaldoInsuficiente,
+    Sessao,
+    SessaoMorta,
 )
 from flowpool.transporte.pw import analise, captura, dom
+from flowpool.transporte.pw import seletores as sel
 from flowpool.transporte.pw.cura import AutoCura
 from flowpool.transporte.pw.diario import (
-    Diario, descartar_traco, guardar_traco, iniciar_traco, proximo_traco,
+    Diario,
+    descartar_traco,
+    guardar_traco,
+    iniciar_traco,
+    proximo_traco,
 )
-from flowpool.transporte.pw import seletores as sel
-from flowpool.transporte.pw.sessao import abrir_contexto, interpretar_sessao
+from flowpool.transporte.pw.sessao import abrir_contexto
 
 # Chave de `sel.BAIXAR` por modo — a resolucao pedida no menu de DOWNLOAD.
 # Medido 2026-09-05 num resultado de imagem: 1k / 2k / 4k. O de video falta medir.
@@ -255,10 +267,8 @@ class TransportePlaywright:
         """
         pw, ctx, velha = s.handle
         nova = await ctx.new_page()
-        try:
+        with suppress(Exception):
             await velha.close()
-        except Exception:
-            pass
         s.handle = (pw, ctx, nova)
         self._diarios[s.conta.id] = Diario(s.conta.id)
 
@@ -342,8 +352,8 @@ class TransportePlaywright:
             # a adocao criaria um projeto novo a cada geracao.
             # o texto do cartao vem como "<nome>\nedit\ndelete": o nome e a primeira
             # linha, e as duas ligaduras do fim sao botoes, nao parte do nome
-            linhas = [l for l in dom.sem_segredo(par["texto"]).splitlines()
-                      if l.strip() and l.strip() not in ("edit", "delete")]
+            linhas = [x for x in dom.sem_segredo(par["texto"]).splitlines()
+                      if x.strip() and x.strip() not in ("edit", "delete")]
             if not linhas:
                 # card sem nome legivel: ignorar e melhor que adotar o projeto errado
                 continue
@@ -479,10 +489,8 @@ class TransportePlaywright:
         for volta in range(tentativas):
             if await self._painel_aberto(pagina):
                 return True
-            try:
+            with suppress(Exception):
                 await pagina.locator(sel.CHIP_CONFIG).first.click(timeout=10_000)
-            except Exception:
-                pass
             gasto = 0
             while gasto < 20_000:
                 await pagina.wait_for_timeout(250)
@@ -509,7 +517,7 @@ class TransportePlaywright:
         """
         await self._garantir_painel(pagina, d)
         # o grupo existe se QUALQUER opcao dele estiver na tela
-        for valor, seletor in mapa.items():
+        for seletor in mapa.values():
             if await painel.locator(seletor).count() > 0:
                 break
         else:
@@ -551,10 +559,9 @@ class TransportePlaywright:
         # que manda procurar um seletor errado quando o seletor estava certo e so
         # chegou cedo. Este mesmo engano custou tres execucoes: saldo, lista de
         # projetos e menu de modelo.
-        try:
+        # falhar aqui e esperado: segue para o exigir_unico, que da a mensagem boa
+        with suppress(Exception):
             await loc.first.wait_for(timeout=15_000)
-        except Exception:
-            pass   # segue para o exigir_unico, que da a mensagem boa
         quantos = await loc.count()
 
         # AUTO-CURA, e SO com zero candidatos. Dois candidatos e AMBIGUIDADE, e
@@ -584,10 +591,9 @@ class TransportePlaywright:
         estados do painel, entao serve de ancora — contar o alvo antes de o painel
         renderizar daria "nao esta visivel" e forcaria dois cliques onde um bastava.
         """
-        try:
+        # falhar aqui e esperado: quem da a mensagem boa e o `_clicar_unico`
+        with suppress(Exception):
             await painel.locator(sel.BOTAO_MODO["t2v"]).first.wait_for(timeout=15_000)
-        except Exception:
-            pass   # segue: quem da a mensagem boa e o `_clicar_unico`
         visivel = await painel.locator(sel.BOTAO_MODO[modo]).count() > 0
         etapas = analise.etapas_ate_o_modo(modo, visivel)
         for passo in etapas:
@@ -741,10 +747,9 @@ class TransportePlaywright:
         constante por um intermitente.
         """
         loc = pagina.locator(_medido("BOTAO_AGENTE", sel.BOTAO_AGENTE))
-        try:
+        # falhar aqui e esperado: segue para o exigir_unico, que da a mensagem boa
+        with suppress(Exception):
             await loc.first.wait_for(timeout=15_000)
-        except Exception:
-            pass   # segue para o exigir_unico, que da a mensagem boa
         # zero e "o interruptor sumiu da tela"; dois e ambiguidade. Nenhum dos dois se
         # resolve chutando, e a auto-cura nao entra aqui de proposito — o vizinho deste
         # botao e o de ENVIAR, e um chute ali dispara geracao de verdade
@@ -1662,7 +1667,7 @@ class TransportePlaywright:
         """
         nome = Path(arquivo).name
         fichas_antes = await self._ids_anexados(pagina)
-        seletor = await self._abrir_seletor_midia(pagina, d)
+        await self._abrir_seletor_midia(pagina, d)
 
         # O RETRATO ANTES DO ENVIO. Sem ele, um homonimo VELHO do acervo — que ja tem
         # miniatura desde um job anterior — passava por "meu upload terminou" no
@@ -1908,9 +1913,9 @@ class TransportePlaywright:
         # comportamento antes de alguem medir a frase, e e melhor que dar por falha uma
         # geracao que esta so demorando.
         for seletor in (sel.CARD_FALHA, sel.CARD_FALHA_TITULO):
-            if seletor and seletor != sel.PENDENTE:
-                if await card.locator(seletor).count() > 0:
-                    return True
+            if (seletor and seletor != sel.PENDENTE
+                    and await card.locator(seletor).count() > 0):
+                return True
         return False
 
     async def _esperar_sair_da_falha(self, pagina, id_remoto: str, d: Diario,

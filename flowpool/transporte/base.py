@@ -9,15 +9,27 @@ from typing import Any, Protocol
 
 from flowpool.nucleo.erros import LimiteDeUso, SaldoInsuficiente
 from flowpool.nucleo.tipos import (
-    DURACAO_PADRAO, PROPORCAO_PADRAO, Conta, Modelo, Modo,
+    DURACAO_PADRAO,
+    PROPORCAO_PADRAO,
+    Conta,
+    Modelo,
+    Modo,
 )
 
 # `SaldoInsuficiente` mora no nucleo e e so reexportada aqui, para quem importa de
 # `transporte.base` continuar funcionando. Duas classes com o mesmo nome fariam o
 # `except` do orquestrador pegar uma e deixar a outra passar como falha de rede.
 __all__ = [
-    "Estado", "Pedido", "ProjetoRemoto", "Sessao", "FlowTransport",
-    "ErroTransporte", "SaldoInsuficiente", "LimiteDeUso", "SessaoMorta", "GeracaoFalhou",
+    "ErroTransporte",
+    "Estado",
+    "FlowTransport",
+    "GeracaoFalhou",
+    "LimiteDeUso",
+    "Pedido",
+    "ProjetoRemoto",
+    "SaldoInsuficiente",
+    "Sessao",
+    "SessaoMorta",
 ]
 
 

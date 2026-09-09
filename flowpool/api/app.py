@@ -13,13 +13,29 @@ from fastapi.responses import FileResponse, Response
 
 from flowpool.api import colar as colagem
 from flowpool.api.arquivos import (
-    CaminhoForaDaRaiz, arquivo_de_imagem, arquivo_de_midia, listar, relativo_seguro,
+    CaminhoForaDaRaiz,
+    arquivo_de_imagem,
+    arquivo_de_midia,
+    listar,
+    relativo_seguro,
     tipo_de,
 )
 from flowpool.api.esquemas import (
-    _MODELO_PADRAO, Info, NovaConta, PatchConta, PatchJob, PedidoColarUrl, PedidoJob,
-    PedidoLote, RespostaArquivos, RespostaColagem, RespostaConta, RespostaEvento,
-    RespostaJob, RespostaProjeto, Saude,
+    _MODELO_PADRAO,
+    Info,
+    NovaConta,
+    PatchConta,
+    PatchJob,
+    PedidoColarUrl,
+    PedidoJob,
+    PedidoLote,
+    RespostaArquivos,
+    RespostaColagem,
+    RespostaConta,
+    RespostaEvento,
+    RespostaJob,
+    RespostaProjeto,
+    Saude,
 )
 from flowpool.dados.repo import Repo
 from flowpool.motor.orquestrador import MAX_SIMULTANEOS, Orquestrador
@@ -27,13 +43,27 @@ from flowpool.nucleo.custos import CUSTO_DURACAO_BASE, TETO_DIARIO_FREE, custo_d
 from flowpool.nucleo.erros import DuracaoSemCusto, ModeloSemCusto, ProxyInvalido
 from flowpool.nucleo.proxy import mascarar
 from flowpool.nucleo.tipos import (
-    DURACOES, PROPORCOES, SEM_DURACAO, Conta, EstadoJob, Job, Modelo, Modo, SaudeSessao,
-    Tier, max_referencias, modelos_do_modo, quantidade_maxima,
+    DURACOES,
+    PROPORCOES,
+    SEM_DURACAO,
+    Conta,
+    EstadoJob,
+    Job,
+    Modelo,
+    Modo,
+    SaudeSessao,
+    Tier,
+    max_referencias,
+    modelos_do_modo,
+    quantidade_maxima,
 )
 from flowpool.transporte.base import FlowTransport, SessaoMorta
-from flowpool.transporte.pw.sessao import (ChromeAusente, PerfilOcupado,
-                                           abrir_para_conferir, cadastrar)
-
+from flowpool.transporte.pw.sessao import (
+    ChromeAusente,
+    PerfilOcupado,
+    abrir_para_conferir,
+    cadastrar,
+)
 
 # Os tres arquivos do painel moram AO LADO deste modulo, dentro do pacote. Servi-los um
 # a um, por caminho fixo, e diferente de montar um `StaticFiles`: aqui nao ha diretorio
@@ -581,7 +611,7 @@ def criar_app(repo: Repo, transporte: FlowTransport, raiz: Path | str,
             # alguns milissegundos: fora do event loop, que e compartilhado com o motor
             await asyncio.to_thread(abrir_para_conferir, Path(c.perfil), c.proxy)
         except (ChromeAusente, PerfilOcupado, ProxyInvalido) as e:
-            raise HTTPException(409, str(e))
+            raise HTTPException(409, str(e)) from e
         repo.registrar_evento(None, c.id, "conta_aberta_para_conferir", "{}")
         return {"email": c.email}
 

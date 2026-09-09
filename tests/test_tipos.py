@@ -1,9 +1,23 @@
 from datetime import datetime, timezone
 
 from flowpool.nucleo.tipos import (
-    DURACAO_PADRAO, DURACOES, PROPORCOES, Conta, EstadoJob, Job, Modelo, Modo, Projeto,
-    SaudeSessao, Tier, aceita_referencia, duracao_valida, exige_arquivo,
-    max_referencias, modelo_valido, quantidade_maxima,
+    DURACAO_PADRAO,
+    DURACOES,
+    PROPORCOES,
+    Conta,
+    EstadoJob,
+    Job,
+    Modelo,
+    Modo,
+    Projeto,
+    SaudeSessao,
+    Tier,
+    aceita_referencia,
+    duracao_valida,
+    exige_arquivo,
+    max_referencias,
+    modelo_valido,
+    quantidade_maxima,
 )
 
 

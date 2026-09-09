@@ -41,6 +41,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -238,7 +239,7 @@ class CuradorAnthropic:
         self.modelo = modelo
 
     async def propor(self, descricao, imagem, resumo):
-        import anthropic       # opcional: so quem escolhe este caminho precisa dele
+        import anthropic  # opcional: so quem escolhe este caminho precisa dele
 
         conteudo: list[dict] = []
         if imagem:
@@ -410,7 +411,7 @@ class AutoCura:
 
         curador = self._curador_agora()
         if curador is None:
-            print(f"cura: desligada (FLOWPOOL_CURA) - segue o erro original")
+            print("cura: desligada (FLOWPOOL_CURA) - segue o erro original")
             return None
 
         imagem = await self._imagem(pagina, nome, print_da_tela)
@@ -486,10 +487,8 @@ class AutoCura:
         """
         try:
             loc = escopo.locator(candidato)
-            try:
+            with suppress(Exception):
                 await loc.first.wait_for(timeout=5000)
-            except Exception:
-                pass
             return await loc.count()
         except Exception as e:
             print(f"cura: {candidato!r} nao e um seletor valido ({type(e).__name__})")

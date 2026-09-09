@@ -7,11 +7,14 @@ import pytest
 
 from flowpool.dados.repo import Repo
 from flowpool.motor.orquestrador import (
-    MAX_SIMULTANEOS, MAX_TENTATIVAS, Orquestrador, teto_do_ambiente,
+    MAX_SIMULTANEOS,
+    MAX_TENTATIVAS,
+    Orquestrador,
+    teto_do_ambiente,
 )
 from flowpool.nucleo.custos import custo_de
-from flowpool.nucleo.escolha import escolher
 from flowpool.nucleo.erros import SaldoInsuficiente
+from flowpool.nucleo.escolha import escolher
 from flowpool.nucleo.tipos import EstadoJob, Job, Modelo, Modo, SaudeSessao, Tier
 from flowpool.transporte.base import ErroTransporte
 from flowpool.transporte.falso import TransporteFalso

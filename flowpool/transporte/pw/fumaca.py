@@ -27,7 +27,13 @@ import asyncio
 from pathlib import Path
 
 from flowpool.nucleo.tipos import (
-    DURACAO_PADRAO, DURACOES, Conta, Modelo, Modo, Tier, aceita_referencia,
+    DURACAO_PADRAO,
+    DURACOES,
+    Conta,
+    Modelo,
+    Modo,
+    Tier,
+    aceita_referencia,
     max_referencias,
 )
 from flowpool.transporte.base import Estado, Pedido, Sessao

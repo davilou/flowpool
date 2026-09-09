@@ -2,7 +2,12 @@ import pytest
 
 from flowpool.nucleo.tipos import Conta, Modelo, Modo, Tier
 from flowpool.transporte.base import (
-    ErroTransporte, Estado, Pedido, ProjetoRemoto, SaldoInsuficiente, SessaoMorta,
+    ErroTransporte,
+    Estado,
+    Pedido,
+    ProjetoRemoto,
+    SaldoInsuficiente,
+    SessaoMorta,
 )
 from flowpool.transporte.falso import TransporteFalso
 

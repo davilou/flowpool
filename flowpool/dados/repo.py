@@ -9,7 +9,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from flowpool.nucleo.tipos import (
-    Conta, EstadoJob, Job, Modelo, Modo, Projeto, SaudeSessao, Tier,
+    Conta,
+    EstadoJob,
+    Job,
+    Modelo,
+    Modo,
+    Projeto,
+    SaudeSessao,
+    Tier,
 )
 
 _ESQUEMA = Path(__file__).parent / "esquema.sql"

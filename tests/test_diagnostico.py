@@ -1,6 +1,5 @@
 """O diagnostico automatico: prompt puro, evento gravado, falha do modelo contida."""
 import json
-from pathlib import Path
 
 from flowpool.dados.repo import Repo
 from flowpool.motor import diagnostico
@@ -30,7 +29,8 @@ def _repo_com_job_falho(tmp_path):
     j = repo.job(jid); j.estado = EstadoJob.FALHOU; j.tentativas = 3
     j.erro = "GeracaoFalhou: o download falhou 22 vezes seguidas"; repo.salvar_job(j)
     repo.registrar_evento(jid, 1, "despachado", json.dumps({"modelo": "nano-banana"}))
-    repo.registrar_evento(jid, 1, "download_falhou", json.dumps({"erro": "TargetClosedError", "vezes": 1}))
+    repo.registrar_evento(jid, 1, "download_falhou",
+                          json.dumps({"erro": "TargetClosedError", "vezes": 1}))
     return repo, jid
 
 
@@ -72,7 +72,8 @@ async def test_print_e_passos_da_sessao_chegam_ao_modelo(tmp_path):
         repo, jid, modelo, falha={"print": str(print_), "passos": ["[ 1s] conta 1: x"]})
     pergunta, imagem = modelo.perguntas[0]
     assert imagem == b"\x89PNG-falso" and "[ 1s] conta 1: x" in pergunta
-    p = json.loads([e for e in repo.eventos(jid) if e["tipo"] == "diagnostico"][0]["payload"])
+    p = json.loads(next(e for e in repo.eventos(jid)
+                        if e["tipo"] == "diagnostico")["payload"])
     assert p["com_imagem"] is True and p["print"] == str(print_)
 
 

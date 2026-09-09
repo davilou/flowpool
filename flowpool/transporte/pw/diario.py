@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import os
 import time
+from contextlib import suppress
 from pathlib import Path
 
 # `scratch/` ja e ignorado pelo git.
@@ -241,7 +242,5 @@ async def guardar_traco(ctx, caminho: Path) -> Path | None:
 
 async def descartar_traco(ctx) -> None:
     """Para de gravar e joga fora. E o caminho do job que deu certo (regra 2)."""
-    try:
+    with suppress(Exception):
         await ctx.tracing.stop()
-    except Exception:
-        pass

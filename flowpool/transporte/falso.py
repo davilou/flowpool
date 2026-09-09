@@ -8,7 +8,12 @@ from pathlib import Path
 from flowpool.nucleo.custos import custo_de
 from flowpool.nucleo.tipos import Conta
 from flowpool.transporte.base import (
-    ErroTransporte, Estado, Pedido, ProjetoRemoto, SaldoInsuficiente, Sessao,
+    ErroTransporte,
+    Estado,
+    Pedido,
+    ProjetoRemoto,
+    SaldoInsuficiente,
+    Sessao,
     SessaoMorta,
 )
 
