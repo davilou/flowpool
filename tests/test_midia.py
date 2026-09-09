@@ -25,10 +25,15 @@ de arquivo do sistema e entra por duplo, como o `captura` entrou nos testes de
 download. O que se exercita e a DECISAO — limpar antes, uma volta por referencia,
 conferir QUAIS entraram.
 
-CONTINUA FORA, e de proposito: `_enviar_no_seletor_aberto`. Ele depende de
-`expect_file_chooser` e da chegada assincrona das miniaturas no acervo; um duplo
-honesto para isso teria que modelar a animacao do overlay, e duplo desonesto e pior que
-nenhum — passaria verde sem guardar nada.
+`_enviar_no_seletor_aberto` entrou por ultimo, e eu tinha dito DUAS VEZES que nao
+daria. Dava: o `expect_file_chooser` e um contrato pequeno — um gerenciador de contexto
+cujo `.value` resolve o seletor nativo —, e a chegada assincrona das miniaturas o
+`itens_por_volta` ja modelava. O que faz o duplo valer e a aresta: `.value` SO resolve
+se o clique dentro do bloco abriu um seletor, como no Playwright. Sem isso ele aprovaria
+codigo que clica no botao errado.
+
+Os 18 metodos do bloco de midia estao cobertos, menos os tres de leitura direta
+(`_ids_anexados`, `_itens_da_lista`, `_slot_cheio`) que sao uma linha de `evaluate`.
 """
 
 import pytest
@@ -110,6 +115,48 @@ class _Contador:
         return self.n
 
 
+class _SeletorDeArquivo:
+    """O seletor NATIVO do sistema, como o Playwright o entrega."""
+
+    def __init__(self, pagina):
+        self.pagina = pagina
+
+    async def set_files(self, arquivos):
+        self.pagina.enviados.append(list(arquivos))
+
+
+class _EsperaSeletor:
+    """O que `expect_file_chooser` devolve.
+
+    ⚠️ SO RESOLVE SE O CLIQUE ABRIU UM SELETOR. No Playwright, `await espera.value`
+    fica esperando o evento e estoura se ele nunca vem — clicar em qualquer outra coisa
+    dentro do bloco nao abre seletor nenhum. O duplo precisa ter essa aresta, senao
+    aprova codigo que clica no botao errado.
+    """
+
+    def __init__(self, pagina):
+        self.pagina = pagina
+        self.marca = None
+
+    async def __aenter__(self):
+        self.marca = len(self.pagina.clicados)
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    @property
+    def value(self):
+        async def resolver():
+            abriram = self.pagina.clicados[self.marca:]
+            if sel.BOTAO_ENVIAR_MIDIA not in abriram:
+                raise TimeoutError(
+                    "nenhum seletor de arquivo abriu dentro do bloco "
+                    f"(clicaram em {abriram})")
+            return _SeletorDeArquivo(self.pagina)
+        return resolver()
+
+
 class _Teclado:
     def __init__(self, pagina):
         self.pagina = pagina
@@ -142,6 +189,7 @@ class _Pagina:
         # ficha. Com a lista vazia, nada entra: e assim que se exercita "a ficha nunca
         # chegou", que e o erro que nomeia o arquivo.
         self.entra_ao_clicar = set(entra_ao_clicar)
+        self.enviados = []          # o que foi para o seletor nativo de arquivo
         self.proximas_fichas = list(proximas_fichas)
         self.volta = 0
         self.clicados = []
@@ -176,6 +224,9 @@ class _Pagina:
     @property
     def keyboard(self):
         return _Teclado(self)
+
+    def expect_file_chooser(self, timeout=None):
+        return _EsperaSeletor(self)
 
     # --- efeitos de clique
     def clicar(self, seletor):
@@ -622,3 +673,124 @@ async def test_ficha_TROCADA_reprova(monkeypatch):
     with pytest.raises(GeracaoFalhou, match="anexo TROCADO"):
         await TransportePlaywright()._anexar(
             pagina, _pedido(Modo.IMAGEM, ["a.png"]), Diario(1))
+
+
+# ============================================================================
+# `_enviar_no_seletor_aberto` — o que conta como "chegou no acervo"
+# ============================================================================
+
+def _acervo(*itens):
+    """Um acervo que fica parado: o retrato assenta na primeira volta."""
+    return [list(itens)] * 6
+
+
+def _pagina_de_envio(antes, depois, com_botao=True):
+    """O acervo em `antes` ate o envio, e em `depois` a partir dali."""
+    return _Pagina(
+        presentes={sel.BOTAO_ENVIAR_MIDIA: 1 if com_botao else 0,
+                   sel.BOTAO_ANEXAR: 1, sel.SELETOR_MIDIA: 1},
+        itens_por_volta=_acervo(*antes) + _acervo(*depois))
+
+
+async def test_os_arquivos_vao_para_o_seletor_nativo():
+    pagina = _pagina_de_envio([], [_item("a.png", id_midia="nova-a")])
+
+    novos = await TransportePlaywright()._enviar_no_seletor_aberto(
+        pagina, ["pasta/a.png"], Diario(1))
+
+    assert pagina.enviados == [["pasta/a.png"]]
+    assert [n["id"] for n in novos] == ["nova-a"]
+
+
+async def test_painel_sem_enviar_midia_diz_o_que_fazer():
+    """E o popover do slot de frame, que so escolhe do acervo. A mensagem tem que
+    mandar enviar pelo `+`, antes de trocar para o modo Frames."""
+    pagina = _pagina_de_envio([], [], com_botao=False)
+
+    with pytest.raises(GeracaoFalhou, match="antes de trocar para o modo Frames"):
+        await TransportePlaywright()._enviar_no_seletor_aberto(
+            pagina, ["a.png"], Diario(1))
+
+    assert pagina.enviados == [], "nao pode ter mandado arquivo para lugar nenhum"
+
+
+async def test_item_SEM_MINIATURA_ainda_nao_chegou():
+    """Item que ainda nao renderizou miniatura nao conta como pronto.
+
+    Nao e este teste que guarda a CHAVE `miniaturas` — `src` e `miniaturas` saem do
+    mesmo `querySelectorAll` e nao divergem, entao aqui quem filtra e a falta de id.
+    Quem guarda a chave e o caminho feliz: trocando `miniaturas` por `midias` — a
+    copia das sondas de scratch, que custou "so 0 de 2 prontos" depois de 250 s —
+    `test_os_arquivos_vao_para_o_seletor_nativo` falha na hora. Conferido por mutacao.
+    """
+    pagina = _pagina_de_envio([], [_item("a.png", miniaturas=0, id_midia="nova-a")])
+
+    with pytest.raises(GeracaoFalhou, match="so 0 de 1 arquivo"):
+        await TransportePlaywright()._enviar_no_seletor_aberto(
+            pagina, ["a.png"], Diario(1))
+
+
+async def test_homonimo_VELHO_do_acervo_nao_conta_como_recem_enviado():
+    """O retrato de antes existe para isto: um arquivo de mesmo nome ja no acervo, com
+    miniatura desde um job anterior, passava por "meu upload terminou" no primeiro
+    instante — e todo o resto acontecia com o arquivo ainda em voo."""
+    velho = _item("a.png", id_midia="velha-a")
+    pagina = _pagina_de_envio([velho], [velho])
+
+    with pytest.raises(GeracaoFalhou, match="so 0 de 1 arquivo"):
+        await TransportePlaywright()._enviar_no_seletor_aberto(
+            pagina, ["a.png"], Diario(1))
+
+
+async def test_item_de_nome_que_ninguem_pediu_nao_conta():
+    """O acervo tem itens gerados, que levam o inicio do proprio comando como nome.
+    Sem o filtro por nome, um deles entraria como se fosse a referencia enviada."""
+    pagina = _pagina_de_envio([], [_item("uma gata de chapeu", id_midia="gerada")])
+
+    with pytest.raises(GeracaoFalhou, match="so 0 de 1 arquivo"):
+        await TransportePlaywright()._enviar_no_seletor_aberto(
+            pagina, ["a.png"], Diario(1))
+
+
+async def test_espera_os_DOIS_quando_dois_foram_enviados():
+    """Devolver com um so faria a segunda referencia entrar como a primeira."""
+    pagina = _pagina_de_envio([], [_item("a.png", id_midia="nova-a")])
+
+    with pytest.raises(GeracaoFalhou, match="so 1 de 2 arquivo"):
+        await TransportePlaywright()._enviar_no_seletor_aberto(
+            pagina, ["a.png", "b.png"], Diario(1))
+
+
+async def test_dois_arquivos_sobem_juntos_e_voltam_na_lista():
+    pagina = _pagina_de_envio([], [_item("a.png", id_midia="nova-a"),
+                                   _item("b.png", id_midia="nova-b")])
+
+    novos = await TransportePlaywright()._enviar_no_seletor_aberto(
+        pagina, ["a.png", "b.png"], Diario(1))
+
+    assert sorted(n["id"] for n in novos) == ["nova-a", "nova-b"]
+    assert pagina.enviados == [["a.png", "b.png"]], "uma tacada so"
+
+
+async def test_ids_repetidos_no_envio_sao_erro():
+    """Dois itens com o mesmo id significam que a leitura do acervo furou. Seguir daria
+    duas referencias iguais na barra — o defeito de 21/08, um passo antes."""
+    pagina = _pagina_de_envio([], [_item("a.png", id_midia="mesma"),
+                                   _item("b.png", id_midia="mesma")])
+
+    with pytest.raises(GeracaoFalhou, match="repetem id"):
+        await TransportePlaywright()._enviar_no_seletor_aberto(
+            pagina, ["a.png", "b.png"], Diario(1))
+
+
+async def test_devolve_no_maximo_o_que_foi_pedido():
+    """DOIS itens com o nome pedido, e um arquivo so enviado — o que acontece quando um
+    envio anterior deixou homonimo com id proprio. Devolver os dois faria `_anexar`
+    incluir uma referencia a mais do que se pediu."""
+    pagina = _pagina_de_envio([], [_item("a.png", id_midia="nova-a"),
+                                   _item("a.png", id_midia="nova-a2")])
+
+    novos = await TransportePlaywright()._enviar_no_seletor_aberto(
+        pagina, ["a.png"], Diario(1))
+
+    assert len(novos) == 1, f"pedi 1 arquivo e voltaram {len(novos)} itens"
