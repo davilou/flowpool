@@ -1,0 +1,35 @@
+# Midia gerada: cada produto vira uma pasta `<produto>/clipes/` com o que o Flow
+# devolveu. Git guarda binario para sempre; versionar isso inflaria o repositorio
+# permanentemente sem ganho nenhum.
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.gif
+*.wav
+*.mp3
+*.flac
+
+# Imagens coladas no painel (Ctrl+V e arrastar-soltar). Vem de sites de terceiros e de
+# prints de tela; sao material de trabalho descartavel, nao acervo do projeto. A pasta
+# inteira entra aqui, e nao so as extensoes, para o dia em que o teto de tamanho ou o
+# tipo aceito mudarem.
+_coladas/
+
+# Sessoes autenticadas das contas Google — nunca entra em git
+flowpool/perfis/
+flowpool/flowpool.db
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+scratch/
+flowpool.egg-info/
+*.bak.*

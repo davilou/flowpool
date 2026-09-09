@@ -8,6 +8,7 @@ dela: servido pelo proprio FastAPI, sem build step e sem segundo servidor.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import uvicorn
@@ -20,7 +21,18 @@ from flowpool.motor.orquestrador import teto_do_ambiente
 from flowpool.transporte.pw.cura import ligar_no_banco
 from flowpool.transporte.pw.transporte import TransportePlaywright
 
-RAIZ = Path(__file__).resolve().parent.parent   # a pasta "Tiktok Shop"
+# A RAIZ e a pasta do projeto, e ela decide TRES coisas: onde o arquivo gerado cai
+# (`<produto>/clipes/`), o que o seletor de referencias enxerga, e a base dos caminhos
+# relativos gravados no banco (`_coladas\gott\A-frente.png`).
+#
+# ELA ERA IMPLICITA, e isso quase custou caro na mudanca de pasta de 2026-09-09: o
+# projeto morava dentro de "Tiktok Shop", a raiz era o pai do pacote, e mover o pacote
+# um nivel acima teria feito o seletor de arquivos enxergar TODOS os projetos do
+# usuario — sem erro nenhum, so um navegador de arquivos generoso demais. O calculo
+# continua valendo (o pai do pacote e a raiz do repo), mas agora da para dizer a raiz
+# em voz alta quando o app e a midia moram em lugares diferentes.
+RAIZ = Path(os.environ.get("FLOWPOOL_RAIZ")
+            or Path(__file__).resolve().parent.parent).resolve()
 BANCO = RAIZ / "flowpool" / "flowpool.db"
 
 PORTA = 8777
