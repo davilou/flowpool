@@ -192,6 +192,14 @@ class Conta:
     # Ate quando o Flow recusou gerar apesar do saldo aparente (cota diaria, throttle).
     # Enquanto estiver no futuro a conta sai da escolha, senao o motor gira em laco quente.
     seca_ate: datetime | None = None
+    # ⚠️ DIFERENTE DE `seca_ate`, E A DIFERENCA E O ESCOPO.
+    # `seca_ate` e sobre CREDITO: bloqueia o que custa e libera o que e de graca —
+    # imagem continua rodando numa conta sem saldo, de proposito.
+    # `limite_ate` e o Flow dizendo "voce chegou ao limite de uso" e recusando
+    # QUALQUER geracao, paga ou gratuita. Tratar os dois como um so fazia `apta`
+    # devolver True para imagem numa conta recem-recusada, e o motor voltava a
+    # escolher exatamente a conta que tinha acabado de negar (visto 2026-09-09).
+    limite_ate: datetime | None = None
     saude: SaudeSessao = SaudeSessao.VIVA
     falhas: int = 0
     ativa: bool = True

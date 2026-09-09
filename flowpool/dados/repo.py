@@ -118,7 +118,17 @@ class Repo:
 
     def criar_esquema(self) -> None:
         self.con.executescript(_ESQUEMA.read_text(encoding="utf-8"))
+        self._migrar()
         self.con.commit()
+
+    def _migrar(self) -> None:
+        """Colunas que nasceram depois do banco. `CREATE TABLE IF NOT EXISTS` nao
+        acrescenta coluna em tabela que ja existe, entao sem isto o esquema novo so
+        valeria para instalacao nova — e o banco em producao seguiria sem o campo."""
+        existentes = {r["name"] for r in
+                      self.con.execute("PRAGMA table_info(conta)").fetchall()}
+        if "limite_ate" not in existentes:
+            self.con.execute("ALTER TABLE conta ADD COLUMN limite_ate TEXT")
 
     # ---------- contas ----------
 
@@ -144,11 +154,11 @@ class Repo:
     def salvar_conta(self, c: Conta) -> None:
         self.con.execute(
             """UPDATE conta SET tier=?, perfil=?, saldo=?, saldo_lido_em=?,
-                   saldo_confiavel=?, reset_em=?, seca_ate=?, saude=?, falhas=?,
+                   saldo_confiavel=?, reset_em=?, seca_ate=?, limite_ate=?, saude=?, falhas=?,
                    ativa=?, proxy=?
                WHERE id=?""",
             (c.tier.value, c.perfil, c.saldo, _txt(c.saldo_lido_em),
-             int(c.saldo_confiavel), _txt(c.reset_em), _txt(c.seca_ate),
+             int(c.saldo_confiavel), _txt(c.reset_em), _txt(c.seca_ate), _txt(c.limite_ate),
              c.saude.value, c.falhas, int(c.ativa), c.proxy, c.id),
         )
         self.con.commit()
@@ -176,7 +186,8 @@ class Repo:
             id=r["id"], email=r["email"], tier=Tier(r["tier"]), perfil=r["perfil"],
             saldo=r["saldo"], saldo_lido_em=_dt(r["saldo_lido_em"]),
             saldo_confiavel=bool(r["saldo_confiavel"]), reset_em=_dt(r["reset_em"]),
-            seca_ate=_dt(r["seca_ate"]), saude=SaudeSessao(r["saude"]),
+            seca_ate=_dt(r["seca_ate"]), limite_ate=_dt(r["limite_ate"]),
+            saude=SaudeSessao(r["saude"]),
             falhas=r["falhas"], ativa=bool(r["ativa"]), proxy=r["proxy"],
         )
 

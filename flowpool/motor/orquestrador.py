@@ -14,7 +14,7 @@ from flowpool.nucleo.escolha import apta, escolher
 from flowpool.nucleo.tipos import Conta, EstadoJob, Job, Modo, SaudeSessao
 from flowpool.motor import diagnostico
 from flowpool.transporte.base import (
-    Estado, FlowTransport, GeracaoFalhou, Pedido, SaldoInsuficiente, Sessao,
+    Estado, FlowTransport, GeracaoFalhou, LimiteDeUso, Pedido, SaldoInsuficiente, Sessao,
     SessaoMorta,
 )
 
@@ -389,6 +389,32 @@ class Orquestrador:
             self._ocupadas.add(escolhida.id)
         return escolhida
 
+    def _quando_reavaliar(self, job: Job, agora: datetime) -> datetime | None:
+        """Quando este job merece uma nova chance. `None` = agora mesmo.
+
+        ⚠️ ADIAR O JOB E O ULTIMO RECURSO, NAO O PRIMEIRO. A versao anterior punha
+        `job.reavaliar_em = conta.seca_ate` sempre que UMA conta recusava — uma hora
+        parado mesmo com outras contas livres. RELATADO pelo Davi 2026-09-09:
+        "se uma conta nao tem saldo, o certo e pular para outra conta, porque outra
+        pode ter saldo, pode ter resetado". Os saldos do pool naquele dia eram
+        50/3/50/50/50/2/2/3/2 — nada de ciclo comum entre elas.
+
+        Mas soltar sem prazo quando NENHUMA serve traz o laco quente de volta: o job
+        voltaria na hora, escolheria nada e giraria. Entao o prazo, quando existe, e
+        o instante em que a PRIMEIRA conta volta a servir — nao uma hora fixa.
+        """
+        contas = self.repo.contas()
+        if escolher(contas, job.modelo, agora, job.quantidade, job.duracao,
+                    ocupadas=self._ocupadas) is not None:
+            return None      # alguem pode pegar agora
+
+        # ninguem serve: espera a primeira porta que abre. `reset_em` entra porque a
+        # conta pode estar so sem saldo, sem nenhum descanso marcado.
+        marcos = [t for c in contas
+                  for t in (c.limite_ate, c.seca_ate, c.reset_em)
+                  if t is not None and t > agora]
+        return min(marcos) if marcos else agora + ESPERA_RESET
+
     def _conta_para(self, job: Job, agora: datetime) -> Conta | None:
         """Conta em que este job deve rodar.
 
@@ -675,6 +701,44 @@ class Orquestrador:
             self._devolver(job, str(e), gasta_tentativa=False,
                            falha=sessao.falha if sessao else None)
 
+        except LimiteDeUso as e:
+            # ⚠️ LIMITE DE USO NAO E FALTA DE CREDITO, e a diferenca aparece na tela.
+            # RELATADO pelo usuario 2026-09-09: geracao de IMAGEM custa zero, entao a
+            # conta bate no limite COM credito sobrando. Reportar isso como saldo
+            # faria o painel acusar problema de credito numa conta cheia, e mandaria
+            # ele investigar a coisa errada.
+            #
+            # A ACAO e a mesma do saldo — prazo de descanso, job de volta a fila sem
+            # gastar tentativa, outra conta pega. O que muda e o nome e o evento.
+            # E `saldo_confiavel` continua TRUE: nada foi cobrado, o numero local
+            # segue valendo, e derruba-lo forcaria uma reconciliacao inutil.
+            self._estornar(job, conta)
+            # ⚠️ `limite_ate`, NAO `seca_ate`. `seca_ate` e sobre credito e libera de
+            # proposito o que e de graca — com ele, `apta` seguia devolvendo True para
+            # imagem e o motor reescolhia a conta que acabara de recusar.
+            conta.limite_ate = datetime.now(timezone.utc) + ESPERA_RESET
+            self.repo.salvar_conta(conta)
+
+            # ⚠️ QUEM DESCANSA E A CONTA, NAO O JOB. A primeira versao disto copiou o
+            # `job.reavaliar_em = conta.seca_ate` do saldo e ESTACIONOU O JOB POR UMA
+            # HORA com outras contas livres do lado — visto em 2026-09-09 no job 439,
+            # parado enquanto as contas 3 e 5 estavam com saldo 50 e sem descanso.
+            # `reivindicar` so pega job com `reavaliar_em` nulo ou vencido, e a escolha
+            # de conta ja pula quem tem `seca_ate` no futuro: marcar a conta basta.
+            job.reavaliar_em = self._quando_reavaliar(job, datetime.now(timezone.utc))
+
+            # ⚠️ E SOLTA A CONTA E O CARD. `_devolver` preserva `conta_id` sempre que
+            # `id_remoto` esta preenchido, porque isso normalmente significa "existe
+            # geracao PAGA em curso, retome aquela em vez de pagar de novo". Aqui e o
+            # oposto: o card e o de FALHA, e ele mesmo diz "nao houve cobranca". Manter
+            # os dois prendia o job justamente na conta que acabou de recusar.
+            job.id_remoto = None
+            job.conta_id = None
+
+            self._evento_de_falha(job, conta, "conta_no_limite")
+            self._devolver(job, str(e), gasta_tentativa=False,
+                           falha=sessao.falha if sessao else None)
+
         except SaldoInsuficiente as e:
             # Vem de duas fontes: o guarda local em `reservar` (a conta tem credito
             # real, so nao o bastante para este modelo) ou o proprio Flow. Estornar e
@@ -686,10 +750,14 @@ class Orquestrador:
             # volta a fila na mesma hora, para a mesma conta, abrindo e fechando um
             # Chrome por iteracao, sem gastar tentativa e sem nunca desistir.
             self._estornar(job, conta)
-            conta.seca_ate = datetime.now(timezone.utc) + ESPERA_RESET
+            agora = datetime.now(timezone.utc)
+            conta.seca_ate = agora + ESPERA_RESET
             conta.saldo_confiavel = False
             self.repo.salvar_conta(conta)
-            job.reavaliar_em = conta.seca_ate
+            # ⚠️ NAO e mais `= conta.seca_ate`. Ver `_quando_reavaliar`: adiar o job
+            # por uma hora com outras contas livres foi defeito medido em 2026-09-09.
+            # A conta continua descansando; o JOB so espera se ninguem puder pega-lo.
+            job.reavaliar_em = self._quando_reavaliar(job, agora)
             self._evento_de_falha(job, conta, "conta_seca")
             self._devolver(job, str(e), gasta_tentativa=False,
                            falha=sessao.falha if sessao else None)

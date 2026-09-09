@@ -29,6 +29,18 @@ def apta(c: Conta, modelo: Modelo, agora: datetime, quantidade: int = 1,
         return False
     if c.tier == Tier.FREE and not cabe_no_free(modelo, quantidade, duracao):
         return False
+    # ⚠️ LIMITE DE USO BLOQUEIA TUDO, E POR ISSO VEM ANTES DO ATALHO DA IMAGEM.
+    #
+    # RELATADO 2026-09-09: a conta batia no limite, era marcada para descansar, e o
+    # motor escolhia ELA de novo no job seguinte — imagem custa zero, entao o
+    # `return True` logo abaixo saia antes de qualquer checagem de descanso. Ela
+    # ainda era a primeira da fila por ter o maior saldo.
+    #
+    # `seca_ate` continua LOGO ABAixo e continua sendo so sobre credito: conta sem
+    # saldo deve mesmo seguir aceitando imagem, que e de graca. Este aqui e outro
+    # bloqueio — o Flow recusando a conta inteira, paga ou gratuita.
+    if c.limite_ate is not None and c.limite_ate > agora:
+        return False
     # Custo TOTAL do pedido, nao de uma geracao. Se so a reserva soubesse a quantidade
     # e a duracao, o app escolheria uma conta que comporta uma geracao curta e tentaria
     # gerar quatro longas: o Flow recusa, o job volta pra fila e a conta e marcada seca

@@ -240,3 +240,39 @@ def test_imagem_nao_escolhe_conta_expirada_nem_desativada():
     desligada = conta(2, Tier.FREE, 0, ativa=False)
     bloqueada = conta(3, Tier.FREE, 0, saude=SaudeSessao.BLOQUEADA)
     assert escolher([morta, desligada, bloqueada], Modelo.NANO_BANANA, AGORA) is None
+
+
+# --- limite de uso bloqueia ate o que e de graca ------------------------------
+
+
+def _conta_livre(**kw):
+    base = dict(id=1, email="a@b.c", tier=Tier.FREE, perfil="p", saldo=50,
+                saude=SaudeSessao.VIVA, ativa=True)
+    base.update(kw)
+    return Conta(**base)
+
+
+def test_limite_de_uso_tira_a_conta_ate_para_imagem():
+    """⚠️ RELATADO 2026-09-09: imagem custa zero, entao `apta` saia por
+    `return True` ANTES de olhar qualquer descanso, e o motor reescolhia a conta
+    que o Flow tinha acabado de recusar. `limite_ate` e sobre a CONTA inteira."""
+    agora = datetime(2026, 9, 9, 12, 0, tzinfo=timezone.utc)
+    c = _conta_livre(limite_ate=agora + timedelta(hours=1))
+
+    assert apta(c, Modelo.NANO_BANANA_2, agora) is False
+
+
+def test_conta_sem_saldo_continua_aceitando_imagem():
+    """A regra antiga continua valendo e nao pode ser vitima do conserto: `seca_ate`
+    e sobre CREDITO, e imagem nao custa credito."""
+    agora = datetime(2026, 9, 9, 12, 0, tzinfo=timezone.utc)
+    c = _conta_livre(saldo=0, seca_ate=agora + timedelta(hours=1))
+
+    assert apta(c, Modelo.NANO_BANANA_2, agora) is True
+
+
+def test_limite_vencido_devolve_a_conta_ao_pool():
+    agora = datetime(2026, 9, 9, 12, 0, tzinfo=timezone.utc)
+    c = _conta_livre(limite_ate=agora - timedelta(minutes=1))
+
+    assert apta(c, Modelo.NANO_BANANA_2, agora) is True

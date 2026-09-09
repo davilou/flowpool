@@ -16,7 +16,7 @@ from pathlib import Path
 from flowpool.nucleo import tipos
 from flowpool.nucleo.tipos import Conta, Modo
 from flowpool.transporte.base import (
-    Estado, GeracaoFalhou, Pedido, ProjetoRemoto, SaldoInsuficiente, Sessao, SessaoMorta,
+    Estado, GeracaoFalhou, Pedido, ProjetoRemoto, LimiteDeUso, SaldoInsuficiente, Sessao, SessaoMorta,
 )
 from flowpool.transporte.pw import analise, captura, dom
 from flowpool.transporte.pw.cura import AutoCura
@@ -129,6 +129,22 @@ class TransportePlaywright:
         # imagem e video. Guardar o modo no momento de gerar e mais barato do que
         # adivinhar pelo DOM — e adivinhar errado baixaria a resolucao errada calado.
         self._modo_do_card: dict[tuple[int, str], Modo] = {}
+        # ⚠️ A POSICAO NAO IDENTIFICA O CARD, e isso ja custou video pago.
+        #
+        # MEDIDO 2026-09-09 nos jobs 170/174/189/195 (frames2v): o download abriu um
+        # card de IMAGEM. Prova no proprio erro — o submenu trouxe
+        # `['1k / tamanho original']`, que este arquivo documenta como submenu de
+        # imagem (video traz `270p / 720p / 1080p / 4k`), e o menu do card trazia
+        # `motion_blur / animar`, que so existe em card de imagem. O codigo pediu
+        # "720p", nunca achou, tentou 21 vezes e desistiu com o video gerado e pago.
+        #
+        # A causa e `card-0` ser POSICIONAL: o frames2v sobe DOIS quadros de
+        # referencia, upload vira tile na grade, e o tile de cima deixa de ser a
+        # geracao. Por isso o card passou a ser lembrado pela IDENTIDADE (o `src` da
+        # miniatura), com a posicao so como ultimo recurso.
+        self._identidade_do_card: dict[tuple[int, str], str] = {}
+        # preenchido por `_esperar_card_novo` e consumido logo depois em `_gerar`
+        self._identidade_nova: str | None = None
         # O log de passo e o traco sao POR CONTA pelo mesmo motivo das duas tabelas
         # acima: ate cinco geracoes correm ao mesmo tempo, uma por conta, e um diario
         # por transporte misturaria os relogios de cinco jobs num so.
@@ -1018,8 +1034,25 @@ class TransportePlaywright:
         # `_esperar_card_novo` voltar no instante do clique, por um tile que nao era a
         # geracao. O `antes` do inicio de `_gerar` continua valendo so como registro.
         antes = await pagina.locator(grade).count()
-        # dois botoes contem a palavra "Criar": anexar e enviar. So a ligadura separa.
-        d.passo(f"enviando o comando ({len(p.prompt)} caracteres; {antes} cards na grade)")
+        # ⚠️ A CONTAGEM SOZINHA NAO SERVE DE SINAL: A GRADE TEM TETO DE 24 TILES.
+        # MEDIDO 2026-09-09. A grade nao e virtualizada (rolar nao traz mais nada),
+        # ela simplesmente para de renderizar em 24. Passado o teto, `count()` fica
+        # cravado em 24 e nunca pode ficar MAIOR que `antes` — entao a comparacao
+        # `count() > antes` vira sempre False e todo job vira "o Flow nao criou card
+        # novo", com a imagem gerada e o credito gasto.
+        #
+        # Custou 161 falsos negativos: zero delas ate o job ~200, 49 de 50 na faixa
+        # 300-349, e ZERO sucessos na faixa 350-399. Dois jobs em contas DIFERENTES
+        # (341/conta 3 e 418/conta 1) registraram `antes=24`, o que descarta
+        # coincidencia de conta. E o teto chega rapido porque tile nao e so geracao:
+        # referencia enviada tambem vira tile (ver o comentario acima).
+        #
+        # Por isso a identidade passou a ser o `src` da miniatura, que e unico por
+        # card. A contagem continua no log — ela AINDA e um sinal valido quando
+        # cresce, so nao pode ser o unico.
+        ids_antes = await self._identidades_da_grade(pagina)
+        d.passo(f"enviando o comando ({len(p.prompt)} caracteres; {antes} cards na grade"
+                f"{' — NO TETO DE 24, contagem nao serve de sinal' if antes >= 24 else ''})")
         await pagina.locator(sel.BOTAO_ENVIAR).first.click(timeout=15_000)
 
         # O CARD DECIDE, O AVISO NAO. Esta ordem estava invertida, e custou videos
@@ -1039,7 +1072,7 @@ class TransportePlaywright:
         # deixou de decidir e passou a ENCURTAR O PRAZO: com ele na tela, esperar os
         # 120 s inteiros por um card que nao vem seria desperdicio; sem ele, o card
         # continua sendo a unica confirmacao.
-        if not await self._esperar_card_novo(pagina, antes, d):
+        if not await self._esperar_card_novo(pagina, antes, d, ids_antes=ids_antes):
             if await self._sem_credito(pagina):
                 raise SaldoInsuficiente(f"conta {s.conta.email} sem credito")
             raise GeracaoFalhou("o Flow nao criou card novo depois do envio")
@@ -1055,6 +1088,12 @@ class TransportePlaywright:
         d.passo(f"o Flow aceitou: {id_remoto}")
         self._repeticoes[(s.conta.id, id_remoto)] = 0
         self._modo_do_card[(s.conta.id, id_remoto)] = p.modo
+        if self._identidade_nova:
+            self._identidade_do_card[(s.conta.id, id_remoto)] = self._identidade_nova
+        else:
+            # sem identidade nao se guarda nada: `_card` volta a usar a posicao, que
+            # e o comportamento antigo. Registrar False aqui seria pior que omitir.
+            self._identidade_do_card.pop((s.conta.id, id_remoto), None)
         return id_remoto
 
     async def _sem_credito(self, pagina) -> bool:
@@ -1069,9 +1108,34 @@ class TransportePlaywright:
             return False
         return await pagina.locator(sel.AVISO_SEM_CREDITO).count() > 0
 
+    # A grade nao expoe id: os tiles so tem os marcadores de build do Angular
+    # (`_ngcontent-*`, `_nghost-*`), que sao iguais em todos e mudam a cada deploy.
+    # O que identifica um card e o `src` da miniatura — uma URL de conteudo, unica
+    # por resultado. MEDIDO 2026-09-09 por `scratch/sonda_grade.py`.
+    #
+    # Card recem-criado pode ainda nao ter miniatura; ai entra a POSICAO como
+    # desempate, e por isso a lista e ordenada e nao um conjunto.
+    _IDENTIDADES = r"""
+    (seletor) => [...document.querySelectorAll(seletor)].map(e => {
+      const m = e.querySelector('img,video');
+      const src = m ? (m.getAttribute('src') || m.getAttribute('poster') || '') : '';
+      return src || ('sem-midia:' + (e.innerText || '').trim().split('\n')[0]).slice(0, 60);
+    })
+    """
+
+    async def _identidades_da_grade(self, pagina) -> list[str]:
+        try:
+            return await pagina.evaluate(self._IDENTIDADES, sel.CARD_GRADE)
+        except Exception:
+            # nunca derrubar a geracao por causa da leitura de identidade: sem ela o
+            # `_esperar_card_novo` volta a depender da contagem, que ainda funciona
+            # abaixo do teto.
+            return []
+
     async def _esperar_card_novo(self, pagina, antes: int, d: Diario,
                                  teto_ms: int = 120_000,
-                                 graca_do_aviso_ms: int = 20_000) -> bool:
+                                 graca_do_aviso_ms: int = 20_000,
+                                 ids_antes: list[str] | None = None) -> bool:
         """Espera o card novo aparecer na grade. Devolve SE apareceu.
 
         Devolve `bool` em vez de levantar porque quem chama precisa decidir o que a
@@ -1088,9 +1152,44 @@ class TransportePlaywright:
         """
         gasto = 0
         prazo_do_aviso: int | None = None
+        base = list(ids_antes) if ids_antes else []
+        conhecidas = set(base)
+        self._identidade_nova = None
         while gasto < teto_ms:
+            # 1) a contagem cresceu — sinal valido, so nao e o unico (teto de 24)
             if await pagina.locator(sel.CARD_GRADE).count() > antes:
                 return True
+            # 2) apareceu uma identidade que nao existia antes do clique. E este o
+            #    sinal que continua funcionando com a grade cravada em 24: o card
+            #    mais velho sai da renderizacao e o novo entra, sem mexer no total.
+            if base:
+                agora = await self._identidades_da_grade(pagina)
+                if agora:
+                    novas = [i for i in agora if i not in conhecidas]
+                    if novas:
+                        # ⚠️ PLACEHOLDER NAO E IDENTIDADE. No instante em que o card
+                        # nasce ele ainda nao tem miniatura, e `_identidades_da_grade`
+                        # devolve `sem-midia:<icone>` — igual para TODO card novo, e
+                        # some assim que a miniatura carrega.
+                        #
+                        # Guardar isso quebrou o job 435 (2026-09-09): a imagem foi
+                        # gerada, a miniatura entrou, `sem-midia:image` sumiu da grade
+                        # e `_card` derrubou o job dizendo que o card nao estava mais
+                        # la. Serve de SINAL de que um card apareceu; nao serve de
+                        # identidade para reencontra-lo depois.
+                        self._identidade_nova = (
+                            None if novas[0].startswith("sem-midia:") else novas[0])
+                        d.passo(f"card novo por identidade (a grade segue com "
+                                f"{len(agora)} tiles): {novas[0][-28:]}")
+                        return True
+                    # 3) o primeiro tile trocou de identidade sem nenhuma identidade
+                    #    inedita: acontece quando o card entra ainda sem miniatura.
+                    if agora[0] != base[0]:
+                        # sem miniatura ainda: nao ha identidade estavel para guardar,
+                        # e inventar uma faria `_card` casar com o tile errado depois
+                        self._identidade_nova = None
+                        d.passo("card novo: o primeiro tile da grade trocou")
+                        return True
             if prazo_do_aviso is None and await self._sem_credito(pagina):
                 prazo_do_aviso = gasto + graca_do_aviso_ms
                 d.passo(f"o aviso de credito zerado apareceu; dou "
@@ -1735,12 +1834,55 @@ class TransportePlaywright:
         return True
 
     # --------------------------------------------------------------- consultar
-    async def _card(self, pagina, id_remoto: str):
+    async def _card(self, pagina, id_remoto: str, conta_id: int | None = None):
+        """O item da grade daquele job. IDENTIDADE primeiro, posicao so no fim.
+
+        `card-0` e posicional, e posicao mente assim que qualquer tile entra na
+        frente. No frames2v isso e garantido: os dois quadros de referencia sobem
+        ANTES da geracao e viram tiles. Foi assim que os jobs 170/174/189/195
+        baixaram um card de imagem achando que era o video — 21 tentativas cada,
+        video gerado e pago, nenhum arquivo.
+
+        ⚠️ A IDENTIDADE E UM ATALHO, NAO UMA TRAVA. Quando ela nao aparece na grade,
+        cai-se para a posicao — que e o comportamento antigo, e funciona na maioria
+        dos casos. A primeira versao LEVANTAVA erro aqui, e derrubou o job 435 com a
+        imagem pronta: a identidade guardada tinha virado a miniatura de verdade, e o
+        valor velho, claro, nao estava mais la.
+        Quem protege contra baixar o card errado e a conferencia de TIPO em `_baixar`
+        (menu de imagem x menu de video), que olha o card na hora — nao esta funcao.
+        """
         indice = int(id_remoto.split("-")[1])
         cards = pagina.locator(_medido("CARD_GRADE", sel.CARD_GRADE))
+        alvo = self._identidade_do_card.get((conta_id, id_remoto)) if conta_id else None
+        if alvo:
+            atuais = await self._identidades_da_grade(pagina)
+            if alvo in atuais:
+                return cards.nth(atuais.index(alvo))
+            # nao achou: o card pode ter ganhado miniatura nova. Segue pela posicao e
+            # esquece a identidade velha, que so produziria este mesmo desvio de novo.
+            self._identidade_do_card.pop((conta_id, id_remoto), None)
         if await cards.count() <= indice:
             raise GeracaoFalhou(f"{id_remoto} sumiu da grade")
         return cards.nth(indice)
+
+    @staticmethod
+    async def _card_por_limite_de_uso(card) -> bool:
+        """Se aquele card de falha e LIMITE DE USO da conta, e nao falha da geracao.
+
+        Distingue duas coisas que o codigo tratava igual e pedem acoes OPOSTAS:
+        falha de geracao pede `redo` na mesma conta; limite de uso pede trocar de
+        conta, porque repetir bate no mesmo limite.
+
+        Exige as DUAS marcas — a frase do limite e a de "nao houve cobranca". Uma so
+        seria frágil: "limite" aparece em outros avisos do Flow, e concluir limite de
+        uso por engano tiraria uma conta boa do pool por `ESPERA_RESET` inteiro.
+        """
+        for seletor in (sel.CARD_LIMITE_DE_USO, sel.CARD_SEM_COBRANCA):
+            if not seletor or seletor == sel.PENDENTE:
+                return False
+            if await card.locator(seletor).count() == 0:
+                return False
+        return True
 
     @staticmethod
     async def _card_falhou(card) -> bool:
@@ -1798,6 +1940,42 @@ class TransportePlaywright:
         return False
 
     async def consultar(self, s: Sessao, id_remoto: str) -> Estado:
+        """Envolvido em print-em-falha e traco-em-falha, como `gerar` e `baixar`.
+
+        ⚠️ ESTE ENVELOPE FALTAVA, e a falta apareceu do pior jeito. RELATADO pelo
+        usuario 2026-09-09: um job falhou em `consultar` e o diagnostico local
+        respondeu "nao consigo afirmar a causa, nao ha print da tela" — e sugeriu
+        mexer nos seletores do Flow, que estavam certos.
+
+        `consultar` e o metodo que roda a CADA volta do polling; era o unico dos tres
+        que falhava as cegas, justamente o com mais chance de encontrar uma mudanca
+        de interface.
+
+        ⚠️ Nao confundir com a auto-cura: ela so entra quando um SELETOR devolve zero
+        candidatos. Erro de logica nossa depois de uma leitura bem-sucedida nao tem
+        seletor para curar — e curar ali mascararia o defeito em vez de mostra-lo.
+        """
+        try:
+            return await self._consultar(s, id_remoto)
+        except (SaldoInsuficiente, LimiteDeUso):
+            # nao sao falha de tela: sao decisoes de roteamento de conta, e a tela
+            # nesse instante nao diz nada que o print ajude a entender
+            raise
+        except Exception as e:
+            d = self._diario(s.conta.id)
+            d.passo(f"FALHOU em consultar {id_remoto}: {type(e).__name__}: {e}")
+            caminho = None
+            try:
+                if not s.handle[2].is_closed():
+                    caminho = await self.print_de_falha(
+                        s.handle[2], f"consultar {type(e).__name__}")
+            except Exception:
+                pass
+            self._anotar_falha(s, caminho, d)
+            await self._traco_da_falha(s)
+            raise
+
+    async def _consultar(self, s: Sessao, id_remoto: str) -> Estado:
         """Le o estado pela GRADE, nunca pela conversa.
 
         O agente so responde quando perguntado; a grade atualiza sozinha. E nao se
@@ -1805,9 +1983,32 @@ class TransportePlaywright:
         e o contador declararia "pronto" antes de existir card.
         """
         _, _, pagina = s.handle
-        card = await self._card(pagina, id_remoto)
+        card = await self._card(pagina, id_remoto, s.conta.id)
 
         if await self._card_falhou(card):
+            # ⚠️ LIMITE DE USO NAO SE RESOLVE REPETINDO — se resolve TROCANDO DE CONTA.
+            #
+            # RELATADO pelo usuario 2026-09-09, com print: o card dizia "Voce chegou ao
+            # limite de uso. Tente de novo mais tarde." e o painel do FlowPool mostrava
+            # o job como GERANDO. O robo ficava martelando a mesma conta, "gastando
+            # horas para gerar uma imagem".
+            #
+            # A conta ainda MOSTRA saldo — o limite e de uso, nao de credito —, entao
+            # nada nesta camada percebia. E `redo` na mesma conta e garantido falhar de
+            # novo: e o mesmo limite.
+            #
+            # `SaldoInsuficiente` e o erro certo e ja existia pronto: o orquestrador
+            # estorna o credito reservado (o card confirma "Nao houve cobranca"), marca
+            # a conta com prazo em `seca_ate`, NAO gasta tentativa do job e devolve para
+            # a fila — outra conta pega na hora.
+            if await self._card_por_limite_de_uso(card):
+                self._diario(s.conta.id).passo(
+                    f"{id_remoto}: o Flow recusou por LIMITE DE USO, nao por falta de "
+                    f"credito. Repetir aqui nao adianta — trocando de conta.")
+                raise LimiteDeUso(
+                    f"conta {s.conta.email} atingiu o limite de uso do Flow "
+                    f"(sem cobranca por esta geracao; o saldo continua valendo)")
+
             vezes = self._repeticoes.get((s.conta.id, id_remoto), 0)
             # CONFERIR o botao antes de mirar nele. O card de falha tem tres botoes em
             # fila e um deles APAGA; com zero ou com dois candidatos o certo e desistir
@@ -1827,6 +2028,13 @@ class TransportePlaywright:
                     f"(gratuito, {vezes + 1} de {MAX_REPETICOES})")
                 await self._clicar_unico(card, sel.BOTAO_REPETIR_CARD,
                                          f"repetir {id_remoto}")
+                # ⚠️ O `redo` refaz a geracao e a miniatura ganha um `src` NOVO. A
+                # identidade guardada em `_gerar` fica velha nesse instante, e mante-la
+                # faria `_card` procurar para sempre um tile que nao existe mais —
+                # travando o polling do proprio job que se esta tentando salvar.
+                # Sem identidade, `_card` volta a usar a posicao, que aqui e o certo:
+                # o card refeito ocupa o mesmo lugar.
+                self._identidade_do_card.pop((s.conta.id, id_remoto), None)
                 # ESPERA O ESTADO, NAO UM SONO. O `wait_for_timeout(3000)` daqui
                 # custou tres jobs marcados como falhos com o video GERADO na conta.
                 #
@@ -1937,7 +2145,7 @@ class TransportePlaywright:
     async def _baixar(self, s: Sessao, id_remoto: str, destino: Path,
                       d: Diario) -> Path:
         _, _, pagina = s.handle
-        card = await self._card(pagina, id_remoto)
+        card = await self._card(pagina, id_remoto, s.conta.id)
 
         # o <video> nao e clicavel (e miniatura). O alvo e o centro do container.
         caixa = await card.bounding_box()
@@ -1949,13 +2157,41 @@ class TransportePlaywright:
         await menu.wait_for(timeout=15_000)
         await self._logar_menu(pagina, menu)
 
-        await self._clicar_unico(menu, sel.MENU_BAIXAR, "item Baixar")
+        # ⚠️ O TIPO VEM DO CARD NA TELA, NAO DE UM DICIONARIO EM MEMORIA.
+        #
+        # `_modo_do_card` mora na instancia e MORRE A CADA REINICIO do servico. Um job
+        # que gerou antes do restart e baixou depois perdia o modo, caia no default
+        # `Modo.T2V` e pedia "720p" — num card de IMAGEM, cujo submenu so tem "1k".
+        # Sai exatamente "o submenu de download nao trouxe '720p' em 20s", que o
+        # usuario viu no painel em 2026-09-09. Tres restarts no mesmo dia tornaram
+        # isso comum.
+        #
+        # O menu do card diz o tipo de graca, e esta MEDIDO: card de video tem
+        # "adicionar ao cenario" e "publicar no youtube"; no de imagem o lugar deles e
+        # ocupado por "animar". Ler a tela e melhor do que lembrar.
+        rotulos = [dom.seguro(t) for t in
+                   await menu.locator(sel.MENU_ITEM).all_inner_texts()]
+        tipo_na_tela = analise.tipo_do_card(rotulos)
+        modo = self._modo_do_card.get((s.conta.id, id_remoto))
 
-        # assumir VIDEO quando o modo nao e conhecido e o default seguro: pedir "720p"
-        # num menu de imagem nao acha rotulo e a busca grita, enquanto pedir "Tamanho
-        # original" num menu de video baixaria em silencio o errado.
-        chave = sel.BAIXAR[
-            RESOLUCAO[self._modo_do_card.get((s.conta.id, id_remoto), Modo.T2V)]]
+        # ⚠️ DIVERGENCIA E CARD ERRADO, E CARD ERRADO NAO SE BAIXA.
+        # Foi o que aconteceu nos jobs 170/174/189/195 (frames2v): o menu trazia
+        # "animar", isto e, o robo abriu um dos quadros de REFERENCIA achando que era
+        # o video. Baixar o que estiver la resolveria o erro na tela e gravaria a foto
+        # de referencia no lugar do video, calado — pior que falhar.
+        if modo is not None and tipo_na_tela is not None:
+            esperado = "imagem" if modo is Modo.IMAGEM else "video"
+            if tipo_na_tela != esperado:
+                raise GeracaoFalhou(
+                    f"{id_remoto} e um card de {tipo_na_tela} e o job e {esperado}: "
+                    f"o card aberto nao e o resultado deste job. Menu: {rotulos[:4]}")
+
+        if tipo_na_tela is not None:
+            chave = sel.BAIXAR["1k" if tipo_na_tela == "imagem" else "720p"]
+        else:
+            chave = sel.BAIXAR[RESOLUCAO[modo if modo is not None else Modo.T2V]]
+
+        await self._clicar_unico(menu, sel.MENU_BAIXAR, "item Baixar")
         # os rotulos do submenu tem QUEBRA DE LINHA ("270p\nGIF animado"): passar o
         # rotulo inteiro para um seletor CSS estoura o parser. A escolha acontece sobre
         # o texto ja lido, por `analise.achar_no_submenu`, que recusa empate.

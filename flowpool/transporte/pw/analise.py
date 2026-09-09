@@ -608,3 +608,32 @@ def estado_do_card(falhou: bool, tem_porcentagem: bool, tem_midia: bool,
     if parado_ha_s is not None and parado_ha_s >= limite_s:
         return "falhou"
     return "rodando"
+
+
+def tipo_do_card(rotulos: list[str]) -> str | None:
+    """"imagem" | "video" | None, lendo o MENU do card.
+
+    Existe porque `_modo_do_card` mora na memoria do processo e some a cada reinicio
+    do servico: o job que gerou antes e baixou depois perdia o modo, caia no default
+    de video e pedia "720p" num submenu de imagem, que so tem "1k". Era a mensagem
+    "o submenu de download nao trouxe '720p' em 20s" — relatada em 2026-09-09.
+
+    O menu ja diz o tipo, e isso esta MEDIDO em `seletores.py`: card de video tem
+    "adicionar ao cenario" e "publicar no youtube"; no de imagem, o lugar deles e
+    ocupado por "animar". Ler a tela vale mais do que lembrar.
+
+    `None` quando nenhuma das marcas aparece — "nao sei" tem que ser dizivel, senao
+    um menu que mudou de redacao viraria um palpite de tipo, e tipo errado baixa o
+    arquivo errado em silencio.
+    """
+    limpos = [dom.sem_acento(r).lower() for r in rotulos]
+    def tem(marca: str) -> bool:
+        return any(marca in r for r in limpos)
+
+    e_video = tem("adicionar ao cenario") or tem("publicar no youtube")
+    e_imagem = tem("animar")
+    if e_video and not e_imagem:
+        return "video"
+    if e_imagem and not e_video:
+        return "imagem"
+    return None

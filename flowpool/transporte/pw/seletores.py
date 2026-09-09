@@ -476,8 +476,34 @@ PADRAO_PORCENTAGEM = r"(\d{1,3})\s*%"
 # download.
 PADRAO_ID_RESULTADO = r"flow-content\.google/(image|video)/([0-9a-fA-F-]{36})"
 
-CARD_FALHA = PENDENTE
-CARD_FALHA_TITULO = PENDENTE
+# MEDIDO 2026-09-09 por print do card, na aplicação nova. Os dois estavam em
+# PENDENTE, e `_card_falhou` responde False para seletor pendente — ou seja, o
+# FlowPool era INCAPAZ de enxergar qualquer card de falha. O sintoma: o painel
+# mostrava "gerando" enquanto o card na tela já dizia Falha, e o job só saía disso
+# pelo teto do polling, martelando a mesma conta por horas.
+#
+# O card tem três linhas:
+#     Falha
+#     Você chegou ao limite de uso. Tente de novo mais tarde.
+#     Não houve cobrança por esta geração.
+#
+# `CARD_FALHA_TITULO` casa o título sozinho, que é o que TODA falha tem — é o sinal
+# estrutural, e por isso ele é o que decide "falhou". Casar pela frase do corpo
+# reabriria o buraco na próxima redação do Google.
+CARD_FALHA = 'text=/Tente de novo mais tarde|Tente usar outro comando/i'
+CARD_FALHA_TITULO = 'text=/^\\s*Falha\\s*$/i'
+
+# ⚠️ FALHA POR LIMITE DE USO NÃO É FALHA DE GERAÇÃO — é hora de trocar de conta.
+# A conta ainda MOSTRA saldo, mas o Flow recusa: "Você chegou ao limite de uso" e,
+# logo abaixo, "Não houve cobrança por esta geração". Repetir na mesma conta é
+# garantido não funcionar, e era o que fazia o robô martelar.
+#
+# Quem trata isso é `SaldoInsuficiente` no orquestrador, que já faz exatamente o
+# certo: estorna o crédito reservado, marca a conta com prazo (`seca_ate`), NÃO
+# gasta tentativa do job e devolve para a fila — outra conta pega.
+CARD_LIMITE_DE_USO = 'text=/limite de uso|usage limit/i'
+CARD_SEM_COBRANCA = 'text=/n[ãa]o houve cobran[çc]a|no charge/i'
+
 BOTAO_REPETIR_CARD = PENDENTE
 
 # MEDIDO: os menus são `mat-menu` renderizados no overlay do CDK.

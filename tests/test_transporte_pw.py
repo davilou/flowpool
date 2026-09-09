@@ -10,7 +10,8 @@ from pathlib import Path
 import pytest
 
 from flowpool.nucleo.tipos import Conta, Modelo, Modo, Tier
-from flowpool.transporte.base import Estado, GeracaoFalhou, Pedido, Sessao
+from flowpool.transporte.base import (
+    Estado, GeracaoFalhou, LimiteDeUso, Pedido, SaldoInsuficiente, Sessao)
 from flowpool.transporte.pw import analise
 from flowpool.transporte.pw import seletores as sel
 from flowpool.transporte.pw.diario import (
@@ -978,17 +979,58 @@ async def test_seletor_pendente_nao_vira_falha_nem_vai_para_o_playwright():
     `SyntaxError: The string '...' is not a valid XPath expression` — um erro que fala
     de sintaxe quando o fato e que ninguem mediu o card de falha na aplicacao nova.
 
-    Sem medicao, a resposta certa e FALSE: "nao sei dizer que falhou". O custo e um
-    card realmente falho parecer RODANDO ate o teto do polling; o custo do contrario
-    seria dar por falha uma geracao que esta so demorando.
+    ⚠️ `CARD_FALHA` e `CARD_FALHA_TITULO` foram MEDIDOS em 2026-09-09 e nao sao mais
+    pendentes. A regra guardada aqui e a que sobreviveu a medicao, e e mais geral:
+    seletor pendente NUNCA vai para o Playwright; seletor medido vai.
     """
-    class _Explode:
-        def locator(self, seletor):
-            raise AssertionError(
-                f"seletor pendente chegou ao Playwright: {seletor!r}")
+    class _So_o_medido:
+        def __init__(self):
+            self.vistos = []
 
-    assert sel.CARD_FALHA == sel.PENDENTE          # enquanto nao for medido
-    assert await TransportePlaywright()._card_falhou(_Explode()) is False
+        def locator(self, seletor):
+            if seletor == sel.PENDENTE:
+                raise AssertionError(
+                    f"seletor pendente chegou ao Playwright: {seletor!r}")
+            self.vistos.append(seletor)
+            return _ContaZero()
+
+    class _ContaZero:
+        async def count(self):
+            return 0
+
+    card = _So_o_medido()
+    assert await TransportePlaywright()._card_falhou(card) is False
+    # os dois medidos foram consultados de verdade — sem isto o teste passaria
+    # mesmo se alguem devolvesse os seletores para PENDENTE
+    assert sel.CARD_FALHA in card.vistos
+    assert sel.CARD_FALHA_TITULO in card.vistos
+
+
+async def test_limite_de_uso_exige_as_duas_marcas():
+    """Uma marca so nao basta: "limite" aparece noutros avisos do Flow, e concluir
+    limite de uso por engano tiraria uma conta boa do pool por ESPERA_RESET inteiro."""
+    class _CardParcial:
+        def __init__(self, casam):
+            self.casam = casam
+
+        def locator(self, seletor):
+            return _Conta(1 if seletor in self.casam else 0)
+
+    class _Conta:
+        def __init__(self, n):
+            self.n = n
+
+        async def count(self):
+            return self.n
+
+    t = TransportePlaywright()
+    # so a frase do limite, sem "nao houve cobranca": nao decide
+    assert await t._card_por_limite_de_uso(_CardParcial({sel.CARD_LIMITE_DE_USO})) is False
+    # so "nao houve cobranca": tambem nao
+    assert await t._card_por_limite_de_uso(_CardParcial({sel.CARD_SEM_COBRANCA})) is False
+    # as duas: e limite de uso
+    assert await t._card_por_limite_de_uso(
+        _CardParcial({sel.CARD_LIMITE_DE_USO, sel.CARD_SEM_COBRANCA})) is True
 
 
 def test_desligar_o_audio_continua_por_medir():
@@ -1688,3 +1730,288 @@ def test_card_sem_sinal_espera_por_tempo_e_nao_por_leituras():
     assert analise.estado_do_card(False, False, False, 35.0) == "rodando"   # 15 leituras de 2 s
     assert analise.estado_do_card(False, False, False, 89.0) == "rodando"
     assert analise.estado_do_card(False, False, False, 90.0) == "falhou"
+
+
+# --- teto de 24 tiles: a contagem satura e deixa de ser sinal -----------------
+
+
+class _PaginaNoTeto:
+    """A grade CRAVADA no teto de 24 tiles, com o card novo entrando na frente.
+
+    Reproduz o defeito medido em 2026-09-09: a grade do Flow para de renderizar em
+    24, entao `count()` nunca fica maior que `antes` e a comparacao antiga concluia
+    "o Flow nao criou card novo" com a imagem gerada e o credito gasto. Foram 161
+    falhas assim — zero ate o job ~200 e 49 de 50 na faixa 300-349.
+    """
+
+    TETO = 24
+
+    def __init__(self, card_na_volta=2, com_midia=True):
+        self.card_na_volta = card_na_volta
+        self.com_midia = com_midia
+        self.voltas = 0
+        # identidades estaveis: o `src` da miniatura de cada tile
+        self.base = [f"src-antigo-{i}" for i in range(self.TETO)]
+
+    def _chegou(self):
+        return self.voltas >= self.card_na_volta
+
+    def quantos(self, seletor):
+        # ⚠️ O PONTO DO TESTE: a contagem NAO cresce, nem depois do card entrar.
+        if seletor == sel.CARD_GRADE:
+            return self.TETO
+        return 0
+
+    def locator(self, seletor):
+        return _LocatorContado(self, seletor)
+
+    async def evaluate(self, script, seletor=None):
+        if not self._chegou():
+            return list(self.base)
+        novo = "src-do-card-novo" if self.com_midia else "sem-midia:"
+        # card novo entra na frente e o mais velho sai da renderizacao
+        return [novo] + self.base[:-1]
+
+    async def wait_for_timeout(self, ms):
+        self.voltas += 1
+
+
+async def test_grade_no_teto_de_24_ainda_detecta_o_card_novo():
+    # sem isto o job vira falha com a imagem gerada — o defeito de 2026-09-09
+    pagina = _PaginaNoTeto(card_na_volta=2)
+
+    apareceu = await TransportePlaywright()._esperar_card_novo(
+        pagina, pagina.TETO, Diario(1), ids_antes=list(pagina.base))
+
+    assert apareceu is True
+
+
+async def test_no_teto_card_novo_sem_miniatura_e_pego_pela_posicao():
+    # card recem-criado pode entrar antes de ter miniatura: nenhuma identidade
+    # inedita aparece, mas o PRIMEIRO tile deixa de ser o que era
+    pagina = _PaginaNoTeto(card_na_volta=2, com_midia=False)
+
+    apareceu = await TransportePlaywright()._esperar_card_novo(
+        pagina, pagina.TETO, Diario(1), ids_antes=list(pagina.base))
+
+    assert apareceu is True
+
+
+async def test_no_teto_sem_card_nenhum_continua_devolvendo_falso():
+    # a correcao nao pode inventar sucesso: grade parada de verdade segue False
+    pagina = _PaginaNoTeto(card_na_volta=None)
+    pagina.card_na_volta = 10**9
+
+    apareceu = await TransportePlaywright()._esperar_card_novo(
+        pagina, pagina.TETO, Diario(1), teto_ms=6_000, ids_antes=list(pagina.base))
+
+    assert apareceu is False
+
+
+# --- o card e achado por IDENTIDADE, nao por posicao --------------------------
+
+
+class _TileDaGrade:
+    """O tile devolvido por `nth`; guarda o indice para o teste conferir."""
+
+    def __init__(self, indice):
+        self.indice = indice
+
+
+class _ListaDeTiles:
+    def __init__(self, quantos):
+        self._quantos = quantos
+
+    async def count(self):
+        return self._quantos
+
+    def nth(self, i):
+        return _TileDaGrade(i)
+
+
+class _GradeComTiles:
+    """Uma grade com identidades conhecidas, para exercitar `_card`."""
+
+    def __init__(self, ids):
+        self.ids = list(ids)
+
+    def quantos(self, seletor):
+        return len(self.ids)
+
+    def locator(self, seletor):
+        return _ListaDeTiles(self.quantos(seletor))
+
+    async def evaluate(self, script, seletor=None):
+        return list(self.ids)
+
+
+async def test_card_e_achado_pela_identidade_e_nao_pela_posicao():
+    # MEDIDO nos jobs 170/174/189/195: o frames2v sobe dois quadros de referencia,
+    # upload vira tile, e o `card-0` deixou de ser o video — o download abriu um card
+    # de imagem e pediu "720p" num submenu que so tinha "1k".
+    t = TransportePlaywright()
+    t._identidade_do_card[(7, "card-0")] = "src-do-video"
+    # o video escorregou para a posicao 2: dois uploads entraram na frente
+    pagina = _GradeComTiles(["src-upload-a", "src-upload-b", "src-do-video"])
+
+    card = await t._card(pagina, "card-0", 7)
+
+    assert card.indice == 2
+
+
+async def test_sem_identidade_guardada_o_card_continua_posicional():
+    # o caminho antigo tem que seguir valendo: modo sem upload, grade pequena
+    t = TransportePlaywright()
+    pagina = _GradeComTiles(["a", "b", "c"])
+
+    card = await t._card(pagina, "card-0", 7)
+
+    assert card.indice == 0
+
+
+async def test_identidade_que_sumiu_cai_na_posicao_e_nao_derruba_o_job():
+    """⚠️ REGRESSAO MEDIDA (job 435, 2026-09-09): a versao anterior LEVANTAVA aqui.
+
+    A identidade guardada some por um motivo banal e comum — o card ganhou a
+    miniatura de verdade e o valor velho era o placeholder. Derrubar o job nesse
+    caso mata uma geracao que esta pronta. A identidade e um atalho; quem protege
+    contra baixar o card errado e a conferencia de TIPO em `_baixar`.
+    """
+    t = TransportePlaywright()
+    t._identidade_do_card[(7, "card-0")] = "src-que-sumiu"
+    pagina = _GradeComTiles(["outro-a", "outro-b"])
+
+    card = await t._card(pagina, "card-0", 7)
+
+    assert card.indice == 0
+    # e esquece a identidade velha, que so produziria o mesmo desvio na proxima volta
+    assert (7, "card-0") not in t._identidade_do_card
+
+
+async def test_placeholder_nunca_vira_identidade_guardada():
+    """`sem-midia:` e igual para TODO card novo e some quando a miniatura chega.
+
+    Guardar isso foi o que quebrou o job 435: serve de sinal de que um card
+    apareceu, nao de identidade para reencontra-lo depois.
+    """
+    pagina = _PaginaNoTeto(card_na_volta=2, com_midia=False)
+
+    apareceu = await TransportePlaywright()._esperar_card_novo(
+        pagina, pagina.TETO, Diario(1), ids_antes=list(pagina.base))
+
+    assert apareceu is True
+
+
+async def test_leitura_de_identidade_vazia_volta_para_a_posicao():
+    # grade vazia na LEITURA e falha de leitura, nao card sumido: se o codigo
+    # tratasse os dois igual, uma falha de `evaluate` derrubaria o job inteiro
+    t = TransportePlaywright()
+    t._identidade_do_card[(7, "card-0")] = "src-do-video"
+    pagina = _GradeComTiles([])
+    pagina.quantos = lambda seletor: 3 if seletor == sel.CARD_GRADE else 0
+
+    card = await t._card(pagina, "card-0", 7)
+
+    assert card.indice == 0
+
+
+# --- o tipo do card vem da TELA, nao da memoria do processo ------------------
+
+
+def test_tipo_do_card_le_o_menu():
+    # MEDIDO em seletores.py: video tem "adicionar ao cenario"/"publicar no youtube";
+    # no de imagem o lugar deles e ocupado por "animar"
+    assert analise.tipo_do_card(
+        ["favorite / favorito", "motion_blur / animar",
+         "download / fazer o download"]) == "imagem"
+    assert analise.tipo_do_card(
+        ["play_movies / adicionar ao cenario",
+         "video_library / publicar no youtube"]) == "video"
+
+
+def test_tipo_do_card_sem_marca_responde_nao_sei():
+    # "nao sei" tem que ser dizivel: um menu que mudou de redacao viraria palpite de
+    # tipo, e tipo errado baixa o arquivo errado EM SILENCIO
+    assert analise.tipo_do_card(["favorite / favorito",
+                                 "download / fazer o download"]) is None
+
+
+def test_tipo_do_card_ambiguo_tambem_e_nao_sei():
+    # as duas marcas juntas nao deveriam existir; se existirem, chutar e pior
+    assert analise.tipo_do_card(["motion_blur / animar",
+                                 "play_movies / adicionar ao cenario"]) is None
+
+
+# --- consultar fotografa a tela quando falha ---------------------------------
+
+
+class _PaginaViva:
+    def is_closed(self):
+        return False
+
+
+class _ContaFake:
+    id = 1
+    email = "quem@exemplo.com"
+
+
+class _SessaoFake:
+    """O minimo que o envelope de `consultar` toca: id da conta e a pagina."""
+
+    conta = _ContaFake()
+    handle = (None, None, _PaginaViva())
+    falha = None
+
+
+async def _sem_traco(s):
+    return None
+
+
+
+async def test_consultar_tira_print_quando_falha():
+    """⚠️ RELATADO 2026-09-09: um job falhou em `consultar` e o diagnostico local
+    respondeu "nao ha print da tela" — e chutou que os seletores do Flow tinham
+    mudado, quando estavam certos. `gerar` e `baixar` ja fotografavam; `consultar`,
+    que roda a cada volta do polling, era o unico cego."""
+    t = TransportePlaywright()
+    tirou = []
+
+    async def _print(pagina, motivo):
+        tirou.append(motivo)
+        return None
+
+    async def _explode(s, id_remoto):
+        raise GeracaoFalhou("qualquer falha de leitura da grade")
+
+    t.print_de_falha = _print
+    t._consultar = _explode
+    t._traco_da_falha = _sem_traco
+    t._anotar_falha = lambda *a, **k: None
+
+    with pytest.raises(GeracaoFalhou):
+        await t.consultar(_SessaoFake(), "card-0")
+
+    assert tirou and "consultar" in tirou[0]
+
+
+async def test_consultar_nao_fotografa_troca_de_conta():
+    """Limite de uso e saldo nao sao falha de tela: sao roteamento de conta. Print
+    ali seria lixo em disco a cada troca, e ha muitas."""
+    t = TransportePlaywright()
+    tirou = []
+
+    async def _print(pagina, motivo):
+        tirou.append(motivo)
+        return None
+
+    async def _limite(s, id_remoto):
+        raise LimiteDeUso("conta no limite")
+
+    t.print_de_falha = _print
+    t._consultar = _limite
+    t._traco_da_falha = _sem_traco
+
+    with pytest.raises(LimiteDeUso):
+        await t.consultar(_SessaoFake(), "card-0")
+
+    assert tirou == []

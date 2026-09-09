@@ -1217,3 +1217,58 @@ async def test_sem_diagnosticador_nada_e_disparado(repo, tmp_path):
     for _ in range(MAX_TENTATIVAS):
         await ciclo(orq)
     assert not [e for e in repo.eventos(jid) if e["tipo"].startswith("diagnostico")]
+
+
+# --- limite de uso solta o job para outra conta -------------------------------
+
+
+def test_job_sai_livre_quando_outra_conta_pode_pegar(repo, tmp_path):
+    """⚠️ RELATADO pelo Davi 2026-09-09: "se uma conta nao tem saldo, o certo e pular
+    para outra conta, porque outra pode ter saldo, pode ter resetado". A versao
+    anterior punha `job.reavaliar_em = conta.seca_ate` sempre — uma HORA parado com
+    o resto do pool livre. Os saldos daquele dia eram 50/3/50/50/50/2/2/3/2: nada de
+    ciclo comum entre as contas."""
+    agora = datetime.now(timezone.utc)
+    seca = repo.conta(repo.criar_conta("seca@b.com", Tier.FREE, "p/1"))
+    seca.saldo, seca.seca_ate = 0, agora + timedelta(hours=1)
+    repo.salvar_conta(seca)
+    boa = repo.conta(repo.criar_conta("boa@b.com", Tier.FREE, "p/2"))
+    boa.saldo = 500
+    repo.salvar_conta(boa)
+
+    orq = Orquestrador(repo, TransporteFalso(saldos={}), raiz=tmp_path)
+
+    assert orq._quando_reavaliar(job_fast(), agora) is None
+
+
+def test_job_espera_a_PRIMEIRA_porta_que_abre_e_nao_uma_hora_fixa(repo, tmp_path):
+    """Sem ninguem apto, soltar o job na hora traria o laco quente de volta. Mas o
+    prazo certo e quando a primeira conta volta a servir — nao ESPERA_RESET cego."""
+    agora = datetime.now(timezone.utc)
+    cedo = agora + timedelta(minutes=7)
+    tarde = agora + timedelta(hours=3)
+    a = repo.conta(repo.criar_conta("a@b.com", Tier.FREE, "p/1"))
+    a.saldo, a.seca_ate = 0, tarde
+    repo.salvar_conta(a)
+    b = repo.conta(repo.criar_conta("b@b.com", Tier.FREE, "p/2"))
+    b.saldo, b.seca_ate = 0, cedo
+    repo.salvar_conta(b)
+
+    orq = Orquestrador(repo, TransporteFalso(saldos={}), raiz=tmp_path)
+    quando = orq._quando_reavaliar(job_fast(), agora)
+
+    assert quando == cedo
+
+
+def test_sem_nenhum_marco_cai_no_prazo_padrao(repo, tmp_path):
+    """Conta so sem saldo, sem descanso nem reset marcado: nao ha porta com hora.
+    Ai o prazo padrao evita o giro."""
+    agora = datetime.now(timezone.utc)
+    c = repo.conta(repo.criar_conta("a@b.com", Tier.FREE, "p/1"))
+    c.saldo = 0
+    repo.salvar_conta(c)
+
+    orq = Orquestrador(repo, TransporteFalso(saldos={}), raiz=tmp_path)
+    quando = orq._quando_reavaliar(job_fast(), agora)
+
+    assert quando is not None and quando > agora

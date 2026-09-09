@@ -7,7 +7,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Protocol
 
-from flowpool.nucleo.erros import SaldoInsuficiente
+from flowpool.nucleo.erros import LimiteDeUso, SaldoInsuficiente
 from flowpool.nucleo.tipos import (
     DURACAO_PADRAO, PROPORCAO_PADRAO, Conta, Modelo, Modo,
 )
@@ -17,7 +17,7 @@ from flowpool.nucleo.tipos import (
 # `except` do orquestrador pegar uma e deixar a outra passar como falha de rede.
 __all__ = [
     "Estado", "Pedido", "ProjetoRemoto", "Sessao", "FlowTransport",
-    "ErroTransporte", "SaldoInsuficiente", "SessaoMorta", "GeracaoFalhou",
+    "ErroTransporte", "SaldoInsuficiente", "LimiteDeUso", "SessaoMorta", "GeracaoFalhou",
 ]
 
 
