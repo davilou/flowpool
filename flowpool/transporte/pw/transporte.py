@@ -1387,8 +1387,16 @@ class TransportePlaywright:
             # fila e um deles APAGA; com zero ou com dois candidatos o certo e desistir
             # e devolver FALHOU — o job volta pra fila e alguem olha — em vez de clicar
             # no vizinho e jogar fora o trabalho do usuario.
-            repetir = card.locator(sel.BOTAO_REPETIR_CARD)
-            if vezes < MAX_REPETICOES and await repetir.count() == 1:
+            #
+            # ⚠️ `acoes.quantos`, e nao `card.locator(...).count()`: `BOTAO_REPETIR_CARD`
+            # esta PENDENTE, e PENDENTE vale "..." — que o Playwright le como XPath.
+            # MEDIDO 2026-09-09 nos jobs 583-588: esta linha estourava com
+            # `SyntaxError: The string '...' is not a valid XPath expression` em TODA
+            # falha que nao fosse limite de uso, matando `consultar` no meio do polling.
+            # Com zero candidatos o caminho segue para FALHOU, que e o certo — nao ha
+            # botao medido para clicar.
+            if vezes < MAX_REPETICOES and await acoes.quantos(
+                    card, sel.BOTAO_REPETIR_CARD) == 1:
                 # `redo` repete SEM cobrar de novo — a propria mensagem do card diz
                 # "Nao houve cobranca por esta geracao". Repetir aqui, dentro de
                 # `consultar`, e o que faz o orquestrador nem tomar conhecimento:
@@ -1434,7 +1442,7 @@ class TransportePlaywright:
             # Sob o banner de alta demanda a falha e do Google, nao da conta. Levantar
             # SaldoInsuficiente ou SessaoMorta aqui marcaria a conta seca ou expirada e
             # um pico do Google derrubaria o pool inteiro. GeracaoFalhou nao marca nada.
-            if await pagina.locator(sel.AVISO_ALTA_DEMANDA).count() > 0:
+            if await acoes.quantos(pagina, sel.AVISO_ALTA_DEMANDA) > 0:
                 raise GeracaoFalhou(
                     "Flow em alta demanda: falha do Google, a conta esta boa")
             # o Flow desistiu do card. Isto NAO levanta — quem transforma em falha do

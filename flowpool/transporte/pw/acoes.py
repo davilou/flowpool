@@ -107,8 +107,31 @@ async def esperar(pagina, condicao, d: Diario, o_que: str,
     return False
 
 
+async def quantos(escopo, seletor: str) -> int:
+    """Quantos candidatos aquele seletor tem. SELETOR PENDENTE VALE ZERO.
+
+    O par de `medido`, para o outro lado da decisao. `medido` recusa e levanta, e e o
+    certo antes de um clique que gasta credito: sem o seletor nao ha o que fazer.
+    Aqui a pergunta e outra — "isto esta na tela?" — e a resposta honesta para um
+    seletor nao medido e "nao sei", que se conta como ZERO. Levantar seria pior:
+    transforma um sinal que faltava numa falha do job.
+
+    ⚠️ E PRECISA SER CODIGO, NAO DISCIPLINA. `grade.falhou`, `grade.sem_credito` e
+    `grade.por_limite_de_uso` ja escreviam essa guarda cada uma a sua maneira; em
+    `_consultar` ela faltou em dois lugares, e `sel.PENDENTE` ("...") foi para o
+    Playwright, que o le como XPath. MEDIDO 2026-09-09, jobs 583-588: `Locator.count:
+    SyntaxError: The string '...' is not a valid XPath expression` derrubou `consultar`
+    nas seis geracoes, e a mensagem falava de sintaxe quando o problema era medicao.
+
+    `escopo` e pagina ou localizador — o card da grade tambem responde `locator`.
+    """
+    if not seletor or seletor == sel.PENDENTE:
+        return 0
+    return await escopo.locator(seletor).count()
+
+
 async def tem(pagina, seletor: str) -> bool:
-    return await pagina.locator(seletor).count() > 0
+    return await quantos(pagina, seletor) > 0
 
 
 async def sem_veu(pagina, tentativas: int = 16) -> bool:

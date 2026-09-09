@@ -18,7 +18,7 @@ from flowpool.transporte.base import (
     SaldoInsuficiente,
     Sessao,
 )
-from flowpool.transporte.pw import analise, chip, grade
+from flowpool.transporte.pw import acoes, analise, chip, grade
 from flowpool.transporte.pw import seletores as sel
 from flowpool.transporte.pw.analise import (
     achar_no_submenu,
@@ -1664,6 +1664,87 @@ async def test_video_a_8_por_cento_com_miniatura_borrada_esta_rodando():
 
 
 # --- saldo curto se reconhece ANTES do clique --------------------------------
+
+
+# --- seletor PENDENTE nunca chega ao Playwright -------------------------------
+
+
+class _EscopoQueRecusaPendente:
+    """Um escopo que estoura com `PENDENTE` do jeito que o Playwright estoura.
+
+    MEDIDO em producao 2026-09-09, nos jobs 583-588: `'...'` chega ao Playwright, que
+    o le como XPath e recusa com `SyntaxError: The string '...' is not a valid XPath
+    expression`. O erro fala de sintaxe quando o problema e que ninguem mediu o
+    seletor — e derrubou `consultar` no meio do polling das seis geracoes.
+    """
+
+    def __init__(self, marcas=(), texto="Falha"):
+        self.marcas = set(marcas)
+        self.texto = texto
+        self.vistos = []
+
+    def locator(self, seletor):
+        if not seletor or seletor == sel.PENDENTE:
+            raise SyntaxError(
+                f"The string {seletor!r} is not a valid XPath expression")
+        self.vistos.append(seletor)
+        return _LocatorContado(self, seletor)
+
+    def quantos(self, seletor):
+        return 1 if seletor in self.marcas else 0
+
+    async def inner_text(self, timeout=None):
+        return self.texto
+
+
+async def test_quantos_responde_zero_para_seletor_pendente():
+    """PENDENTE vale "nao sei", e "nao sei" se conta como ZERO candidatos.
+
+    O contrato ja era esse em `grade.falhou` e `grade.sem_credito`, cada uma com a
+    guarda escrita a mao. Onde a guarda faltou, o seletor foi para o Playwright.
+    """
+    escopo = _EscopoQueRecusaPendente(marcas={sel.CARD_MIDIA})
+
+    assert await acoes.quantos(escopo, sel.PENDENTE) == 0
+    assert await acoes.quantos(escopo, "") == 0
+    # e o seletor medido continua sendo perguntado de verdade
+    assert await acoes.quantos(escopo, sel.CARD_MIDIA) == 1
+    assert escopo.vistos == [sel.CARD_MIDIA]
+
+
+class _PaginaQueRecusaPendente(_EscopoQueRecusaPendente):
+    """A pagina do projeto: `locator` devolve a lista de cards, menos nos avisos."""
+
+    def __init__(self, card, marcas=()):
+        super().__init__(marcas=marcas)
+        self.card = card
+
+    def locator(self, seletor):
+        if not seletor or seletor == sel.PENDENTE:
+            raise SyntaxError(
+                f"The string {seletor!r} is not a valid XPath expression")
+        self.vistos.append(seletor)
+        if seletor in self.marcas:
+            return _LocatorContado(self, seletor)
+        return _ListaDeCards(self.card)
+
+
+async def test_card_de_falha_nao_manda_o_botao_repetir_pendente_ao_playwright():
+    """O card falhou, `BOTAO_REPETIR_CARD` esta PENDENTE: devolve FALHOU, nao estoura.
+
+    ⚠️ ESTE E O DEFEITO DOS JOBS 583-588 (2026-09-09). O Flow recusou as seis geracoes
+    com "Notamos uma atividade incomum / Nao houve cobranca"; `por_limite_de_uso` nao
+    reconheceu a frase, o codigo caiu no ramo do repetir e perguntou ao Playwright por
+    `'...'`. `consultar` morreu com um erro de XPath, o job voltou a fila com
+    `id_remoto` preenchido — e as tentativas seguintes NUNCA regeraram, so ficaram
+    tentando baixar o card-0, que a essa altura era uma imagem de referencia.
+    """
+    card = _EscopoQueRecusaPendente(marcas={sel.CARD_FALHA_TITULO})
+    pagina = _PaginaQueRecusaPendente(card)
+    sessao = Sessao(conta=Conta(id=1, email="a@b.com", tier=Tier.FREE, perfil=Path(".")),
+                    handle=(None, None, pagina))
+
+    assert await TransportePlaywright().consultar(sessao, "card-0") is Estado.FALHOU
 
 
 class _BarraSemEnviar:
