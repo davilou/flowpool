@@ -11,7 +11,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.3", "pytest-asyncio>=0.24"]
+dev = ["pytest>=8.3", "pytest-asyncio>=0.24", "ruff>=0.16", "pyright>=1.1.400"]
 
 [tool.setuptools.packages.find]
 include = ["flowpool*"]
@@ -25,3 +25,76 @@ flowpool = ["api/painel.html", "api/painel.css", "api/painel.js", "dados/esquema
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+# ---------------------------------------------------------------------------
+# Ruff
+# ---------------------------------------------------------------------------
+# line-length 100 e um FREIO, nao um formatador. A base ja se policia sozinha em 90
+# (p95 = 87, p99 = 90); 100 pega a linha que fugiu de verdade sem transformar "ligar o
+# linter" num diff de 136 linhas reformatadas em codigo que ninguem pediu para mexer.
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+extend-exclude = ["flowpool/perfis"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "C4", "RUF"]
+
+ignore = [
+    # UP042 quer trocar `class Tier(str, Enum)` por `StrEnum`. NAO E EQUIVALENTE:
+    # MEDIDO 2026-09-09, `f"{Tier.FREE}"` devolve "Tier.FREE" com `str, Enum` e "free"
+    # com `StrEnum`. Esses seis enums sao gravados em SQLite e interpolados em texto;
+    # a troca mudaria o que ja esta no banco. So com migracao, nunca por linter.
+    "UP042",
+    # UP017 quer `datetime.UTC` no lugar de `timezone.utc`. E alias puro desde o 3.11
+    # — nao corrige nada, e custaria 52 linhas reescritas exatamente na parte que este
+    # repositorio ja sabe que falha em silencio (ordem lexicografica de data no SQL).
+    # A base e consistente no `timezone.utc`; consistencia vale mais que o alias curto.
+    "UP017",
+]
+
+# ARG (argumento sem uso) ficou de fora de proposito: 78 dos 83 avisos estao em duplo
+# de teste, e os 5 restantes sao assinatura imposta de fora — `falso.py` implementando
+# `FlowTransport`, o `app` que o lifespan do FastAPI exige. Seriam 83 supressoes para
+# comprar um achado real.
+# `caminho: list[str] = Query(default_factory=list)` E a forma de declarar parametro
+# repetido no FastAPI — o B008 existe para pegar `def f(x=[])`, que e outra coisa.
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["fastapi.Query", "fastapi.Depends", "fastapi.Body"]
+
+[tool.ruff.lint.per-file-ignores]
+# Os testes montam cenario com `c = Conta(...); c.saldo = 10` — 140 ocorrencias, todas
+# em teste, nenhuma em `flowpool/`. E estilo de fixture, nao defeito; a regra continua
+# valendo para o codigo de producao, que e onde ponto-e-virgula escondendo uma segunda
+# instrucao custa caro.
+"tests/*" = ["E702"]
+# Estes tres carregam JAVASCRIPT dentro de string: o script injetado na pagina
+# (`captura`), a sonda do acervo (`conferir`) e o dump do DOM (`mapear`). Quebrar linha
+# de JS para caber num limite de Python deixa o JS pior e arrisca mudar o que ele faz —
+# e o codigo Python destes arquivos continua sob a regra.
+"flowpool/transporte/pw/captura.py" = ["E501"]
+"flowpool/transporte/pw/conferir.py" = ["E501"]
+"flowpool/transporte/pw/mapear.py" = ["E501"]
+
+# ---------------------------------------------------------------------------
+# Pyright
+# ---------------------------------------------------------------------------
+# `basic` no repositorio inteiro e `strict` onde mora o dinheiro: credito, escolha de
+# conta, custo, banco e o ciclo de vida do job. Estrito de uma vez em `transporte/pw`
+# acusaria centenas de erros so porque o Playwright entra sem tipo em todo lugar — e
+# alarme que nao se pode zerar e alarme que se aprende a ignorar.
+[tool.pyright]
+include = ["flowpool", "tests"]
+exclude = ["flowpool/perfis", "**/__pycache__", ".venv"]
+pythonVersion = "3.13"
+# Sem apontar a venv o pyright analisa contra o Python do sistema: `playwright` e
+# `fastapi` viram "Import nao resolvido" e TUDO que vem deles vira `Unknown`. O relatorio
+# fica cheio de erro que nao existe e vazio do erro que existe.
+venvPath = "."
+venv = ".venv"
+typeCheckingMode = "basic"
+# `strict` e a lista de caminhos analisados em modo estrito. NAO use
+# `executionEnvironments` com `typeCheckingMode` para isto: o pyright 1.1.411 aceita a
+# chave em silencio no `pyproject.toml` e avisa "unrecognized setting" no stderr — a
+# configuracao parece aplicada e nao esta.
+strict = ["flowpool/nucleo", "flowpool/dados"]
