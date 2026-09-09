@@ -317,3 +317,51 @@ def test_antecipar_reavaliacao_zera_so_os_adiados_ate_o_limite(repo):
 
     assert repo.antecipar_reavaliacao(None) == 1             # `None` = todos os pendentes
     assert repo.job(reset.id).reavaliar_em is None
+
+
+# --- o IP de saida: coluna nova em banco que ja existe ------------------------
+
+
+def test_ip_de_saida_faz_a_volta_pelo_banco(repo):
+    id_ = repo.criar_conta(email="a@b.com", tier=Tier.FREE, perfil="p/1")
+    c = repo.conta(id_)
+    assert c.ip_saida is None and c.ip_lido_em is None, "nunca conferido e o estado inicial"
+
+    quando = datetime(2026, 9, 9, 15, 0, tzinfo=timezone.utc)
+    c.ip_saida = "203.0.113.7"
+    c.ip_lido_em = quando
+    repo.salvar_conta(c)
+
+    voltou = repo.conta(id_)
+    assert voltou.ip_saida == "203.0.113.7"
+    assert voltou.ip_lido_em == quando
+
+
+def test_banco_antigo_ganha_as_colunas_sem_perder_conta(tmp_path):
+    """A MIGRACAO E A PARTE DE RISCO: o banco em producao tem nove contas, e
+    `CREATE TABLE IF NOT EXISTS` nao acrescenta coluna em tabela que ja existe. Sem o
+    `_migrar`, a primeira listagem estouraria com KeyError num banco real."""
+    caminho = tmp_path / "velho.db"
+    antigo = sqlite3.connect(caminho)
+    antigo.execute("""CREATE TABLE conta (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL UNIQUE,
+        tier TEXT NOT NULL, perfil TEXT NOT NULL, saldo INTEGER NOT NULL DEFAULT 0,
+        saldo_lido_em TEXT, saldo_confiavel INTEGER NOT NULL DEFAULT 0, reset_em TEXT,
+        seca_ate TEXT, saude TEXT NOT NULL DEFAULT 'viva',
+        falhas INTEGER NOT NULL DEFAULT 0, ativa INTEGER NOT NULL DEFAULT 1,
+        proxy TEXT)""")
+    antigo.execute("INSERT INTO conta (email, tier, perfil, saldo) VALUES (?,?,?,?)",
+                   ("velha@b.com", "free", "p/9", 42))
+    antigo.commit()
+    antigo.close()
+
+    r = Repo(caminho)
+    r.criar_esquema()
+
+    c = r.contas()[0]
+    assert c.email == "velha@b.com" and c.saldo == 42, "a conta que ja existia continua"
+    assert c.ip_saida is None and c.ip_lido_em is None, "as colunas novas nascem vazias"
+    # e a conta velha aceita a leitura nova, sem passar por um cadastro
+    c.ip_saida = "203.0.113.7"
+    r.salvar_conta(c)
+    assert r.contas()[0].ip_saida == "203.0.113.7"

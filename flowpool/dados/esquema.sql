@@ -12,7 +12,9 @@ CREATE TABLE IF NOT EXISTS conta (
     saude           TEXT    NOT NULL DEFAULT 'viva',
     falhas          INTEGER NOT NULL DEFAULT 0,
     ativa           INTEGER NOT NULL DEFAULT 1,
-    proxy           TEXT
+    proxy           TEXT,
+    ip_saida        TEXT,
+    ip_lido_em      TEXT
 );
 
 CREATE TABLE IF NOT EXISTS job (

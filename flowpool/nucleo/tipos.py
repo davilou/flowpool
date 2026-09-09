@@ -210,6 +210,15 @@ class Conta:
     # `http://usuario:senha@host:porta` ou `socks5://host:porta` — quem traduz e
     # `nucleo/proxy.py`.
     proxy: str | None = None
+    # POR ONDE A CONTA SAIU DA ULTIMA VEZ QUE ALGUEM CONFERIU, e quando.
+    # Coluna, e nao derivado do evento `ip_conferido` mais recente: a listagem de
+    # contas passaria a fazer uma consulta por conta — ou um GROUP BY — para uma
+    # informacao que so muda quando o operador manda conferir.
+    # `None` e "nunca conferido", e e diferente de "sai pelo IP da maquina": o segundo
+    # e uma leitura, o primeiro e a falta dela. `nucleo.proxy.colisoes` ignora `None`
+    # por causa dessa diferenca.
+    ip_saida: str | None = None
+    ip_lido_em: datetime | None = None
 
 
 @dataclass

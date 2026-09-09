@@ -154,6 +154,12 @@ class Repo:
                       self.con.execute("PRAGMA table_info(conta)").fetchall()}
         if "limite_ate" not in existentes:
             self.con.execute("ALTER TABLE conta ADD COLUMN limite_ate TEXT")
+        # o banco em producao tem nove contas: sem isto elas ficariam sem os campos e a
+        # leitura de `_conta` estouraria com KeyError na primeira listagem
+        if "ip_saida" not in existentes:
+            self.con.execute("ALTER TABLE conta ADD COLUMN ip_saida TEXT")
+        if "ip_lido_em" not in existentes:
+            self.con.execute("ALTER TABLE conta ADD COLUMN ip_lido_em TEXT")
 
     # ---------- contas ----------
 
@@ -180,11 +186,12 @@ class Repo:
         self.con.execute(
             """UPDATE conta SET tier=?, perfil=?, saldo=?, saldo_lido_em=?,
                    saldo_confiavel=?, reset_em=?, seca_ate=?, limite_ate=?, saude=?, falhas=?,
-                   ativa=?, proxy=?
+                   ativa=?, proxy=?, ip_saida=?, ip_lido_em=?
                WHERE id=?""",
             (c.tier.value, c.perfil, c.saldo, _txt(c.saldo_lido_em),
              int(c.saldo_confiavel), _txt(c.reset_em), _txt(c.seca_ate), _txt(c.limite_ate),
-             c.saude.value, c.falhas, int(c.ativa), c.proxy, c.id),
+             c.saude.value, c.falhas, int(c.ativa), c.proxy,
+             c.ip_saida, _txt(c.ip_lido_em), c.id),
         )
         self.con.commit()
 
@@ -214,6 +221,7 @@ class Repo:
             seca_ate=_dt(r["seca_ate"]), limite_ate=_dt(r["limite_ate"]),
             saude=SaudeSessao(r["saude"]),
             falhas=r["falhas"], ativa=bool(r["ativa"]), proxy=r["proxy"],
+            ip_saida=r["ip_saida"], ip_lido_em=_dt(r["ip_lido_em"]),
         )
 
     # ---------- jobs ----------
