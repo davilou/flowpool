@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import random
+import time
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -40,6 +42,27 @@ INTERVALO_POLLING = 2.0
 # minutos. Adiar por uma hora um job que so esbarrou numa janela ocupada deixaria o
 # pool ocioso com a fila cheia.
 ESPERA_JANELA = timedelta(seconds=30)
+
+# ⚠️ QUANTO O MOTOR ESPERA ENTRE UM DESPACHO E O SEGUINTE, e por que existe.
+#
+# `rodar` reivindica sem parar enquanto `passo` despachar — de proposito: e o que enche
+# as janelas em vez de andar uma por vez. So que com tres contas livres e tres jobs na
+# fila, as tres geracoes saem no MESMO SEGUNDO. MEDIDO 2026-09-09: os jobs 583, 584 e
+# 585 foram despachados as 16:24:41, em tres contas Google diferentes, todas pelo mesmo
+# IP (`proxy` vazio nas nove contas). O Flow recusou as tres com "Notamos uma atividade
+# incomum. Aguarde alguns instantes... Nao houve cobranca por esta geracao" — o
+# antiabuso do Google, reagindo ao que parece um robo porque E um robo.
+#
+# O espaco NAO SERIALIZA NADA: as geracoes continuam correndo em paralelo, so nao
+# COMECAM juntas. E ele desconta o tempo ja gasto, entao numa fila de videos de dois
+# minutos ele custa zero — o proximo despacho ja chega atrasado por conta propria. Quem
+# paga sao as rajadas de imagem, que e exatamente onde o bloqueio aparecia.
+#
+# O JITTER EXISTE PARA NAO RE-SINCRONIZAR. Espaco fixo desalinha a primeira rajada e
+# realinha a seguinte: quatro jobs do mesmo tamanho terminam com a mesma distancia entre
+# si e voltam a bater juntos. Uma fracao sorteada por cima quebra o compasso.
+ESPACO_ENTRE_DESPACHOS = 4.0
+JITTER_DO_DESPACHO = 0.5
 
 # Quanto tempo o navegador de uma conta fica aberto, OCIOSO, esperando o proximo job.
 #
@@ -130,6 +153,7 @@ class Orquestrador:
                  max_simultaneos: int = MAX_SIMULTANEOS,
                  timeout_geracao: timedelta = TIMEOUT_GERACAO,
                  intervalo_polling: float = INTERVALO_POLLING,
+                 espaco_entre_despachos: float = ESPACO_ENTRE_DESPACHOS,
                  diagnosticador: diagnostico.Diagnosticador | None = None) -> None:
         self.repo = repo
         self.transporte = transporte
@@ -144,6 +168,14 @@ class Orquestrador:
         # parametrizados para o teste nao ter que esperar dez minutos de verdade
         self.timeout_geracao = timeout_geracao
         self.intervalo_polling = intervalo_polling
+        # o espaco entre despachos, e o relogio/sono/sorteio que ele usa. Entram como
+        # atributo — e nao `time`/`random`/`asyncio` chamados direto no meio do metodo —
+        # porque e o que permite testar a conta do espaco sem esperar por ela.
+        self.espaco_entre_despachos = max(0.0, float(espaco_entre_despachos))
+        self._ultimo_despacho: float | None = None
+        self._relogio = time.monotonic
+        self._pausa = asyncio.sleep
+        self._sorteio = random.random
         self._rodando = False
         # ids de conta com navegador aberto agora — por geracao ou por leitura de saldo
         self._ocupadas: set[int] = set()
@@ -479,6 +511,32 @@ class Orquestrador:
         with suppress(TimeoutError):
             await asyncio.wait_for(self._acordar.wait(), timeout=intervalo)
         self._acordar.clear()
+
+    def marcar_despacho(self) -> None:
+        """Anota que uma geracao acabou de sair. Ver `ESPACO_ENTRE_DESPACHOS`."""
+        self._ultimo_despacho = self._relogio()
+
+    async def _espacar_despacho(self) -> None:
+        """Espera o que FALTA para o proximo despacho. Nao dorme o espaco inteiro.
+
+        O tempo que a geracao anterior ja levou conta: numa fila de videos de dois
+        minutos isto custa zero, porque o proximo despacho ja chega atrasado sozinho.
+        Quem paga sao as rajadas de imagem — que e exatamente onde o Google bloqueou.
+
+        DORME AQUI, E NAO DENTRO DA TAREFA: as geracoes ja despachadas continuam
+        correndo enquanto o laco espera. Espacar e sobre o INICIO, nao sobre a duracao.
+
+        E NAO SEGURA JOB NENHUM enquanto espera — `rodar` chama isto DEPOIS de o
+        despacho ter saido, nunca entre reivindicar e despachar. Um job parado em
+        `rodando` durante a espera apareceria como travado no painel por nada.
+        """
+        if not self.espaco_entre_despachos or self._ultimo_despacho is None:
+            return
+        alvo = self.espaco_entre_despachos * (
+            1 + JITTER_DO_DESPACHO * self._sorteio())
+        falta = alvo - (self._relogio() - self._ultimo_despacho)
+        if falta > 0:
+            await self._pausa(falta)
 
     async def drenar(self) -> None:
         """Espera as geracoes ja despachadas terminarem. Nao reivindica nada.
@@ -1010,7 +1068,13 @@ class Orquestrador:
         while self._rodando:
             try:
                 await self._fechar_ociosas()
-                if not await self.passo():
+                if await self.passo():
+                    # ⚠️ SO NA VOLTA QUE DESPACHOU. Espacar tambem na volta vazia
+                    # somaria esta espera a do laco ocioso, e o motor demoraria a
+                    # reagir a um job novo — o oposto do que `_acordar` foi fazer.
+                    self.marcar_despacho()
+                    await self._espacar_despacho()
+                else:
                     await self._dormir(intervalo)
             except Exception as e:
                 self.repo.registrar_evento(

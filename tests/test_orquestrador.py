@@ -1126,6 +1126,119 @@ async def test_card_trocado_desiste_na_hora_em_vez_de_baixar_21_vezes(repo, tmp_
     assert "ja foi pago" not in (final.erro or "")
 
 
+# --- os despachos nao saem todos no mesmo instante ---------------------------
+
+
+async def test_espacar_despacho_dorme_o_que_falta_e_nao_mais(repo, tmp_path):
+    """⚠️ O QUE FEZ O GOOGLE BLOQUEAR AS TRES CONTAS DE UMA VEZ, em 2026-09-09.
+
+    `rodar` reivindica sem parar enquanto `passo` despachar — proposital, e o que enche
+    as janelas. So que com tres contas livres e tres jobs na fila as tres geracoes
+    saiam no MESMO SEGUNDO (jobs 583/584/585, todos as 16:24:41), pelo mesmo IP, e o
+    Flow recusou as tres com "Notamos uma atividade incomum".
+
+    Dorme o que FALTA, e nao o espaco inteiro: o tempo que a geracao anterior ja levou
+    conta. Num job que demora, o espaco nao custa nada.
+    """
+    orq = Orquestrador(repo, TransporteFalso(saldos={}), raiz=tmp_path,
+                       espaco_entre_despachos=4.0)
+    agora = [100.0]
+    dormiu: list[float] = []
+
+    async def _pausa(s):
+        dormiu.append(s)
+        agora[0] += s
+
+    orq._relogio = lambda: agora[0]
+    orq._pausa = _pausa
+    orq._sorteio = lambda: 0.0          # sem jitter, para o numero ser exato
+
+    # o primeiro despacho nao espera ninguem
+    await orq._espacar_despacho()
+    assert dormiu == []
+
+    orq.marcar_despacho()
+    await orq._espacar_despacho()
+    assert dormiu == [4.0]
+
+    # a geracao anterior levou 3 s: falta 1 s, e nao 4
+    orq.marcar_despacho()
+    agora[0] += 3.0
+    await orq._espacar_despacho()
+    assert dormiu[-1] == 1.0
+
+    # e quando ela levou MAIS que o espaco, nao se dorme nada
+    orq.marcar_despacho()
+    agora[0] += 30.0
+    await orq._espacar_despacho()
+    assert len(dormiu) == 2
+
+
+async def test_o_jitter_desalinha_contas_que_terminam_juntas(repo, tmp_path):
+    """Espaco fixo re-sincroniza: quatro contas com jobs do mesmo tamanho voltam a
+    bater no mesmo instante na rajada seguinte. O sorteio quebra o compasso."""
+    orq = Orquestrador(repo, TransporteFalso(saldos={}), raiz=tmp_path,
+                       espaco_entre_despachos=4.0)
+    agora = [0.0]
+    dormiu: list[float] = []
+
+    async def _pausa(s):
+        dormiu.append(s)
+        agora[0] += s
+
+    orq._relogio = lambda: agora[0]
+    orq._pausa = _pausa
+
+    orq._sorteio = lambda: 0.0
+    orq.marcar_despacho()
+    await orq._espacar_despacho()
+
+    orq._sorteio = lambda: 1.0
+    orq.marcar_despacho()
+    await orq._espacar_despacho()
+
+    assert dormiu[0] == 4.0
+    assert dormiu[1] > dormiu[0], "o sorteio tem que mudar o espaco de verdade"
+
+
+async def test_espaco_zero_desliga_a_espera(repo, tmp_path):
+    """Zero e uma porta de verdade, e nao so conveniencia de teste: quem roda uma conta
+    so nao tem com quem colidir, e nao ha por que pagar o espaco."""
+    orq = Orquestrador(repo, TransporteFalso(saldos={}), raiz=tmp_path,
+                       espaco_entre_despachos=0)
+    dormiu: list[float] = []
+    orq._pausa = lambda s: dormiu.append(s)
+
+    orq.marcar_despacho()
+    await orq._espacar_despacho()
+
+    assert dormiu == []
+
+
+async def test_o_laco_espaca_depois_de_despachar_e_nao_quando_dorme(repo, tmp_path):
+    """O espaco e entre DESPACHOS. Aplicá-lo tambem na volta vazia somaria a espera do
+    laco ocioso com a do espacamento, e o motor demoraria a reagir a um job novo."""
+    orq = Orquestrador(repo, TransporteFalso(saldos={}), raiz=tmp_path)
+    voltas = {"passo": 0, "espacou": 0}
+
+    async def _passo():
+        voltas["passo"] += 1
+        if voltas["passo"] >= 3:
+            orq.parar()
+        return voltas["passo"] == 1      # so a primeira volta despacha
+
+    async def _espacar():
+        voltas["espacou"] += 1
+
+    orq.passo = _passo
+    orq._espacar_despacho = _espacar
+    orq._dormir = lambda _: asyncio.sleep(0)
+
+    await orq.rodar(intervalo=0)
+
+    assert voltas["espacou"] == 1, "espacou so na volta que despachou"
+
+
 async def test_conta_liberada_antecipa_o_job_que_esperava_a_janela(repo, tmp_path):
     """O job adiado por 'janela cheia' sai da fila quando a conta vaga, nao 30 s depois.
 
