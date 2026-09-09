@@ -142,18 +142,30 @@ Quando alguma coisa parar de funcionar contra o Flow real, o primeiro comando é
 
 ## Dívida conhecida — não piore
 
-Auditado em 09/09/2026 contra as regras de estrutura (teto de 500 linhas por arquivo,
-50 por função):
+### Meça em linhas de CÓDIGO, e a auditoria muda de conclusão
 
-| arquivo | linhas | |
-|---|---|---|
-| `transporte/pw/transporte.py` | 1529 | corte parado na etapa 4 — ver abaixo |
-| `api/painel.js` | 1819 | longo, mas saudável — ver abaixo |
-| `motor/orquestrador.py` | 988 | `_executar` tem 202 linhas |
-| `transporte/pw/seletores.py` | 874 | mapa de seletores; cresce por natureza |
-| `transporte/pw/analise.py` | 640 | |
-| `transporte/pw/cura.py` | 544 | |
-| `api/esquemas.py` | 440 | acima do alvo de 400, abaixo do teto |
+O teto de 500 do `CLAUDE.md` global fala em linhas de arquivo. Aqui isso engana, e o
+número mostra por quê (medido 09/09/2026):
+
+| arquivo | linhas | **código** | |
+|---|---|---|---|
+| `transporte/pw/transporte.py` | 1551 | **544** | corte parado na etapa 4 — ver abaixo |
+| `api/painel.js` | 1859 | — | longo, mas saudável — ver abaixo |
+| `motor/orquestrador.py` | 1141 | **421** | |
+| `transporte/pw/seletores.py` | 918 | **268** | mapa de seletores; cresce por natureza |
+| `transporte/pw/analise.py` | 640 | **122** | 19% de código: é quase só docstring |
+| `transporte/pw/cura.py` | 544 | **267** | |
+| `api/esquemas.py` | 446 | **214** | |
+
+**Nenhum arquivo de produção passa de 550 linhas de código.** A distância entre 1551 e
+544 é o que este repositório escolheu investir em documentar defeito medido: cada `⚠️`
+nomeia um job que quebrou, com data. O teto existe para proteger legibilidade e edição
+segura, e essas linhas são metade do que torna a edição segura aqui.
+
+Consequência prática, para a próxima auditoria não reabrir a discussão do zero:
+**arquivo grande em linhas brutas não é, sozinho, motivo para quebrar.** Meça o código.
+O que continua valendo sem qualificação é o teto por FUNÇÃO — ali o comentário não
+esconde complexidade, porque quem lê a função lê tudo o que está dentro dela.
 
 **`painel.js` estoura o teto e mesmo assim NÃO deve ser quebrado** (medido 09/09/2026):
 124 funções de topo, só 3 acima de 50 linhas, zero código morto, zero `$("id")` órfão
@@ -173,7 +185,8 @@ modules num arquivo sem teste automatizado, para consertar um número.
 
 A forma: função livre recebendo o que precisa; o transporte fica com o estado e vira
 costura de três linhas onde há estado a entregar (`_clicar_unico`, `_card`, `_baixar`,
-`_configurar`). **Rede antes do corte, e mutação para provar que a rede tem dente** —
+`_configurar`). O mesmo padrão serviu ao `_executar` do orquestrador, sem sair do
+arquivo — ver abaixo. **Rede antes do corte, e mutação para provar que a rede tem dente** —
 três canais laterais viraram retorno no caminho (`_identidade_nova`, `_ultimo_custo`, o
 modo do download).
 
@@ -185,6 +198,14 @@ de página honesto para isso é bem mais caro, e duplo desonesto é pior que nen
 disso a conta não fecha: 1529 − 606 ainda é 923, acima do teto. Se for investir nessa
 direção, **escreva a rede da mídia sem mover nada** — o ganho real das etapas 3 e 4 não
 foi o arquivo menor, foi `_baixar` e `_configurar` saírem de zero teste para 22.
+
+**`_executar` foi de 242 para 74 linhas em 09/09/2026** sem quebrar o arquivo. Os sete
+tratadores de falha viraram métodos com nome — `_ao_perder_sessao`, `_ao_bater_limite`,
+`_ao_secar`, `_ao_falhar`, `_apos_card_trocado`, `_apos_download_falho`,
+`_encerrar_ciclo` —, e cada `except` do ciclo passou a dizer qual política aplica. O
+arquivo continua em 1141 linhas de propósito: 421 de código, 38 métodos dividindo 13
+campos de instância. Separar em `fila.py`/`execucao.py` faria quase tudo virar
+parâmetro para consertar um número que já está abaixo do teto.
 
 `api/app.py` saiu da lista em 09/09/2026: as 29 rotas foram para `api/rotas/`, uma
 fábrica de `APIRouter` por grupo, e o `app.py` ficou com 62 linhas de composição. Cada
