@@ -121,7 +121,7 @@ Auditado em 09/09/2026 contra as regras de estrutura (teto de 500 linhas por arq
 
 | arquivo | linhas | |
 |---|---|---|
-| `transporte/pw/transporte.py` | 1869 | corte em andamento — ver abaixo |
+| `transporte/pw/transporte.py` | 1529 | corte parado na etapa 4 — ver abaixo |
 | `api/painel.js` | 1801 | |
 | `motor/orquestrador.py` | 988 | `_executar` tem 202 linhas |
 | `transporte/pw/seletores.py` | 874 | mapa de seletores; cresce por natureza |
@@ -129,20 +129,30 @@ Auditado em 09/09/2026 contra as regras de estrutura (teto de 500 linhas por arq
 | `transporte/pw/cura.py` | 544 | |
 | `api/esquemas.py` | 440 | acima do alvo de 400, abaixo do teto |
 
-**O corte do `transporte.py` vai em 3 de 5 etapas** (09/09/2026), de 2315 para 1869:
+**O corte do `transporte.py` parou na etapa 4** (09/09/2026), de 2315 para 1529:
 
-| etapa | módulo | o quê |
-|---|---|---|
-| 1 ✔ | `pw/acoes.py` | clicar, esperar, olhar, provar — o que todo caminho usa |
-| 2 ✔ | `pw/grade.py` | achar o card, ler estado, esperar card novo |
-| 3 ✔ | `pw/download.py` | menu do card, resolução, bytes do blob |
-| 4 | `pw/painel.py` | configuração e chip (~337 linhas, `_configurar` sem teste) |
-| 5 | `pw/midia.py` | anexos (~606 linhas, o maior) |
+| etapa | módulo | linhas | testes |
+|---|---|---|---|
+| 1 ✔ | `pw/acoes.py` | 154 | 13 |
+| 2 ✔ | `pw/grade.py` | 261 | 10 |
+| 3 ✔ | `pw/download.py` | 212 | 10 |
+| 4 ✔ | `pw/chip.py` | 422 | 12 |
+| 5 ✗ | anexos e mídia (~606 linhas) | — | — |
 
 A forma: função livre recebendo o que precisa; o transporte fica com o estado e vira
-costura de três linhas onde há estado a entregar (`_clicar_unico`, `_card`, `_baixar`).
-**Rede antes do corte, e mutação para provar que a rede tem dente** — as etapas 4 e 5
-começam por escrever os duplos de página, como a 3 fez.
+costura de três linhas onde há estado a entregar (`_clicar_unico`, `_card`, `_baixar`,
+`_configurar`). **Rede antes do corte, e mutação para provar que a rede tem dente** —
+três canais laterais viraram retorno no caminho (`_identidade_nova`, `_ultimo_custo`, o
+modo do download).
+
+**A etapa 5 foi decidida contra, e o motivo importa.** Os quatro cortes anteriores
+tinham regras enumeráveis, uma por teste. O bloco de mídia são ~18 métodos em cadeia
+com armadilhas de TEMPO E ORDEM — o retry que fechava o painel recém-aberto, o homônimo
+do acervo que passava por "upload terminou", a espera que terminava cedo demais. Duplo
+de página honesto para isso é bem mais caro, e duplo desonesto é pior que nenhum. Além
+disso a conta não fecha: 1529 − 606 ainda é 923, acima do teto. Se for investir nessa
+direção, **escreva a rede da mídia sem mover nada** — o ganho real das etapas 3 e 4 não
+foi o arquivo menor, foi `_baixar` e `_configurar` saírem de zero teste para 22.
 
 `api/app.py` saiu da lista em 09/09/2026: as 29 rotas foram para `api/rotas/`, uma
 fábrica de `APIRouter` por grupo, e o `app.py` ficou com 62 linhas de composição. Cada
