@@ -25,7 +25,7 @@ from playwright.async_api import async_playwright
 
 from flowpool.nucleo.proxy import analisar, argumento_chrome
 from flowpool.transporte.base import SessaoMorta
-from flowpool.transporte.pw import captura
+from flowpool.transporte.pw import captura, janela
 from flowpool.transporte.pw import seletores as sel
 
 _CANDIDATOS = [
@@ -210,16 +210,23 @@ def interpretar_sessao(dados: dict) -> datetime:
 # por outros lados (`Runtime.enable`), e o app cola 821 caracteres de comando e clica
 # em gerar em 2 s, coisa que nenhum humano faz. Se a recusa voltar, e para o RITMO e
 # para o CDP que se olha — nao para esta linha.
-def argumentos_playwright() -> list[str]:
+def argumentos_playwright(oculta: bool | None = None) -> list[str]:
     """As flags do Chrome de TRABALHO, o que sobe pelo Playwright.
 
     E funcao, e nao literal dentro da chamada, para o teste poder morder: flag que so
     existe como string solta no meio de um `launch_persistent_context` some num
     refactor sem ninguem notar, e o sintoma da perda seria "o Flow voltou a recusar",
     a dias de distancia da causa.
+
+    `oculta` decide se a janela nasce fora da tela; None consulta o ambiente
+    (`FLOWPOOL_JANELA=oculta`). O parametro existe para o teste nao precisar mexer em
+    variavel de ambiente de processo, e a geometria mora em `janela.py` junto com a
+    medicao que explica por que nao e minimizada.
     """
+    if oculta is None:
+        oculta = janela.oculta_por_ambiente()
     return [
-        "--start-maximized",
+        *janela.argumentos(oculta),
         "--disable-blink-features=AutomationControlled",
     ]
 
