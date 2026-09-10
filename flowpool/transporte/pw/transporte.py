@@ -26,7 +26,7 @@ from flowpool.transporte.base import (
     Sessao,
     SessaoMorta,
 )
-from flowpool.transporte.pw import acoes, analise, chip, dom, download, grade
+from flowpool.transporte.pw import acoes, analise, chip, dom, download, grade, janela
 from flowpool.transporte.pw import seletores as sel
 from flowpool.transporte.pw.cura import AutoCura
 from flowpool.transporte.pw.diario import (
@@ -247,6 +247,11 @@ class TransportePlaywright:
         self._diarios.pop(s.conta.id, None)
         await ctx.close()
         await pw.stop()
+
+    async def mostrar_janela(self, s: Sessao) -> None:
+        """Traz a janela desta sessao para a tela. A geometria mora em `janela.py`."""
+        _, _, pagina = s.handle
+        await janela.mostrar(pagina)
 
     # ------------------------------------------------------------------- saldo
     async def saldo(self, s: Sessao) -> int:

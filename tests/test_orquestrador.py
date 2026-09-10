@@ -1424,6 +1424,50 @@ async def test_encerrar_sessao_libera_o_perfil_para_o_chrome_de_fora(repo, tmp_p
     assert await orq.encerrar_sessao(cid) is False      # nada a fechar: nao levanta
 
 
+async def test_mostrar_janela_acha_a_sessao_ociosa(repo, tmp_path):
+    """Depois do job a sessao fica guardada, e a janela daquela conta ainda existe."""
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 50; repo.salvar_conta(c)
+    repo.criar_job(job_fast())
+    t = TransporteFalso(saldos={cid: 50})
+    orq = Orquestrador(repo, t, raiz=tmp_path)
+    await ciclo(orq)
+
+    assert await orq.mostrar_janela(cid) is True
+    assert t.janelas_mostradas == [cid]
+    assert [e for e in repo.eventos() if e["tipo"] == "janela_mostrada"]
+
+
+async def test_mostrar_janela_diz_nao_quando_a_conta_nao_tem_navegador(repo, tmp_path):
+    """Nao e erro, e "nao ha o que mostrar" — a rota precisa da diferenca.
+
+    Conta que nunca trabalhou, ou cuja sessao foi fechada por ociosidade, nao tem
+    janela. Levantar aqui faria o painel mostrar falha para um estado normal.
+    """
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    orq = Orquestrador(repo, TransporteFalso(saldos={cid: 50}), raiz=tmp_path)
+    assert await orq.mostrar_janela(cid) is False
+    assert await orq.mostrar_janela(99999) is False      # conta que nem existe
+
+
+async def test_a_janela_deixa_de_existir_quando_a_sessao_fecha(repo, tmp_path):
+    """⚠️ O registro tem que ESVAZIAR, senao a rota tentaria mexer num Chrome morto.
+
+    O duplo levanta nesse caso (a aresta do real), entao um registro que nao limpasse
+    viraria erro na cara do usuario em vez de "nao ha janela".
+    """
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 50; repo.salvar_conta(c)
+    repo.criar_job(job_fast())
+    t = TransporteFalso(saldos={cid: 50})
+    orq = Orquestrador(repo, t, raiz=tmp_path)
+    await ciclo(orq)
+    assert await orq.encerrar_sessao(cid) is True
+
+    assert await orq.mostrar_janela(cid) is False
+    assert t.janelas_mostradas == []
+
+
 async def test_job_que_falha_de_vez_recebe_diagnostico_em_segundo_plano(repo, tmp_path):
     """O diagnostico e disparado na falha FINAL, uma vez, sem segurar a fila."""
     from tests.test_diagnostico import ModeloFalso

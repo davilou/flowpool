@@ -199,6 +199,12 @@ class Orquestrador:
         # sessoes abertas e OCIOSAS, por conta: (sessao, desde quando esta parada).
         # Uma conta esta aqui OU em `_ocupadas`, nunca nos dois.
         self._guardadas: dict[int, tuple[Sessao, datetime]] = {}
+        # TODA sessao com navegador aberto agora — a ociosa e a que esta no meio de um
+        # job. `_guardadas` nao serve para isso: ela e a fila de espera, e some no
+        # instante em que a conta volta a trabalhar. Quem quer "a janela desta conta"
+        # precisa achar a sessao nos DOIS estados, e o caso interessante e justamente o
+        # segundo: ver a tela enquanto a geracao acontece.
+        self._vivas: dict[int, Sessao] = {}
 
     # ------------------------------------------------------------- o que o painel ve
 
@@ -240,7 +246,11 @@ class Orquestrador:
                 await self.transporte.renovar(sessao)
                 return sessao
             await self._fechar_sessao(sessao, conta.id)
-        return await self.transporte.abrir_sessao(conta)
+        # `_vivas` e escrita AQUI e apagada em `_fechar_sessao`, os dois pontos unicos
+        # por onde navegador abre e fecha. Registrar em cada chamador seria esquecer um.
+        nova = await self.transporte.abrir_sessao(conta)
+        self._vivas[conta.id] = nova
+        return nova
 
     def _guardar_sessao(self, conta: Conta, sessao: Sessao) -> None:
         self._guardadas[conta.id] = (sessao, datetime.now(timezone.utc))
@@ -249,6 +259,7 @@ class Orquestrador:
                              job_id: int | None = None) -> None:
         """Fecha sem deixar excecao escapar: um browser ja morto levanta ao fechar, e
         isso escapando de um `finally` matava a task de `rodar()` em silencio."""
+        self._vivas.pop(conta_id, None)
         try:
             await self.transporte.fechar(sessao)
         except Exception as e:
@@ -266,6 +277,31 @@ class Orquestrador:
         if guardada is None:
             return False
         await self._fechar_sessao(guardada[0], conta_id)
+        return True
+
+    async def mostrar_janela(self, conta_id: int) -> bool:
+        """Traz para a tela a janela daquela conta. Devolve se havia janela.
+
+        Existe por causa de `FLOWPOOL_JANELA=oculta`: com o Chrome nascendo fora da
+        tela, ver o que esta acontecendo numa conta deixou de ser automatico.
+
+        ⚠️ NAO E CHAMADO POR NENHUM TRATADOR DE FALHA, e isso e requisito e nao
+        esquecimento. RELATADO pelo usuario 2026-09-10: "algumas falhas somem quando
+        reabre a janela" — mexer na janela muda o estado da pagina, entao uma janela que
+        pulasse sozinha na falha poderia apagar a prova. O diagnostico automatico e o
+        print (`acoes.print_de_falha`), que nao toca na janela; mostrar e ato de pessoa.
+
+        `False` significa "esta conta nao tem navegador aberto agora", que e diferente
+        de erro: a sessao pode ter sido fechada por ociosidade, ou a conta pode nunca
+        ter trabalhado. Quem chama transforma isso na mensagem certa; falha do CDP
+        propaga, porque janela que nao apareceu com o painel dizendo "ok" e pior que
+        erro — o usuario iria procurar na tela o que continua em -32000.
+        """
+        sessao = self._vivas.get(conta_id)
+        if sessao is None:
+            return False
+        await self.transporte.mostrar_janela(sessao)
+        self.repo.registrar_evento(None, conta_id, "janela_mostrada", "{}")
         return True
 
     async def encerrar_todas(self) -> None:

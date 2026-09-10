@@ -1235,7 +1235,8 @@ function pintarGaveta() {
       <button type="button" class="botao mini" data-saldo="${c.id}">${icone("saldo")}Ler saldo agora</button>
       <button type="button" class="botao mini" data-abrir-conta="${c.id}">${icone("janela")}Abrir o Chrome</button>
       <button type="button" class="botao mini" data-conferir-ip="${c.id}">${icone("janela")}Conferir IP</button>
-    </div><p class="dica">Ler saldo abre uma janela e não gasta crédito. Abrir o Chrome deixa a conta ocupada até você fechar a janela.</p></div>
+      <button type="button" class="botao mini" data-mostrar-janela="${c.id}">${icone("janela")}Mostrar a janela</button>
+    </div><p class="dica">Ler saldo abre uma janela e não gasta crédito. Abrir o Chrome deixa a conta ocupada até você fechar a janela. <strong>Mostrar a janela</strong> não abre nada: traz para a tela a janela que o robô já está usando — serve quando <code>FLOWPOOL_JANELA=oculta</code> faz o Chrome nascer fora da tela, e funciona com a conta gerando.</p></div>
     <div class="detalhe-secao"><h3>Editar</h3><div class="campos">
       <div class="campos-linha">
         <label class="campo"><span>Tier</span><select class="acao-tier" data-id="${c.id}">${["free", "pro", "ultra"].map((t) => `<option value="${t}" ${t === c.tier ? "selected" : ""}>${t}</option>`).join("")}</select></label>
@@ -1276,6 +1277,13 @@ async function lerSaldo(id, email) {
     toast("ok", `${email} está com ${c.saldo} créditos no Flow.`);
   } catch (e) { toast("erro", `Não deu para ler o saldo de ${email}: ${e.message}`, 10000); }
   await atualizar();
+}
+
+async function mostrarJanela(id, email) {
+  try {
+    await api(`/contas/${id}/mostrar-janela`, { metodo: "POST" });
+    toast("ok", `Trouxe a janela de ${email} para a tela.`, 5000);
+  } catch (e) { toast("aviso", `${e.message}`, 10000); }
 }
 
 async function abrirConta(id, email) {
@@ -1789,6 +1797,7 @@ $("gaveta").addEventListener("click", (ev) => {
   else if (d.saldo) lerSaldo(Number(d.saldo), emailDaConta(Number(d.saldo)));
   else if (d.abrirConta) abrirConta(Number(d.abrirConta), emailDaConta(Number(d.abrirConta)));
   else if (d.conferirIp) conferirIp(Number(d.conferirIp), emailDaConta(Number(d.conferirIp)));
+  else if (d.mostrarJanela) mostrarJanela(Number(d.mostrarJanela), emailDaConta(Number(d.mostrarJanela)));
   else if (d.salvarProxy) {
     const campo = $("gaveta").querySelector(`.campo-proxy[data-id="${d.salvarProxy}"]`);
     const novo = campo.value.trim();

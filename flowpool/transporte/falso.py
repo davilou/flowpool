@@ -45,6 +45,8 @@ class TransporteFalso:
         # quantas sessoes foram abertas. E o contador que denuncia navegador aberto
         # sem necessidade — o laco de semeadura de saldo num pool legitimamente seco
         self.aberturas = 0
+        # quais contas tiveram a janela trazida para a tela, na ordem
+        self.janelas_mostradas: list[int] = []
         # Quantas sessoes estao abertas AGORA, e o maior numero que ja esteve aberto
         # ao mesmo tempo. O pico e o que PROVA geracao simultanea: medir por tempo
         # total e frouxo, porque duas geracoes sequenciais rapidas passariam.
@@ -152,6 +154,15 @@ class TransporteFalso:
 
     async def renovar(self, s: Sessao) -> None:
         self.renovacoes = getattr(self, "renovacoes", 0) + 1
+
+    async def mostrar_janela(self, s: Sessao) -> None:
+        # ARESTA DO REAL: janela de sessao ja fechada nao aparece — o Playwright
+        # levantaria, e um duplo que aceitasse deixaria passar a rota que mostra a
+        # janela de uma conta cujo navegador morreu.
+        if not self._abertas_por_conta.get(s.conta.id, 0):
+            raise ErroTransporte(
+                f"a sessao da conta {s.conta.email} nao tem janela aberta")
+        self.janelas_mostradas.append(s.conta.id)
 
     async def fechar(self, s: Sessao) -> None:
         vivas = self._abertas_por_conta.get(s.conta.id, 0)

@@ -153,6 +153,30 @@ def rotas_contas(repo: Repo, orq: Orquestrador, raiz: Path | str) -> APIRouter:
         repo.registrar_evento(None, c.id, "conta_aberta_para_conferir", "{}")
         return {"email": c.email}
 
+    @rota.post("/contas/{id_}/mostrar-janela")
+    async def mostrar_janela(id_: int) -> dict:
+        """Traz para a tela a janela do Chrome que o motor esta usando nesta conta.
+
+        Irma do botao "Abrir", e a diferenca importa: "Abrir" sobe um Chrome COMUM no
+        perfil (e por isso recusa quando a conta esta gerando, porque dois Chromes no
+        mesmo `--user-data-dir` nao coexistem). Esta aqui nao abre nada — reposiciona a
+        janela que JA existe, e por isso funciona exatamente no caso mais util: a conta
+        gerando agora, com a janela fora da tela por `FLOWPOOL_JANELA=oculta`.
+
+        404 e "nao ha navegador aberto nesta conta", que e estado normal: a sessao pode
+        ter sido fechada por ociosidade, ou a conta ainda nao trabalhou. Dizer isso e
+        melhor que 200 com a janela em lugar nenhum — o usuario ficaria procurando na
+        tela uma janela que nao existe.
+        """
+        c = repo.conta(id_)
+        if c is None:
+            raise HTTPException(404, f"conta {id_} nao existe")
+        if not await orq.mostrar_janela(c.id):
+            raise HTTPException(
+                404, f"{c.email} nao tem navegador aberto agora. Se a conta nao esta "
+                     "gerando, use \"Abrir\" para subir um Chrome no perfil dela")
+        return {"email": c.email}
+
     @rota.post("/contas/{id_}/saldo", response_model=RespostaConta)
     async def reler_saldo(id_: int) -> RespostaConta:
         """Rele o saldo daquela conta no Flow, agora.

@@ -133,6 +133,37 @@ O arquivo gerado **não passa pelo download do Chrome**: o Chrome 152 trava o pr
 inteiro ao iniciar um download nativo de `blob:` (medido em 06/09/2026). O transporte
 captura o blob na página e grava os bytes ele mesmo (`transporte/pw/captura.py`).
 
+### Tirar a janela da frente
+
+Por padrão o Chrome do robô abre maximizado, na sua cara. `FLOWPOOL_JANELA=oculta` o
+faz **nascer fora da tela** (em `-32000,-32000`), e aí o serviço trabalha sem aparecer.
+
+| variável | padrão | para quê |
+|---|---|---|
+| `FLOWPOOL_JANELA` | vazia (janela visível) | `oculta` faz o Chrome de trabalho nascer fora da tela |
+
+O valor é a palavra `oculta` — `1` e `sim` **não** ligam, porque a variável nomeia um
+modo e não um interruptor.
+
+**Não é minimizada, e a diferença foi medida** (10/09/2026). Minimizar parece bastar:
+`visibilityState` continua `visible` e o `IntersectionObserver` dispara, porque o
+Playwright já sobe o Chrome com `--disable-renderer-backgrounding`. Mas a **composição
+de quadros para** — 11 quadros em 2 s contra 295 —, e a parte do Flow que mais dá
+trabalho é animada (o overlay do menu, o popover do slot de frame). Fora da tela empata
+com a janela normal em todos os sinais medidos. Headless está fora de cogitação: é o
+sinal de automação mais forte que existe, e é justamente o que o Flow usa para recusar
+vídeo (ver *Quando o Google muda a interface*).
+
+**Para ver a janela escondida**, use **Mostrar a janela** na gaveta da conta. Ela é
+diferente de *Abrir*: não sobe Chrome nenhum, só reposiciona o que o robô já tem — e
+por isso funciona **com a conta gerando**, que é o caso em que você quer olhar.
+
+A janela **nunca aparece sozinha**, nem quando o job falha, e isso é deliberado: mexer
+na janela muda o estado da página, e algumas falhas desaparecem quando ela reabre. O
+diagnóstico de falha é o print em `scratch/falhas/` — que, por isso, passou a ser tirado
+também nos passos de navegação (abrir sessão, abrir projeto, criar projeto, ler saldo,
+listar projetos), e não só em gerar/consultar/baixar.
+
 ## Proxy
 
 O proxy é **por conta** e entra já no cadastro: o login precisa sair do mesmo IP por

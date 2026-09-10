@@ -940,6 +940,64 @@ def test_a_lista_de_jobs_diz_em_qual_conta_cada_um_roda(cliente):
     assert achado["conta_id"] == cid
 
 
+# ------------------------------------------------------------- mostrar a janela
+
+def test_mostrar_janela_pede_ao_motor_e_registra(cliente):
+    c, repo = cliente
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    pedidos = []
+
+    async def _mostrar(conta_id):
+        pedidos.append(conta_id)
+        return True
+    c.app.state.orq.mostrar_janela = _mostrar
+
+    r = c.post(f"/contas/{cid}/mostrar-janela")
+
+    assert r.status_code == 200
+    assert r.json()["email"] == "a@b.com"
+    assert pedidos == [cid]
+
+
+def test_mostrar_janela_sem_navegador_da_404_que_ENSINA_o_caminho(cliente):
+    """Sem janela nao e erro de servidor, e a mensagem tem que dizer o que fazer.
+
+    "Abrir" e a outra rota, e e a resposta certa quando a conta nao esta gerando —
+    mandar o usuario para la e a diferenca entre um 404 util e um beco.
+    """
+    c, repo = cliente
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+
+    r = c.post(f"/contas/{cid}/mostrar-janela")
+
+    assert r.status_code == 404
+    assert "Abrir" in r.json()["detail"]
+
+
+def test_mostrar_janela_de_conta_inexistente_da_404(cliente):
+    c, _ = cliente
+    assert c.post("/contas/999/mostrar-janela").status_code == 404
+
+
+def test_mostrar_janela_NAO_recusa_conta_ocupada(cliente):
+    """⚠️ O OPOSTO DO BOTAO "Abrir", e de proposito.
+
+    "Abrir" recusa conta ocupada porque sobe um Chrome COMUM no mesmo perfil e
+    derrubaria o job. Esta rota nao abre nada: so move a janela que o Playwright ja
+    tem. Recusar aqui mataria justamente o caso que motivou tudo — ver a tela da
+    geracao que esta acontecendo agora.
+    """
+    c, repo = cliente
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c.app.state.orq._ocupadas.add(cid)
+
+    async def _mostrar(conta_id):
+        return True
+    c.app.state.orq.mostrar_janela = _mostrar
+
+    assert c.post(f"/contas/{cid}/mostrar-janela").status_code == 200
+
+
 # ---------------------------------------------------------- abrir para conferir
 
 def test_abrir_conta_sobe_o_chrome_no_perfil_dela(cliente, monkeypatch):
