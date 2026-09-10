@@ -7,6 +7,7 @@ from flowpool.transporte.base import SessaoMorta
 from flowpool.transporte.pw.sessao import (
     ChromeAusente,
     argumentos_chrome,
+    argumentos_playwright,
     caminho_perfil,
     checar_chrome,
     interpretar_sessao,
@@ -49,6 +50,22 @@ def test_argumentos_do_chrome_nao_pedem_porta_de_depuracao(tmp_path):
     # entrando aqui por engano reproduziria exatamente o bug que este task existe para
     # evitar, e o sintoma seria "o Google nao deixa logar", nao "flag errada".
     args = argumentos_chrome(tmp_path / "chrome.exe", tmp_path / "perfil", "https://x")
+    assert not any("remote-debugging" in a or "--headless" in a for a in args)
+
+
+def test_o_chrome_de_trabalho_esconde_o_carimbo_de_automacao():
+    # MEDIDO 2026-09-10: sem esta flag `navigator.webdriver` responde true, e foi o
+    # UNICO dos 19 sinais medidos que separava o Chrome do Playwright do Chrome que o
+    # botao Abrir sobe — o mesmo par onde o video gerava a mao e era recusado por
+    # "atividade incomum" pelo robo. Perder a flag reabre aquilo, e o sintoma
+    # apareceria dias depois, longe da causa.
+    assert "--disable-blink-features=AutomationControlled" in argumentos_playwright()
+
+
+def test_o_chrome_de_trabalho_nao_pede_porta_de_depuracao_nem_headless():
+    # irmao do teste do Chrome de login: `--remote-debugging-port` faz o Google recusar,
+    # e `--headless` mata o IntersectionObserver que a pagina do Flow usa.
+    args = argumentos_playwright()
     assert not any("remote-debugging" in a or "--headless" in a for a in args)
 
 

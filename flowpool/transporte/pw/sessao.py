@@ -181,6 +181,49 @@ def interpretar_sessao(dados: dict) -> datetime:
     return datetime.fromisoformat(bruto.replace("Z", "+00:00"))
 
 
+# ⚠️ A FLAG QUE APAGA O CARIMBO DE ROBO — e ela nao e supersticao de forum.
+#
+# MEDIDO 2026-09-10: o Chrome subido pelo botao "Abrir" (`argumentos_chrome`, sem flag
+# nenhuma de automacao) e o subido aqui pelo Playwright foram comparados na mesma
+# maquina em 19 sinais que o antiabuso do Google le — userAgent, userAgentData/brands,
+# fullVersionList, plugins, idiomas, WebGL, deviceMemory, nucleos, permissao de
+# notificacao, `window.chrome`, pdfViewerEnabled, foco. UM diferiu:
+#
+#     navigator.webdriver:   manual = false      playwright = true
+#
+# E o sintoma casa exatamente: a MESMA conta, pelo MESMO proxy e no MESMO perfil, gera
+# video quando o Chrome sobe pelo botao Abrir e leva "atividade incomum" quando sobe
+# pelo Playwright. Imagem passa nos dois — o Google gasta antiabuso no recurso caro.
+#
+# `--disable-blink-features=AutomationControlled` desliga a RuntimeEnabledFeature que
+# faz `navigator.webdriver` responder true; com ela os 19 sinais ficam IDENTICOS aos do
+# Chrome manual (medido na mesma sessao). Nao e flag inventada por blog: o proprio
+# Playwright 1.62 a injeta por padrao noutro caminho de codigo dele.
+#
+# CONFIRMADO CONTRA O FLOW REAL 2026-09-10: o job 700 — copia exata do 619, mesmo
+# prompt, mesma referencia, mesmo `ingredients2v`/omni-flash 8s — ficou pronto em 72 s
+# e baixou 6,3 MB, com a conta pagando os 12 creditos anunciados (50 -> 38). E prova
+# PARCIAL, e vale dizer qual e o buraco: rodou na conta 7, que nao era uma das que
+# recusaram naquele dia; as duas que recusaram estavam em descanso na hora do teste.
+#
+# ⚠️ ISSO NAO COBRE TUDO, e a proxima pessoa nao deve parar aqui. O CDP anexado vaza
+# por outros lados (`Runtime.enable`), e o app cola 821 caracteres de comando e clica
+# em gerar em 2 s, coisa que nenhum humano faz. Se a recusa voltar, e para o RITMO e
+# para o CDP que se olha — nao para esta linha.
+def argumentos_playwright() -> list[str]:
+    """As flags do Chrome de TRABALHO, o que sobe pelo Playwright.
+
+    E funcao, e nao literal dentro da chamada, para o teste poder morder: flag que so
+    existe como string solta no meio de um `launch_persistent_context` some num
+    refactor sem ninguem notar, e o sintoma da perda seria "o Flow voltou a recusar",
+    a dias de distancia da causa.
+    """
+    return [
+        "--start-maximized",
+        "--disable-blink-features=AutomationControlled",
+    ]
+
+
 async def abrir_contexto(perfil: Path, proxy: str | None = None,
                          headless: bool = False):
     """Devolve (playwright, contexto). Quem chama fecha os dois.
@@ -202,7 +245,7 @@ async def abrir_contexto(perfil: Path, proxy: str | None = None,
         channel="chrome",              # o Chromium empacotado e recusado pelo auth
         headless=headless,
         no_viewport=True,
-        args=["--start-maximized"],
+        args=argumentos_playwright(),
         accept_downloads=True,
         proxy=analisar(proxy),
     )
