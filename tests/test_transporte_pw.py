@@ -2132,6 +2132,18 @@ class _SessaoFake:
     falha = None
 
 
+def _sessao_real() -> Sessao:
+    """`Sessao` de verdade com pagina falsa dentro.
+
+    `_SessaoFake` acima serve ao que veio antes, mas cada chamada com ela rende um erro
+    de tipo no pyright do repositorio inteiro — e a catraca do CLAUDE.md diz que aquele
+    numero desce, nunca sobe. Montar o envelope real custa uma linha e nao custa nada ao
+    teste: o que se exercita e o print, nao a conta.
+    """
+    conta = Conta(id=1, email="quem@exemplo.com", tier=Tier.FREE, perfil="p/1")
+    return Sessao(conta=conta, handle=(None, None, _PaginaViva()))
+
+
 async def _sem_traco(s):
     return None
 
@@ -2161,6 +2173,70 @@ async def test_consultar_tira_print_quando_falha():
         await t.consultar(_SessaoFake(), "card-0")
 
     assert tirou and "consultar" in tirou[0]
+
+
+@pytest.mark.parametrize(
+    ("rotulo", "privado", "chamar"),
+    [
+        ("saldo", "_saldo", lambda t, s: t.saldo(s)),
+        ("listar projetos", "_listar_projetos", lambda t, s: t.listar_projetos(s)),
+        ("criar projeto", "_criar_projeto", lambda t, s: t.criar_projeto(s, "P")),
+        ("abrir projeto", "_abrir_projeto", lambda t, s: t.abrir_projeto(s, "uuid-1")),
+    ],
+)
+async def test_os_passos_de_navegacao_tiram_print_quando_falham(rotulo, privado, chamar):
+    """⚠️ O BURACO QUE A JANELA OCULTA TRANSFORMOU EM BLOQUEIO.
+
+    Auditoria de 2026-09-10: dos publicos, so `gerar`, `consultar` e `baixar`
+    fotografavam. O job 619 morreu em `abrir_projeto` ("o projeto nao abriu") sem
+    nenhuma tela guardada — e com `FLOWPOOL_JANELA=oculta` nao ha nem a janela para
+    olhar depois.
+    """
+    transporte = TransportePlaywright()
+    tirou: list[str] = []
+
+    async def _print(pagina, motivo):
+        tirou.append(motivo)
+        return None
+
+    async def _explode(*a, **k):
+        raise GeracaoFalhou("o Flow nao respondeu")
+
+    transporte.print_de_falha = _print
+    setattr(transporte, privado, _explode)
+    transporte._anotar_falha = lambda *a, **k: None
+
+    with pytest.raises(GeracaoFalhou):
+        await chamar(transporte, _sessao_real())
+
+    assert tirou, f"{rotulo} falhou sem print"
+    assert rotulo in tirou[0], f"o print de {rotulo} foi batizado de {tirou[0]!r}"
+
+
+async def test_navegacao_tambem_nao_fotografa_troca_de_conta():
+    """A guarda que `consultar` ja tinha, valendo para os passos novos.
+
+    Print a cada troca de conta seria disco sujo num lote grande, e ninguem ligaria
+    o disco cheio a esta linha.
+    """
+    t = TransportePlaywright()
+    tirou = []
+
+    async def _print(pagina, motivo):
+        tirou.append(motivo)
+        return None
+
+    async def _limite(*a, **k):
+        raise LimiteDeUso("conta no limite", motivo="limite_de_uso")
+
+    t.print_de_falha = _print
+    t._saldo = _limite
+    t._anotar_falha = lambda *a, **k: None
+
+    with pytest.raises(LimiteDeUso):
+        await t.saldo(_sessao_real())
+
+    assert tirou == []
 
 
 async def test_consultar_nao_fotografa_troca_de_conta():

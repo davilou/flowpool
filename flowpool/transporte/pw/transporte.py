@@ -184,6 +184,14 @@ class TransportePlaywright:
                 "precisa de verificacao de idade. Revalidar NAO resolve"
                 if sel.URL_PORTAO_IDADE in pagina.url else
                 f"nao achei o avatar em {pagina.url} - {conta.email} parece deslogada")
+            # ⚠️ O PRINT VEM ANTES DO `ctx.close()`, porque depois dele nao ha tela.
+            # Pela mensagem, portao de idade e "deslogada" sao indistinguiveis — a
+            # imagem e o que decide, e com a janela podendo nascer fora da tela
+            # (`FLOWPOOL_JANELA=oculta`) ela e a unica coisa que sobra para olhar.
+            await self.print_de_falha(
+                pagina,
+                "abrir sessao portao de idade"
+                if sel.URL_PORTAO_IDADE in pagina.url else "abrir sessao sem avatar")
             # sessao caida NAO rende traco: nao e defeito de sequencia, e um login que
             # expirou, e o diagnostico e uma linha no evento. Guardar um zip de alguns
             # MB por conta expirada encheria o disco pelo motivo mais banal possivel.
@@ -242,6 +250,15 @@ class TransportePlaywright:
 
     # ------------------------------------------------------------------- saldo
     async def saldo(self, s: Sessao) -> int:
+        """Envolvido em print-em-falha: ver `_print_em_falha`."""
+        _, _, pagina = s.handle
+        try:
+            return await self._saldo(s)
+        except Exception as e:
+            await self._print_em_falha(s, pagina, "saldo", e)
+            raise
+
+    async def _saldo(self, s: Sessao) -> int:
         """O saldo NAO fica na tela do projeto: mora no menu do avatar.
 
         Custa dois cliques (abrir e fechar). Por isso o orquestrador le uma vez por
@@ -280,6 +297,15 @@ class TransportePlaywright:
 
     # ---------------------------------------------------------------- projetos
     async def listar_projetos(self, s: Sessao) -> list[ProjetoRemoto]:
+        """Envolvido em print-em-falha: ver `_print_em_falha`."""
+        _, _, pagina = s.handle
+        try:
+            return await self._listar_projetos(s)
+        except Exception as e:
+            await self._print_em_falha(s, pagina, "listar projetos", e)
+            raise
+
+    async def _listar_projetos(self, s: Sessao) -> list[ProjetoRemoto]:
         _, _, pagina = s.handle
         await pagina.goto(sel.URL_FLOW, wait_until="domcontentloaded")
         await pagina.locator(sel.CARTAO_PROJETO).first.wait_for(timeout=30_000)
@@ -317,6 +343,15 @@ class TransportePlaywright:
         return achados
 
     async def criar_projeto(self, s: Sessao, nome: str) -> str:
+        """Envolvido em print-em-falha: ver `_print_em_falha`."""
+        _, _, pagina = s.handle
+        try:
+            return await self._criar_projeto(s, nome)
+        except Exception as e:
+            await self._print_em_falha(s, pagina, "criar projeto", e)
+            raise
+
+    async def _criar_projeto(self, s: Sessao, nome: str) -> str:
         """SAO DUAS ETAPAS. "Novo projeto" cria e ENTRA direto, sem pedir nome.
 
         Renomear e depois, por "Mais opcoes" -> "Renomear". Quem tratar isso como uma
@@ -368,6 +403,19 @@ class TransportePlaywright:
         return id_remoto
 
     async def abrir_projeto(self, s: Sessao, id_remoto: str) -> None:
+        """Envolvido em print-em-falha: ver `_print_em_falha`.
+
+        ⚠️ E O CASO QUE MOTIVOU O HELPER: foi aqui que o job 619 morreu em 2026-09-10,
+        com "o projeto nao abriu" e nenhuma tela guardada.
+        """
+        _, _, pagina = s.handle
+        try:
+            await self._abrir_projeto(s, id_remoto)
+        except Exception as e:
+            await self._print_em_falha(s, pagina, "abrir projeto", e)
+            raise
+
+    async def _abrir_projeto(self, s: Sessao, id_remoto: str) -> None:
         """Por URL DIRETA — e isto e uma inversao em relacao a aplicacao antiga.
 
         A versao Next quebrava em deep link com "Application error", e por isso o
@@ -523,6 +571,38 @@ class TransportePlaywright:
         """
         s.falha = {"print": str(caminho) if caminho else None,
                    "passos": list(d.linhas[-40:])}
+
+    async def _print_em_falha(self, s: Sessao, pagina, rotulo: str,
+                              e: Exception) -> None:
+        """Print + log + anotacao na sessao, para os passos de NAVEGACAO.
+
+        ⚠️ MEDIDO 2026-09-10 por auditoria da arvore: dos metodos publicos do
+        transporte, so `gerar`, `consultar` e `baixar` tiravam print. `abrir_sessao`,
+        `saldo`, `listar_projetos`, `criar_projeto` e `abrir_projeto` levantavam com a
+        tela inteira perdida — e o job 619 morreu justamente em `abrir_projeto` ("o
+        projeto nao abriu"), sem imagem nenhuma para olhar.
+
+        Virou bloqueio quando a janela passou a poder nascer fora da tela
+        (`FLOWPOOL_JANELA=oculta`): ali o print deixa de ser conveniencia e passa a ser
+        o UNICO jeito de ver o que aconteceu.
+
+        NAO tira traco, e a diferenca e de custo: o traco e um zip de alguns MB por
+        sessao, e estes passos sao navegacao, nao a sequencia fina de cliques que o
+        traco existe para reconstruir. E NAO mexe na janela — ver `janela.mostrar`.
+
+        ⚠️ ROTEAMENTO DE CONTA NAO RENDE PRINT, pela mesma regra que `consultar` ja
+        segue: limite de uso e saldo nao sao falha de tela, sao o pool trocando de
+        conta, e isso acontece muitas vezes por lote. Nenhum dos passos cobertos hoje
+        levanta esses dois — a guarda existe para o dia em que um passar a levantar,
+        porque o efeito seria disco sujo a cada troca e ninguem ligaria uma coisa na
+        outra.
+        """
+        if isinstance(e, (LimiteDeUso, SaldoInsuficiente)):
+            return
+        caminho = await self.print_de_falha(pagina, f"{rotulo} {type(e).__name__}")
+        d = self._diario(s.conta.id)
+        d.passo(f"FALHOU em {rotulo}: {type(e).__name__}: {e}")
+        self._anotar_falha(s, caminho, d)
 
     async def _gerar(self, s: Sessao, p: Pedido, pagina) -> str:
         # o que o modo nao aceita e recusado ANTES de qualquer coisa: nenhum clique
