@@ -513,10 +513,19 @@ CARD_SEM_COBRANCA = 'text=/n[ãa]o houve cobran[çc]a|no charge/i'
 #     ou acesse a Central de Ajuda para mais informações.
 #     Não houve cobrança por esta geração.
 #
-# É o Google reagindo à concorrência: três contas disparando no mesmo segundo, todas
-# pelo mesmo IP (`proxy` vazio em todas). A ação é a MESMA do limite de uso — nada
-# foi cobrado, repetir nesta conta não adianta, troca-se de conta —, e por isso as
-# duas frases entram na MESMA decisão (`grade.recusa_sem_cobranca`).
+# A ação é a MESMA do limite de uso — nada foi cobrado, repetir nesta conta não
+# adianta, troca-se de conta —, e por isso as duas frases entram na MESMA decisão
+# (`grade.recusa_sem_cobranca`).
+#
+# ⚠️ O MOTIVO ERA O NAVEGADOR, NÃO A CONCORRÊNCIA. Em 09/09 este comentário dizia que
+# era "o Google reagindo à concorrência: três contas disparando no mesmo segundo pelo
+# mesmo IP" — a leitura razoável do que estava na tela, e errada. MEDIDO 2026-09-10:
+# o job 598 levou esta mesma recusa em CINCO contas, uma de cada vez, 30 a 40 s entre
+# elas, cada uma por um proxy diferente; e a mesma conta, pelo mesmo IP e no mesmo
+# perfil, gerava vídeo quando o Chrome subia pelo botão Abrir. A diferença medida
+# entre os dois, em 19 sinais, foi `navigator.webdriver` — ver
+# `sessao.argumentos_playwright`. Imagem passava nos dois: o Google gasta antiabuso
+# no recurso caro, que é por que a recusa parecia aleatória.
 CARD_ATIVIDADE_INCOMUM = 'text=/atividade incomum|unusual activity/i'
 
 BOTAO_REPETIR_CARD = PENDENTE

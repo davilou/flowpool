@@ -128,6 +128,23 @@ Esta é a lista que justifica o arquivo. Cada item já custou caro uma vez.
    (limite de uso, atividade incomum) é detalhe da mensagem. Motivo novo entra em
    `_MOTIVOS_DE_RECUSA`, e não num `if` no transporte — foi o nome estreito
    (`por_limite_de_uso`) que deixou o antiabuso passar por falha comum nos jobs 583-588.
+   **A ação é uma; o diagnóstico são dois**, e por isso o motivo viaja em
+   `LimiteDeUso.motivo` até o payload do evento `conta_no_limite`: cota passa sozinha
+   com o reset do dia, antiabuso só passa mexendo em como o navegador aparece. Sem essa
+   chave o banco não respondia qual das duas foi — `job.erro` é sobrescrito pela
+   tentativa seguinte.
+
+11. **O antiabuso do Flow lê o navegador, e a explicação anterior — "concorrência
+   demais no mesmo IP" — estava errada.** MEDIDO 2026-09-10: o job 598 levou "atividade
+   incomum" em cinco contas, **uma de cada vez**, 30 a 40 s entre elas, cada uma por um
+   proxy diferente. E a mesma conta, pelo mesmo IP e no mesmo perfil, gerava vídeo
+   quando o Chrome subia pelo botão Abrir. Dos 19 sinais comparados entre os dois
+   Chromes (UA, userAgentData, plugins, WebGL, idiomas, permissões, `window.chrome`…),
+   **um** diferia: `navigator.webdriver`. Daí `sessao.argumentos_playwright` e a flag
+   `--disable-blink-features=AutomationControlled`. **Imagem passa, vídeo é recusado** —
+   o antiabuso é gasto no recurso caro, e é por isso que a falha parecia aleatória.
+   Se voltar mesmo com a flag, os próximos suspeitos são o **ritmo** (o app cola 821
+   caracteres e clica em gerar em 2 s) e o vazamento de CDP, nunca mais a fila.
 11. **Mensagem de erro não afirma o que ninguém verificou.** "O resultado EXISTE na conta
    X e já foi pago" era categórico e falso: a geração tinha sido recusada sem cobrança, e
    o usuário passou meia tarde procurando um vídeo que nunca houve. O que se sabe se

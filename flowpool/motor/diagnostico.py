@@ -61,8 +61,12 @@ CAUSAS_CONHECIDAS = """\
   o resultado existe: pode nunca ter sido gerado. Mandar olhar a grade do projeto na
   conta e ver se ha card do tipo certo.
 - "o Flow recusou por atividade incomum": o antiabuso do Google, nao a conta. O card diz
-  "Nao houve cobranca", e nada foi cobrado mesmo. Costuma ser concorrencia demais no
-  mesmo IP — varias contas gerando ao mesmo tempo sem proxy. A conta descansa sozinha.
+  "Nao houve cobranca", e nada foi cobrado mesmo. A conta descansa sozinha e outra pega
+  o job. MEDIDO 2026-09-10: e o Chrome dirigido que o Google reconhece, nao o IP nem a
+  concorrencia — a mesma conta, pelo mesmo proxy, gera a mao pelo botao Abrir. Aparece
+  em VIDEO e quase nunca em imagem. Se voltar a acontecer depois de
+  `sessao.argumentos_playwright`, os suspeitos sao o ritmo (o app envia o comando em
+  segundos) e o CDP, nao a fila.
 - "download NATIVO" / "nenhum blob foi capturado": o Flow mudou o jeito de baixar; o
   interceptador de blob precisa ser medido de novo. O resultado existe no Flow.
 - "TargetClosedError" fora de download: alguem fechou a janela do Chrome a mao.
