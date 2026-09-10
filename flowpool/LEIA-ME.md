@@ -156,7 +156,12 @@ vídeo (ver *Quando o Google muda a interface*).
 
 **Para ver a janela escondida**, use **Mostrar a janela** na gaveta da conta. Ela é
 diferente de *Abrir*: não sobe Chrome nenhum, só reposiciona o que o robô já tem — e
-por isso funciona **com a conta gerando**, que é o caso em que você quer olhar.
+por isso funciona **com a conta gerando**, que é o caso em que você quer olhar. A
+janela vai para o canto (40,40), não maximizada.
+
+Ela **se recolhe sozinha no próximo job daquela conta**. O navegador fica guardado e é
+reusado entre jobs, então uma janela trazida para a tela ficaria visível para sempre —
+o incômodo de volta. A regra é: você mostra, olha, e no job seguinte ela some.
 
 A janela **nunca aparece sozinha**, nem quando o job falha, e isso é deliberado: mexer
 na janela muda o estado da página, e algumas falhas desaparecem quando ela reabre. O

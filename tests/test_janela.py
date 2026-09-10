@@ -134,3 +134,31 @@ async def test_mostrar_nao_engole_recusa_do_cdp():
 
     with pytest.raises(RuntimeError, match="window not found"):
         await janela.mostrar(_PaginaFalsa(_Recusa()))
+
+
+async def test_esconder_devolve_a_janela_para_fora_da_tela():
+    """⚠️ `mostrar` e PERMANENTE, e isso era o defeito.
+
+    A sessao do Flow fica guardada e e reusada entre jobs: sem `esconder`, olhar uma
+    conta uma vez deixava o Chrome dela visivel em todos os jobs seguintes — o incomodo
+    que o modo oculto existe para resolver, de volta.
+    """
+    cdp = _CdpFalso()
+    await janela.esconder(_PaginaFalsa(cdp))
+
+    bounds = cdp.chamadas[1][1]["bounds"]
+    assert (bounds["left"], bounds["top"]) == janela.POSICAO_OCULTA
+    assert bounds["left"] < 0 and bounds["top"] < 0
+
+
+async def test_esconder_e_mostrar_sao_opostos_de_verdade():
+    # o teste que pega a troca de constante: se as duas apontarem para o mesmo lugar,
+    # uma delas nao faz nada e o sintoma aparece so na tela do usuario
+    ida, volta = _CdpFalso(), _CdpFalso()
+    await janela.esconder(_PaginaFalsa(ida))
+    await janela.mostrar(_PaginaFalsa(volta))
+
+    fora = ida.chamadas[1][1]["bounds"]
+    dentro = volta.chamadas[1][1]["bounds"]
+    assert fora["left"] < 0 <= dentro["left"]
+    assert fora["top"] < 0 <= dentro["top"]

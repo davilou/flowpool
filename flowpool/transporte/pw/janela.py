@@ -77,6 +77,40 @@ def argumentos(oculta: bool) -> list[str]:
     return [f"--window-position={x},{y}", f"--window-size={largura},{altura}"]
 
 
+async def _posicionar(pagina, x: int, y: int, largura: int, altura: int) -> None:
+    """Move a janela desta pagina. Via protocolo, nao Win32.
+
+    `Browser.getWindowForTarget` + `Browser.setWindowBounds` acham a janela pelo ALVO do
+    CDP, que e esta pagina: sem enumerar janelas do sistema, sem depender do titulo (o
+    Flow troca o titulo da aba) e sem precisar distinguir qual dos Chromes abertos e
+    este. MEDIDO 2026-09-10 com varias janelas abertas: mexeu so na do alvo.
+
+    `windowState` vai explicito como `normal` porque `setWindowBounds` RECUSA posicao e
+    tamanho numa janela maximizada — e a janela do modo visivel nasce maximizada.
+    """
+    cdp = await pagina.context.new_cdp_session(pagina)
+    alvo = await cdp.send("Browser.getWindowForTarget")
+    await cdp.send("Browser.setWindowBounds", {
+        "windowId": alvo["windowId"],
+        "bounds": {"left": x, "top": y, "width": largura, "height": altura,
+                   "windowState": "normal"},
+    })
+
+
+async def esconder(pagina) -> None:
+    """Devolve a janela para fora da tela.
+
+    ⚠️ EXISTE PORQUE `mostrar` E PERMANENTE, e isso era um defeito medido em
+    2026-09-10: a sessao do Flow fica guardada entre jobs e e REUSADA, entao uma janela
+    trazida para a tela ficava visivel em todos os jobs seguintes daquela conta —
+    devolvendo exatamente o incomodo que `FLOWPOOL_JANELA=oculta` foi resolver. Quem
+    chama e `renovar`, o ponto por onde toda sessao reusada passa antes de um job novo.
+    """
+    x, y = POSICAO_OCULTA
+    largura, altura = TAMANHO_OCULTO
+    await _posicionar(pagina, x, y, largura, altura)
+
+
 async def mostrar(pagina) -> None:
     """Traz para a tela a janela daquela pagina. Levanta se o CDP recusar.
 
@@ -91,12 +125,6 @@ async def mostrar(pagina) -> None:
     pessoa, pelo botao do painel, sabendo que o ato tem efeito; o diagnostico de falha
     continua sendo o print (`acoes.print_de_falha`), que e tirado sem tocar na janela.
     """
-    cdp = await pagina.context.new_cdp_session(pagina)
-    alvo = await cdp.send("Browser.getWindowForTarget")
     x, y = POSICAO_VISIVEL
     largura, altura = TAMANHO_VISIVEL
-    await cdp.send("Browser.setWindowBounds", {
-        "windowId": alvo["windowId"],
-        "bounds": {"left": x, "top": y, "width": largura, "height": altura,
-                   "windowState": "normal"},
-    })
+    await _posicionar(pagina, x, y, largura, altura)

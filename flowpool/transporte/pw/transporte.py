@@ -235,6 +235,18 @@ class TransportePlaywright:
             await velha.close()
         s.handle = (pw, ctx, nova)
         self._diarios[s.conta.id] = Diario(s.conta.id)
+        # ⚠️ A JANELA VOLTA PARA ONDE NASCEU. MEDIDO 2026-09-10: `mostrar_janela` move a
+        # janela e ela FICA — e como a sessao e guardada e reusada entre jobs, olhar uma
+        # conta uma vez deixava o Chrome dela visivel em todos os jobs seguintes,
+        # devolvendo o incomodo que o modo oculto existe para resolver. Aqui e o ponto
+        # por onde toda sessao reusada passa, e "a cada job novo a janela se recolhe" e
+        # uma regra que o usuario consegue prever.
+        #
+        # `suppress` porque isto e cosmetica: janela que nao se moveu nao pode derrubar
+        # um job que ia rodar.
+        if janela.oculta_por_ambiente():
+            with suppress(Exception):
+                await janela.esconder(nova)
 
     async def fechar(self, s: Sessao) -> None:
         pw, ctx, _ = s.handle
