@@ -1138,7 +1138,8 @@ class _TransporteQueRecusa(TransporteFalso):
     """
 
     async def consultar(self, s, id_remoto):
-        raise LimiteDeUso(f"conta {s.conta.email}: o Flow recusou por atividade incomum")
+        raise LimiteDeUso(f"conta {s.conta.email}: o Flow recusou por atividade incomum",
+                          motivo="atividade_incomum")
 
     async def saldo(self, s):
         raise RuntimeError("a leitura de saldo tambem falhou")
@@ -1172,6 +1173,26 @@ async def test_recusa_sem_cobranca_devolve_o_credito_ao_saldo_local(repo, tmp_pa
     assert final.tentativas == 0, "recusa da conta nao gasta tentativa do job"
     assert final.id_remoto is None and final.conta_id is None
     assert repo.conta(cid).limite_ate is not None
+
+
+async def test_o_evento_da_recusa_guarda_qual_das_duas_foi(repo, tmp_path):
+    """Cota e antiabuso pedem a mesma acao e se resolvem em lugares OPOSTOS.
+
+    Uma passa sozinha com o reset do dia; a outra so passa mexendo em como o navegador
+    aparece para o Google. MEDIDO 2026-09-10: o evento guardava so `id_remoto` e
+    `tentativa`, e a pergunta "isso foi cota ou foi o antiabuso?" ficou sem resposta no
+    banco — `job.erro` ja tinha sido sobrescrito pela tentativa seguinte.
+    """
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 200; repo.salvar_conta(c)
+    jid = repo.criar_job(job_fast())
+
+    await ciclo(Orquestrador(repo, _TransporteQueRecusa(saldos={cid: 200}),
+                             raiz=tmp_path))
+
+    recusas = [e for e in repo.eventos(jid) if e["tipo"] == "conta_no_limite"]
+    assert recusas, "a recusa tem que deixar evento"
+    assert json.loads(recusas[-1]["payload"])["motivo"] == "atividade_incomum"
 
 
 # --- os despachos nao saem todos no mesmo instante ---------------------------

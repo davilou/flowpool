@@ -1385,16 +1385,17 @@ class TransportePlaywright:
                 # passa afrouxando o paralelismo. Um texto so mandaria olhar o lugar
                 # errado — e foi o que aconteceu nos jobs 583-588.
                 motivo = await grade.motivo_da_recusa(card)
-                porque = ("atividade incomum (o antiabuso do Google; costuma ser "
-                          "concorrencia demais no mesmo IP)"
-                          if motivo == sel.CARD_ATIVIDADE_INCOMUM else
-                          "limite de uso da conta")
+                antiabuso = motivo == sel.CARD_ATIVIDADE_INCOMUM
+                porque = ("atividade incomum (o antiabuso do Google reagindo ao que "
+                          "parece um robo)"
+                          if antiabuso else "limite de uso da conta")
                 self._diario(s.conta.id).passo(
                     f"{id_remoto}: o Flow RECUSOU por {porque}, e nao cobrou. "
                     f"Repetir aqui nao adianta — trocando de conta.")
                 raise LimiteDeUso(
                     f"conta {s.conta.email}: o Flow recusou por {porque} "
-                    f"(sem cobranca por esta geracao; o saldo continua valendo)")
+                    f"(sem cobranca por esta geracao; o saldo continua valendo)",
+                    motivo="atividade_incomum" if antiabuso else "limite_de_uso")
 
             vezes = self._repeticoes.get((s.conta.id, id_remoto), 0)
             # CONFERIR o botao antes de mirar nele. O card de falha tem tres botoes em

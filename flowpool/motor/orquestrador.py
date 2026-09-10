@@ -53,6 +53,14 @@ ESPERA_JANELA = timedelta(seconds=30)
 # incomum. Aguarde alguns instantes... Nao houve cobranca por esta geracao" — o
 # antiabuso do Google, reagindo ao que parece um robo porque E um robo.
 #
+# ⚠️ CORRECAO 2026-09-10: A CONCORRENCIA NAO ERA A CAUSA — era so o que estava na tela
+# naquele dia. O job 598 foi recusado pelo MESMO texto em cinco contas (2, 3, 4, 5, 8)
+# UMA DE CADA VEZ, 30 a 40 s entre elas, cada uma pelo seu proprio proxy: nem
+# simultaneidade, nem IP comum. O que separava o robo do humano era `navigator.webdriver`
+# (ver `sessao.argumentos_playwright`). ESTE ESPACO CONTINUA VALENDO — sair em rajada e
+# ruim de todo jeito e ele custa zero numa fila de video —, mas nao e a explicacao do
+# bloqueio, e tratar como se fosse manda a proxima investigacao para o lugar errado.
+#
 # O espaco NAO SERIALIZA NADA: as geracoes continuam correndo em paralelo, so nao
 # COMECAM juntas. E ele desconta o tempo ja gasto, entao numa fila de videos de dois
 # minutos ele custa zero — o proximo despacho ja chega atrasado por conta propria. Quem
@@ -827,7 +835,7 @@ class Orquestrador:
         self._devolver(job, str(e), gasta_tentativa=False,
                        falha=sessao.falha if sessao else None)
 
-    def _ao_bater_limite(self, job: Job, conta: Conta, sessao, e: Exception) -> None:
+    def _ao_bater_limite(self, job: Job, conta: Conta, sessao, e: LimiteDeUso) -> None:
         """O Flow recusou por limite de uso, sem cobrar. A CONTA descansa, o job nao."""
         # ⚠️ LIMITE DE USO NAO E FALTA DE CREDITO, e a diferenca aparece na tela.
         # RELATADO pelo usuario 2026-09-09: geracao de IMAGEM custa zero, entao a
@@ -867,7 +875,12 @@ class Orquestrador:
         job.id_remoto = None
         job.conta_id = None
 
-        self._evento_de_falha(job, conta, "conta_no_limite")
+        # O MOTIVO VAI PARA O EVENTO, e nao so para a mensagem do job. `job.erro` e
+        # sobrescrito pela tentativa seguinte — quando o job 619 acabou em "o projeto
+        # nao abriu", a recusa que o precedeu ja tinha sumido do banco. O evento e o
+        # unico registro que fica, e sem esta chave o historico nao separa cota de
+        # antiabuso: duas causas que se resolvem em lugares opostos.
+        self._evento_de_falha(job, conta, "conta_no_limite", {"motivo": e.motivo})
         self._devolver(job, str(e), gasta_tentativa=False,
                        falha=sessao.falha if sessao else None)
 

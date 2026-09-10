@@ -44,4 +44,18 @@ class LimiteDeUso(Exception):
     escolhida, o job volta para a fila sem gastar tentativa, outra conta pega. O que
     muda e o nome, a mensagem e o evento; o saldo local continua CONFIAVEL, porque
     nada foi cobrado.
+
+    ⚠️ `motivo` E CAMPO, E NAO SO TEXTO NA MENSAGEM, e a razao e uma pergunta que o
+    historico nao soube responder. MEDIDO 2026-09-10: o evento `conta_no_limite` de
+    todas as recusas guardava so `{"id_remoto": ..., "tentativa": ...}`, e "isso foi
+    cota da conta ou foi o antiabuso?" — a pergunta que decide entre esperar o reset e
+    mexer no navegador — so dava para responder relendo o log de passo do terminal, se
+    ele ainda existisse. As duas recusas continuam pedindo a MESMA acao (trocar de
+    conta), que e por que sao um erro so; o que se separa aqui e o diagnostico.
     """
+
+    MOTIVO_DESCONHECIDO = "desconhecido"
+
+    def __init__(self, mensagem: str, motivo: str = MOTIVO_DESCONHECIDO) -> None:
+        super().__init__(mensagem)
+        self.motivo = motivo
