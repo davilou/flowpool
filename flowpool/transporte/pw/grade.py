@@ -54,6 +54,39 @@ _IDENTIDADES = r"""
 })
 """
 
+# O prefixo que o JS acima usa para o tile que ainda nao tem miniatura. Fica aqui, ao
+# lado de quem o produz, porque `leitura_da_grade` e a unica outra parte que precisa
+# saber o que ele significa: "apareceu um card, mas ele ainda nao tem endereco".
+PLACEHOLDER = "sem-midia:"
+
+
+def leitura_da_grade(base: list[str], agora: list[str], contagem: int,
+                     antes: int) -> tuple[bool, str | None]:
+    """(apareceu, identidade), a partir do retrato ANTES e do DEPOIS. Decisao pura.
+
+    ⚠️ A IDENTIDADE VEM ANTES DA CONTAGEM, E A ORDEM E A DECISAO. Enquanto a contagem
+    era consultada primeiro, ela devolvia na hora em toda grade abaixo do teto de 24
+    tiles — isto e, em quase todo projeto — e a identidade saia None SEMPRE. A protecao
+    montada depois dos jobs 170/174/189/195 (baixar a referencia achando que era o
+    video) nunca chegou a valer: `_identidade_do_card` ficava vazio e `_card` caia na
+    posicao, que e exatamente o comportamento que ela existia para substituir.
+
+    A contagem continua sendo sinal VALIDO, so nao pode ser o primeiro: ela e a unica
+    resposta quando nao ha retrato ANTES, e a grade cravada em 24 a torna cega.
+
+    Identidade so quando ha `src` DE VERDADE. O placeholder e igual para todo card
+    recem-nascido e some quando a miniatura carrega; guardar isso quebrou o job 435.
+    """
+    conhecidas = set(base)
+    novas = [i for i in agora if i not in conhecidas]
+    reais = [i for i in novas if not i.startswith(PLACEHOLDER)]
+    if reais:
+        return True, reais[0]
+    # o primeiro tile trocando de identidade tambem e card novo: acontece quando ele
+    # entra ainda sem miniatura e nenhuma identidade inedita aparece
+    trocou = bool(agora) and bool(base) and agora[0] != base[0]
+    return bool(novas) or trocou or contagem > antes, None
+
 
 async def sem_credito(pagina) -> bool:
     """O aviso de conta zerada — que ainda nao foi visto ao vivo.
@@ -88,6 +121,12 @@ async def esperar_novo(pagina, antes: int, d: Diario,
     transporte (`_identidade_nova`) e lida por `_gerar` na linha seguinte — canal
     lateral que so funcionava porque as duas coisas aconteciam juntas.
 
+    QUEM DECIDE E `leitura_da_grade`, e o motivo esta la: a contagem era consultada
+    antes da identidade e devolvia na hora, deixando `identidade` em None em toda grade
+    abaixo de 24 tiles. O alcance continua limitado — card recem-nascido nao tem `src`,
+    e um `src` capturado no nascimento envelhece quando a midia entra —, e por isso a
+    conferencia de TIPO em `consultar` e em `baixar` e que e a trava.
+
     Devolve `bool` em vez de levantar porque quem chama precisa decidir o que a
     ausencia do card significa — recusa por saldo ou falha de envio —, e a
     mensagem certa depende disso.
@@ -103,42 +142,22 @@ async def esperar_novo(pagina, antes: int, d: Diario,
     gasto = 0
     prazo_do_aviso: int | None = None
     base = list(ids_antes) if ids_antes else []
-    conhecidas = set(base)
-    identidade: str | None = None
     while gasto < teto_ms:
-        # 1) a contagem cresceu — sinal valido, so nao e o unico (teto de 24)
-        if await pagina.locator(sel.CARD_GRADE).count() > antes:
+        # A LEITURA E UMA SO, e a ordem dos sinais mora em `leitura_da_grade`:
+        # identidade primeiro, contagem como resposta de quem nao tem retrato ANTES.
+        agora = await identidades_da_grade(pagina) if base else []
+        contagem = await pagina.locator(sel.CARD_GRADE).count()
+        apareceu, identidade = leitura_da_grade(base, agora, contagem, antes)
+        if identidade is not None:
+            d.passo(f"card novo por identidade (a grade segue com "
+                    f"{len(agora)} tiles): {identidade[-28:]}")
+            return CardNovo(True, identidade)
+        if apareceu:
+            # nasceu sem miniatura: nao ha `src` estavel para guardar, e inventar um
+            # faria `_card` casar com o tile errado depois. Quem protege daqui em
+            # diante e a conferencia de TIPO em `consultar` e em `baixar`.
+            d.passo("card novo, ainda sem miniatura: seguindo pela posicao")
             return CardNovo(True, None)
-        # 2) apareceu uma identidade que nao existia antes do clique. E este o
-        #    sinal que continua funcionando com a grade cravada em 24: o card
-        #    mais velho sai da renderizacao e o novo entra, sem mexer no total.
-        if base:
-            agora = await identidades_da_grade(pagina)
-            if agora:
-                novas = [i for i in agora if i not in conhecidas]
-                if novas:
-                    # ⚠️ PLACEHOLDER NAO E IDENTIDADE. No instante em que o card
-                    # nasce ele ainda nao tem miniatura, e `_identidades_da_grade`
-                    # devolve `sem-midia:<icone>` — igual para TODO card novo, e
-                    # some assim que a miniatura carrega.
-                    #
-                    # Guardar isso quebrou o job 435 (2026-09-09): a imagem foi
-                    # gerada, a miniatura entrou, `sem-midia:image` sumiu da grade
-                    # e `_card` derrubou o job dizendo que o card nao estava mais
-                    # la. Serve de SINAL de que um card apareceu; nao serve de
-                    # identidade para reencontra-lo depois.
-                    identidade = (
-                        None if novas[0].startswith("sem-midia:") else novas[0])
-                    d.passo(f"card novo por identidade (a grade segue com "
-                            f"{len(agora)} tiles): {novas[0][-28:]}")
-                    return CardNovo(True, identidade)
-                # 3) o primeiro tile trocou de identidade sem nenhuma identidade
-                #    inedita: acontece quando o card entra ainda sem miniatura.
-                if agora[0] != base[0]:
-                    # sem miniatura ainda: nao ha identidade estavel para guardar,
-                    # e inventar uma faria `_card` casar com o tile errado depois
-                    d.passo("card novo: o primeiro tile da grade trocou")
-                    return CardNovo(True, None)
         if prazo_do_aviso is None and await sem_credito(pagina):
             prazo_do_aviso = gasto + graca_do_aviso_ms
             d.passo(f"o aviso de credito zerado apareceu; dou "
@@ -149,6 +168,31 @@ async def esperar_novo(pagina, antes: int, d: Diario,
         gasto += 2000
         d.esperando("o card novo aparecer na grade")
     return CardNovo(False, None)
+
+
+async def tipo_do_tile(card) -> str | None:
+    """"imagem" | "video" | None, pelo ELEMENTO do tile. Sem abrir menu nenhum.
+
+    MEDIDO 2026-09-06 e anotado no proprio `seletores.py`: o tipo do card tem elemento
+    proprio (`flow-image-tile` / `flow-video-tile`), e isso e melhor que a aplicacao
+    antiga, onde o tipo precisava ser lembrado por fora. A medicao estava la desde
+    entao e NAO ERA USADA EM LUGAR NENHUM.
+
+    O que ela permite e o que faltava: conferir o tipo DURANTE O POLLING. A outra
+    leitura de tipo (`analise.tipo_do_card`) le o menu, e menu exige botao direito —
+    so da para usa-la na hora de baixar, que e depois de `consultar` ja ter dito
+    PRONTO. Foi por esse buraco que passaram os jobs 1114-1116 e 1120-1128
+    (2026-09-13): `consultar` deu PRONTO para a imagem de referencia enviada, porque
+    tudo que ele exigia era um `<img>` dentro do tile.
+
+    None e "nao sei", e tem que ser: card de falha e card ainda nascendo nao casam
+    nenhum dos dois, e chutar ali derrubaria geracao boa.
+    """
+    if await acoes.quantos(card, sel.CARD_VIDEO) > 0:
+        return "video"
+    if await acoes.quantos(card, sel.CARD_IMAGEM) > 0:
+        return "imagem"
+    return None
 
 
 # --------------------------------------------------------------- consultar

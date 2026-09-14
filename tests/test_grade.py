@@ -137,3 +137,78 @@ async def test_sair_da_falha_devolve_falso_no_teto_sem_gastar_repeticao():
     saiu = await grade.esperar_sair_da_falha(pagina, "card-0", _diario(), teto_ms=2_000)
     assert saiu is False
     assert pagina.dormiu_ms == 2_000
+
+
+# -------------------------------------------------------- esperar_novo
+#
+# A rede que faltava. `esperar_novo` nunca teve teste, e por isso ninguem viu que a
+# identidade — a protecao criada depois dos jobs 170/174/189/195 — nao era guardada
+# nunca abaixo do teto de 24 tiles.
+
+
+class _GradeQueCresce:
+    """Uma grade que ganha um tile na primeira espera. `ids` e o que ela mostra."""
+
+    def __init__(self, ids, nasce):
+        self.ids = list(ids)
+        self.nasce = nasce
+        self.esperas = 0
+
+    def locator(self, seletor):
+        return _Loc(len(self.ids))
+
+    async def evaluate(self, script, arg=None):
+        return list(self.ids)
+
+    async def wait_for_timeout(self, ms):
+        self.esperas += 1
+        if self.esperas == 1:
+            self.ids.insert(0, self.nasce)
+
+
+async def test_identidade_e_guardada_mesmo_com_a_contagem_crescendo():
+    """⚠️ O DEFEITO QUE ESTE TESTE TRANCA. A checagem de contagem vinha ANTES da
+    leitura de identidades e devolvia na hora, entao `identidade` saia None em toda
+    grade abaixo de 24 tiles — isto e, em quase todo projeto. `_identidade_do_card`
+    ficava vazio, `_card` caia na posicao, e `card-0` valia o que valia antes do
+    conserto dos jobs 170/174/189/195.
+    """
+    pagina = _GradeQueCresce(["ref-c01", "ref-c19"], nasce="blob:a-geracao")
+    novo = await grade.esperar_novo(pagina, 2, _diario(), ids_antes=["ref-c01", "ref-c19"])
+    assert novo.apareceu is True
+    assert novo.identidade == "blob:a-geracao"
+
+
+async def test_card_sem_miniatura_aparece_sem_identidade():
+    """Placeholder NAO e identidade (job 435): serve de sinal, nao de endereco."""
+    pagina = _GradeQueCresce(["ref-c01"], nasce="sem-midia:image")
+    novo = await grade.esperar_novo(pagina, 1, _diario(), ids_antes=["ref-c01"])
+    assert novo.apareceu is True
+    assert novo.identidade is None
+
+
+async def test_sem_ids_antes_a_contagem_ainda_serve_de_sinal():
+    """Quem chama sem retrato ANTES continua com o comportamento antigo."""
+    pagina = _GradeQueCresce(["a"], nasce="b")
+    novo = await grade.esperar_novo(pagina, 1, _diario())
+    assert novo.apareceu is True
+    assert novo.identidade is None
+
+
+# ------------------------------------------------------------ tipo_do_tile
+
+async def test_tipo_do_tile_le_o_elemento_e_nao_a_memoria():
+    """`flow-image-tile` / `flow-video-tile` estao MEDIDOS desde 2026-09-06 e nao eram
+    usados em lugar nenhum. Sao a unica forma de saber o tipo de um card SEM abrir o
+    menu — isto e, durante o polling, e nao so na hora de baixar."""
+    def tile(marca):
+        return _Grade(1, {0: {marca: 1}}).locator("x").nth(0)
+
+    assert await grade.tipo_do_tile(tile(sel.CARD_VIDEO)) == "video"
+    assert await grade.tipo_do_tile(tile(sel.CARD_IMAGEM)) == "imagem"
+
+
+async def test_tipo_do_tile_responde_nao_sei_quando_nenhum_dos_dois_casa():
+    """Card de falha e card ainda nascendo nao sao nem um nem outro. "Nao sei" tem que
+    ser None: um chute aqui derrubaria geracao boa por CardTrocado."""
+    assert await grade.tipo_do_tile(_Grade(1, {0: {}}).locator("x").nth(0)) is None
