@@ -286,3 +286,68 @@ async def test_custo_que_o_painel_nao_anuncia_nao_derruba_a_geracao():
 
     assert chip == "imagem crop_9_16 x1"
     assert t._ultimo_custo is None
+
+
+# ------------------------------------------- a corrida entre o clique e a leitura
+
+class _PaginaLentaParaMarcar(_Pagina):
+    """O painel que reflete o clique TARDE — o Angular ainda nao repintou.
+
+    Ate `leituras_ate_marcar`, `marcados()` devolve o estado ANTIGO; dali em diante,
+    o novo. E o duplo mais honesto da corrida: o clique pegou, quem atrasa e a tela.
+    """
+
+    def __init__(self, *, leituras_ate_marcar: int, depois: list[str], **kw):
+        super().__init__(**kw)
+        self.leituras = 0
+        self.leituras_ate_marcar = leituras_ate_marcar
+        self.depois = list(depois)
+
+    async def evaluate(self, js, arg=None):
+        if "aria-checked=true" in js:
+            self.leituras += 1
+            if self.leituras >= self.leituras_ate_marcar:
+                return list(self.depois)
+        return await super().evaluate(js, arg)
+
+
+def _presentes_x4():
+    return {**_presentes_de_imagem(), sel.QUANTIDADE[4]: 1}
+
+
+async def test_quantidade_que_demora_a_marcar_e_esperada_e_nao_reprovada():
+    """MEDIDO 2026-09-12 por `scratch/sonda_x4_painel.py`: o clique em quantidade PEGA.
+
+    Quem errava era a leitura. Quantidade e o ULTIMO grupo configurado — o unico sem
+    um clique seguinte que lhe de tempo de assentar —, e `marcados()` era lido na
+    linha de baixo, ainda com o valor do job ANTERIOR. Os jobs 862, 955, 1007 e 1014
+    pediram x4 e leram x1; o 869 e o 1010 pediram x1 e leram x4. Nenhum se perdeu,
+    porque o retry do orquestrador acerta na volta seguinte — cada um custou um ciclo
+    de navegador inteiro para descobrir que a configuracao ja estava certa.
+    """
+    pagina = _PaginaLentaParaMarcar(
+        presentes=_presentes_x4(),
+        marcados=["image imagem", "crop_9_16 9:16", "x1"],   # o resto do job anterior
+        depois=["image imagem", "crop_9_16 9:16", "x4"],
+        leituras_ate_marcar=3,
+        chip="imagem crop_9_16 x4")
+
+    chip_lido = await TransportePlaywright()._configurar(
+        pagina, _pedido(quantidade=4), Diario(1))
+
+    assert chip_lido == "imagem crop_9_16 x4"
+    assert pagina.leituras >= 3, "nao adiantou esperar se leu uma vez so"
+
+
+async def test_quantidade_que_nunca_marca_continua_sendo_erro():
+    """A espera nao pode virar um `except: segue` com outro nome.
+
+    Se o botao de fato nao pegou, a geracao sai no numero errado — e em video cada
+    saida extra custa cheio. Esgotado o prazo, a conferencia reprova como sempre.
+    """
+    pagina = _Pagina(presentes=_presentes_x4(),
+                     marcados=["image imagem", "crop_9_16 9:16", "x1"])
+
+    with pytest.raises(GeracaoFalhou, match="nao confirma a configuracao"):
+        await TransportePlaywright()._configurar(
+            pagina, _pedido(quantidade=4), Diario(1))

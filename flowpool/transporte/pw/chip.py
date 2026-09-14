@@ -138,6 +138,16 @@ async def marcados(pagina) -> list[str]:
     return [dom.seguro(t) for t in bruto]
 
 
+async def quantidade_marcada(pagina, quantidade: int) -> bool:
+    """`xN` ja aparece entre os marcados? NA MESMA FORMA que a conferencia usa.
+
+    De proposito o mesmo `" | ".join(...)` do fim de `configurar`: esperar por um
+    criterio e conferir por outro daria o pior dos mundos — espera que termina com a
+    conferencia ainda reprovando, ou o contrario.
+    """
+    return f"x{quantidade}" in " | ".join(await marcados(pagina))
+
+
 async def texto(pagina) -> str:
     bruto = await pagina.locator(sel.CHIP_CONFIG).first.inner_text(timeout=15_000)
     return dom.seguro(bruto.replace("\n", " "))
@@ -377,6 +387,26 @@ async def configurar(pagina, p: Pedido, d: Diario, cura: AutoCura) -> Config:
     await garantir(pagina, d)
     await acoes.clicar_unico(painel, sel.QUANTIDADE[p.quantidade], "quantidade", cura)
     await garantir(pagina, d)
+
+    # ⚠️ ESPERAR O `aria-checked` ASSENTAR, PORQUE A QUANTIDADE E O ULTIMO GRUPO.
+    #
+    # Todos os grupos acima tem um clique DEPOIS deles, e e esse clique que lhes da
+    # tempo de repintar antes da conferencia. A quantidade nao tem nenhum: clicava-se
+    # e lia-se `marcados()` na linha de baixo, ainda com o valor do job ANTERIOR.
+    #
+    # MEDIDO 2026-09-12 por `scratch/sonda_x4_painel.py`: os quatro botoes estao
+    # habilitados e visiveis, e o clique PEGA — reabrindo o painel, `x4` estava
+    # marcado na sonda que acabara de "falhar". Quem errava era a leitura.
+    # Jobs 862, 955, 1007 e 1014 pediram x4 e leram x1; 869 e 1010 pediram x1 e leram
+    # x4 — sempre o valor do job anterior. Nenhum se perdeu (o retry do orquestrador
+    # acerta), e cada um custou um ciclo de navegador inteiro.
+    #
+    # Nao e um `except: segue` com outro nome: esgotado o prazo, a conferencia abaixo
+    # reprova exatamente como antes. Esperar so tira da conta o tempo de repintura.
+    if not await acoes.esperar(
+            pagina, lambda: quantidade_marcada(pagina, p.quantidade), d,
+            f"o painel marcar x{p.quantidade}", teto_ms=10_000, cada=250):
+        d.passo(f"x{p.quantidade} nao apareceu marcado em 10s; a conferencia decide")
 
     # A CONFERENCIA MUDOU DE FONTE, e melhorou.
     #
