@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS job (
     custo_estimado INTEGER,
     erro           TEXT,
     reavaliar_em   TEXT,
+    na_fila_desde  TEXT,
     criado_em      TEXT    NOT NULL,
     atualizado_em  TEXT    NOT NULL
 );

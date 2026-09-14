@@ -17,6 +17,7 @@ from pathlib import Path
 from flowpool.nucleo import tipos
 from flowpool.nucleo.tipos import Conta, Modo
 from flowpool.transporte.base import (
+    CardTrocado,
     Estado,
     GeracaoFalhou,
     LimiteDeUso,
@@ -131,6 +132,29 @@ class TransportePlaywright:
         """
         return self._diarios.setdefault(conta_id, Diario(conta_id))
 
+    def esquecer_card(self, conta_id: int, id_remoto: str) -> None:
+        """Apaga TUDO o que o transporte sabia daquela posicao da grade.
+
+        ⚠️ `card-0` E A MESMA STRING NA GERACAO SEGUINTE, e foi por aqui que o job
+        1133 morreu (conta 1, 2026-09-13). As duas linhas sairam no MESMO segundo:
+
+            [  24s] conta 1: o Flow aceitou: card-0
+            [  24s] conta 1: card-0: 113s sem midia e sem porcentagem — o card parou
+                    de progredir.
+
+        O cronometro `_parado` da tentativa anterior continuava correndo sob a mesma
+        chave, e condenou um card com zero segundo de vida — antes mesmo de ele ter
+        chance de sair da fila do Flow.
+
+        As tres tabelas se esquecem JUNTAS de proposito: elas descrevem um resultado,
+        e o resultado mudou. Esquecer duas e lembrar uma foi exatamente o defeito.
+        """
+        chave = (conta_id, id_remoto)
+        self._repeticoes.pop(chave, None)
+        self._modo_do_card.pop(chave, None)
+        self._parado.pop(chave, None)
+        self._identidade_do_card.pop(chave, None)
+
     async def _traco_da_falha(self, s: Sessao) -> None:
         """Guarda o traco AGORA, no momento da falha, e para de gravar.
 
@@ -155,15 +179,55 @@ class TransportePlaywright:
         # proprio e o Google nao consegue correlacionar as vinte entre si. Vazio e o
         # normal hoje, e `abrir_contexto` trata None como "sem proxy".
         pw, ctx = await abrir_contexto(Path(conta.perfil), conta.proxy)
-        # o relogio do log de passo comeca aqui: e o instante em que a conta passa a
-        # ocupar um navegador, e e desse total que o usuario reclama quando "travou"
-        self._diarios[conta.id] = d = Diario(conta.id)
-        # a gravacao comeca ANTES da primeira acao. Um traco que so pega o fim nao
-        # responde a pergunta que se faz dele, que e o que a tela mostrava ANTES
-        if await iniciar_traco(ctx):
-            self._tracando.add(conta.id)
-        pagina = ctx.pages[0] if ctx.pages else await ctx.new_page()
-        await pagina.goto(sel.URL_FLOW, wait_until="domcontentloaded")
+        # ⚠️ DAQUI PARA BAIXO NADA PODE ESCAPAR COM O NAVEGADOR DE PE.
+        #
+        # O `try` comecava embaixo, so em volta da conferencia do avatar, e o que
+        # ficava de fora era justamente o passo que falha por motivo externo: o
+        # `goto`. MEDIDO no banco em 2026-09-10 18:26-18:28 — `Page.goto:
+        # net::ERR_TUNNEL_CONNECTION_FAILED` (proxy fora do ar) nas contas 4 e 7
+        # deixou o Chrome aberto sem ninguem segurando a referencia. Janela orfa nao
+        # esta em `_guardadas`, entao nem `_fechar_ociosas` nem `encerrar_todas` a
+        # veem: ela fica na tela ate alguem fechar na mao.
+        #
+        # E ela nao fica so ocupando tela — segura o `--user-data-dir`. Os jobs
+        # seguintes daquelas contas morreram em sequencia com
+        # `launch_persistent_context: Target page, context or browser has been
+        # closed`, que e o segundo Chrome perdendo para o primeiro (ver o item 8 do
+        # CLAUDE.md). `validar_perfil`, a irma desta funcao, sempre teve o `finally`.
+        try:
+            # o relogio do log de passo comeca aqui: e o instante em que a conta passa
+            # a ocupar um navegador, e e desse total que o usuario reclama quando
+            # "travou"
+            self._diarios[conta.id] = d = Diario(conta.id)
+            # a gravacao comeca ANTES da primeira acao. Um traco que so pega o fim nao
+            # responde a pergunta que se faz dele, que e o que a tela mostrava ANTES
+            if await iniciar_traco(ctx):
+                self._tracando.add(conta.id)
+            pagina = ctx.pages[0] if ctx.pages else await ctx.new_page()
+            await pagina.goto(sel.URL_FLOW, wait_until="domcontentloaded")
+            await self._exigir_avatar(conta, pagina)
+        except BaseException:
+            # BaseException, e nao Exception: cancelamento de tarefa (a parada do
+            # motor passa por `drenar`) tambem deixaria a janela de pe.
+            await self._desfazer_abertura(pw, ctx, conta.id)
+            raise
+        d.passo("sessao aberta")
+        return Sessao(conta=conta, handle=(pw, ctx, pagina))
+
+    async def _desfazer_abertura(self, pw, ctx, conta_id: int) -> None:
+        """Desfaz uma abertura que nao chegou a virar sessao. Nunca levanta.
+
+        Chamada de dentro de um `except`: um erro daqui substituiria a excecao de
+        verdade — a que diz POR QUE a sessao nao abriu — por uma sobre fechar janela.
+        """
+        self._tracando.discard(conta_id)
+        self._diarios.pop(conta_id, None)
+        for desfazer in (descartar_traco(ctx), ctx.close(), pw.stop()):
+            with suppress(Exception):
+                await desfazer
+
+    async def _exigir_avatar(self, conta: Conta, pagina) -> None:
+        """Prova que a sessao do Google esta viva. `SessaoMorta` quando nao esta."""
         try:
             # A PROVA DE SESSAO VIVA VOLTOU A SER A TELA. A aplicacao antiga tinha
             # `/fx/api/auth/session`, e o comentario aqui dizia, com razao para
@@ -195,14 +259,9 @@ class TransportePlaywright:
             # sessao caida NAO rende traco: nao e defeito de sequencia, e um login que
             # expirou, e o diagnostico e uma linha no evento. Guardar um zip de alguns
             # MB por conta expirada encheria o disco pelo motivo mais banal possivel.
-            self._tracando.discard(conta.id)
-            self._diarios.pop(conta.id, None)
-            await descartar_traco(ctx)
-            await ctx.close()
-            await pw.stop()
+            # Quem descarta o traco e fecha o navegador e `_desfazer_abertura`, no
+            # `except` de quem chama — um lugar so para todos os motivos de nao abrir.
             raise SessaoMorta(motivo) from None
-        d.passo("sessao aberta")
-        return Sessao(conta=conta, handle=(pw, ctx, pagina))
 
     async def viva(self, s: Sessao) -> bool:
         """Se a sessao guardada ainda tem pagina — o Chrome pode ter morrido sozinho."""
@@ -758,6 +817,9 @@ class TransportePlaywright:
         indice = 0 if sel.CARDS_NOVOS_PRIMEIRO else antes
         id_remoto = f"card-{indice}"
         d.passo(f"o Flow aceitou: {id_remoto}")
+        # a posicao pode ter sido de OUTRA geracao ha instantes: zera tudo antes de
+        # escrever o que vale agora. Ver `esquecer_card`.
+        self.esquecer_card(s.conta.id, id_remoto)
         self._repeticoes[(s.conta.id, id_remoto)] = 0
         self._modo_do_card[(s.conta.id, id_remoto)] = p.modo
         if self._identidade_nova:
@@ -1561,6 +1623,9 @@ class TransportePlaywright:
             # job e o orquestrador —, entao o traco tem que ser guardado aqui ou ele
             # seria descartado em `fechar` como se o job tivesse dado certo.
             self._diario(s.conta.id).passo(f"{id_remoto}: o Flow devolveu FALHOU")
+            # o outro caminho de FALHOU (o "parou de progredir", la embaixo) ja soltava
+            # o cronometro; este nao, e a assimetria vazava para a geracao seguinte.
+            self._parado.pop((s.conta.id, id_remoto), None)
             await self._traco_da_falha(s)
             return Estado.FALHOU
 
@@ -1571,16 +1636,23 @@ class TransportePlaywright:
         texto = dom.seguro(await card.inner_text(timeout=10_000))
         tem_porcentagem = re.search(sel.PADRAO_PORCENTAGEM, texto) is not None
         tem_midia = await card.locator(sel.CARD_MIDIA).count() > 0
+        # o card ENFILEIRADO diz isso no proprio texto, e enquanto disser nao ha prazo
+        # correndo: ele nem comecou. Ver `PADRAO_NA_FILA`.
+        na_fila = re.search(sel.PADRAO_NA_FILA, texto) is not None
         chave = (s.conta.id, id_remoto)
-        if tem_porcentagem or tem_midia:
+        if tem_porcentagem or tem_midia or na_fila:
             self._parado.pop(chave, None)
         else:
             self._parado.setdefault(chave, self._relogio())
         parado_ha = (self._relogio() - self._parado[chave]) if chave in self._parado else None
-        veredito = analise.estado_do_card(False, tem_porcentagem, tem_midia, parado_ha)
+        veredito = analise.estado_do_card(False, tem_porcentagem, tem_midia, parado_ha,
+                                          na_fila=na_fila)
         if veredito == "rodando":
             return Estado.RODANDO
+        if veredito == "na_fila":
+            return Estado.NA_FILA
         if veredito == "pronto":
+            await self._exigir_card_do_job(card, id_remoto, s.conta.id)
             return Estado.PRONTO
 
         # SEM MIDIA E SEM PORCENTAGEM POR `SEM_PROGRESSO_S` = PAROU DE PROGREDIR.
@@ -1609,6 +1681,47 @@ class TransportePlaywright:
             f"parou de progredir. Texto: {texto[:120]!r}")
         await self._traco_da_falha(s)
         return Estado.FALHOU
+
+    async def _exigir_card_do_job(self, card, id_remoto: str, conta_id: int) -> None:
+        """Recusa o card cujo TIPO nao bate com o modo do job. Nao devolve nada.
+
+        ⚠️ O PONTO DA CHAMADA E A DECISAO. Ela mora onde se diria PRONTO, e nao na
+        entrada de `consultar`, por duas razoes medidas:
+
+        * card EM ANDAMENTO nao e confiavel para isto — o de video traz `<img>`
+          borrada aos 8% (job 189) e pode nao ter elemento de tipo nenhum. Recusar ali
+          transformaria "esta gerando" em "card trocado" e mataria o job com o video
+          a caminho;
+        * card de FALHA tambem nao casa nenhum dos dois, e o desvio dele ja e tratado
+          acima, com politica propria.
+
+        No instante do PRONTO nao ha essa ambiguidade: o tile terminado de um video E
+        `flow-video-tile`. E este e o instante que faltava cobrir — jobs 1114-1116 e
+        1120-1128 (2026-09-13) foram todos declarados PRONTO em cima da imagem de
+        REFERENCIA enviada, porque a unica exigencia era existir um `<img>` no tile.
+        O menu do card diz a mesma coisa e diz melhor, mas exige botao direito: so
+        chega no `baixar`, um navegador e uma tentativa depois.
+
+        Cala-se em dois casos, e os dois de proposito: sem modo lembrado (restart do
+        servico esvazia `_modo_do_card`) e sem tipo lido ("nao sei"). Nos dois quem
+        decide continua sendo o menu, no `baixar`.
+        """
+        modo = self._modo_do_card.get((conta_id, id_remoto))
+        if modo is None:
+            return
+        tipo = await grade.tipo_do_tile(card)
+        if tipo is None:
+            return
+        esperado = "imagem" if modo is Modo.IMAGEM else "video"
+        if tipo == esperado:
+            return
+        # A MENSAGEM DIZ O QUE SE SABE E MANDA CONFERIR O RESTO (ver o item 11 do
+        # CLAUDE.md): daqui nao da para afirmar se a geracao foi recusada, se saiu da
+        # grade ou se esta noutra posicao — so que o tile desta posicao nao e ela.
+        raise CardTrocado(
+            f"{id_remoto} e um tile de {tipo} e o job e {esperado}: o card desta "
+            f"posicao nao e o resultado deste job. A geracao nao esta onde `card-0` "
+            f"aponta — pode ter sido recusada, ou ter saido da grade.")
 
     # ------------------------------------------------------------------ baixar
     async def baixar(self, s: Sessao, id_remoto: str, destino: Path) -> Path:

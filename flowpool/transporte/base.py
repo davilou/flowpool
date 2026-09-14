@@ -38,6 +38,11 @@ class Estado(str, Enum):
     RODANDO = "rodando"
     PRONTO = "pronto"
     FALHOU = "falhou"
+    # ⚠️ ACEITO PELO FLOW, MAS AINDA NEM COMECOU. Nao e um terceiro tipo de "rodando":
+    # e a diferenca entre o robo estar gerando e o Google estar ocupado. Quem espera
+    # trata igual a RODANDO; quem conta ao usuario precisa dos dois separados, ou toda
+    # demora do Flow chega ao painel como demora do FlowPool. Ver `PADRAO_NA_FILA`.
+    NA_FILA = "na_fila"
 
 
 @dataclass

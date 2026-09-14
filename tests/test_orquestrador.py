@@ -16,7 +16,12 @@ from flowpool.nucleo.custos import custo_de
 from flowpool.nucleo.erros import LimiteDeUso, SaldoInsuficiente
 from flowpool.nucleo.escolha import escolher
 from flowpool.nucleo.tipos import EstadoJob, Job, Modelo, Modo, SaudeSessao, Tier
-from flowpool.transporte.base import CardTrocado, ErroTransporte, SessaoMorta
+from flowpool.transporte.base import (
+    CardTrocado,
+    ErroTransporte,
+    Estado,
+    SessaoMorta,
+)
 from flowpool.transporte.falso import TransporteFalso
 
 
@@ -1126,6 +1131,181 @@ async def test_card_trocado_desiste_na_hora_em_vez_de_baixar_21_vezes(repo, tmp_
     assert "ja foi pago" not in (final.erro or "")
 
 
+class _TransporteComCardTrocadoNoConsultar(TransporteFalso):
+    """A divergencia de tipo aparece no POLLING, e nao so na hora de baixar.
+
+    E o que passou a acontecer com a conferencia de tipo em `consultar`: o card desta
+    posicao ja se sabe que nao e o do job antes de qualquer download.
+    """
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.tentativas_de_download = 0
+
+    async def consultar(self, s, id_remoto):
+        raise CardTrocado(
+            f"{id_remoto} e um tile de imagem e o job e video: o card desta posicao "
+            "nao e o resultado deste job")
+
+    async def baixar(self, s, id_remoto, destino):
+        self.tentativas_de_download += 1
+        return await super().baixar(s, id_remoto, destino)
+
+
+async def test_card_trocado_no_polling_desiste_sem_chegar_a_baixar(repo, tmp_path):
+    """⚠️ JOBS 1114-1116 e 1120-1128, 2026-09-13. O `CardTrocado` vindo do polling caia
+    no `except Exception` generico: virava falha comum, GASTAVA tentativa e — pior —
+    guardava `id_remoto`, entao a tentativa seguinte retomava o mesmo ponteiro morto e
+    chegava na mesma recusa. Ele tem politica propria e agora ela vale para o ciclo
+    inteiro, nao so para o `baixar`.
+    """
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 200; repo.salvar_conta(c)
+    jid = repo.criar_job(job_fast())
+    t = _TransporteComCardTrocadoNoConsultar(saldos={cid: 200})
+
+    await ciclo(Orquestrador(repo, t, raiz=tmp_path))
+
+    final = repo.job(jid)
+    assert final.estado is EstadoJob.FALHOU
+    assert final.tentativas == 0, "identificacao furada nao e tentativa do job"
+    assert t.tentativas_de_download == 0, "nem chegou a abrir o menu do card"
+    assert final.erro and "nao e o resultado deste job" in final.erro
+    eventos = [e["tipo"] for e in repo.eventos(jid)]
+    assert "card_trocado" in eventos
+
+
+# --- geracao que nao existe nao se retoma -------------------------------------
+
+
+class _TransporteQueFalha(TransporteFalso):
+    """O Flow aceita o pedido (ha card), a geracao falha, e o saldo lido no fim e
+    `saldo_final` — o unico numero que separa "recusou sem cobrar" de "cobrou".
+
+    E o desenho exato dos jobs 1114-1128: com `saldo_final` igual ao de antes da
+    reserva, o reservado voltou inteiro e nao existe geracao para retomar.
+    """
+
+    def __init__(self, *a, saldo_final=0, **kw):
+        super().__init__(*a, **kw)
+        self.saldo_final = saldo_final
+
+    async def consultar(self, s, id_remoto):
+        return Estado.FALHOU
+
+    async def saldo(self, s):
+        return self.saldo_final
+
+
+async def test_reserva_que_voltou_NAO_solta_o_ponteiro_sozinha(repo, tmp_path):
+    """⚠️ REGRESSAO MINHA, MEDIDA NO JOB 1133 (conta 1, 2026-09-13 15:54).
+
+    Eu tinha feito o contrario disto: saldo que volta inteiro => "nao existe geracao"
+    => solta `id_remoto` e gera de novo. A premissa e FALSA neste modelo, e o log de
+    passo mostrou por que:
+
+        card-0: 91s sem midia e sem porcentagem — o card parou de progredir.
+        Texto: 'movie
+na fila
+the large container ship glides steadily...'
+
+    O Flow ENFILEIRA a geracao, e cobra quando ela COMECA, nao quando aceita. Card
+    `na fila` existe, vai rodar e vai custar — mas o saldo ainda nao caiu. Soltar o
+    ponteiro ali mandou o job gerar uma SEGUNDA vez na mesma conta (`despachado
+    retomada: false`, "o Flow aceitou: card-0"), e a conta 1 caiu de 50 para 38 logo
+    em seguida. Pagar duas vezes e exatamente o lado caro que a guarda dizia proteger.
+
+    Saldo sozinho nao distingue "nao existe" de "ainda nao comecou". Quem distingue e
+    o CARD — ver o teste abaixo.
+    """
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 200; repo.salvar_conta(c)
+    jid = repo.criar_job(job_fast())
+    t = _TransporteQueFalha(saldos={cid: 200}, saldo_final=200)
+
+    await ciclo(Orquestrador(repo, t, raiz=tmp_path))
+
+    meio = repo.job(jid)
+    assert meio.estado is EstadoJob.PENDENTE
+    assert meio.id_remoto is not None, "pode estar so na fila: a retomada e o barato"
+    assert "geracao_fantasma" not in [e["tipo"] for e in repo.eventos(jid)]
+
+
+class _TransporteComCardTrocadoESaldo(TransporteFalso):
+    """O card desta posicao nao e o do job, e o saldo lido no fim e `saldo_final`."""
+
+    def __init__(self, *a, saldo_final=0, **kw):
+        super().__init__(*a, **kw)
+        self.saldo_final = saldo_final
+
+    async def consultar(self, s, id_remoto):
+        raise CardTrocado(
+            f"{id_remoto} e um tile de imagem e o job e video: o card desta posicao "
+            "nao e o resultado deste job")
+
+    async def saldo(self, s):
+        return self.saldo_final
+
+
+async def test_card_trocado_sem_cobranca_devolve_o_job_para_a_fila(repo, tmp_path):
+    """As DUAS evidencias juntas: o card nao e nosso E nada foi cobrado.
+
+    So aqui da para afirmar que a geracao nao existe. Card trocado sozinho nao basta
+    (a geracao pode existir, so mal identificada — foi essa duvida que fez a politica
+    original desistir); saldo sozinho nao basta (pode estar na fila). Com as duas,
+    gerar de novo nao paga duas vezes, e e melhor que largar o job para uma pessoa.
+    """
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 200; repo.salvar_conta(c)
+    jid = repo.criar_job(job_fast())
+    t = _TransporteComCardTrocadoESaldo(saldos={cid: 200}, saldo_final=200)
+
+    await ciclo(Orquestrador(repo, t, raiz=tmp_path))
+
+    j = repo.job(jid)
+    assert j.estado is EstadoJob.PENDENTE
+    assert j.id_remoto is None and j.conta_id is None
+    assert j.tentativas == 0, "identificacao furada nao e tentativa do job"
+    tipos = [e["tipo"] for e in repo.eventos(jid)]
+    assert "card_trocado" in tipos and "geracao_fantasma" in tipos
+
+
+async def test_card_trocado_com_cobranca_desiste_e_chama_uma_pessoa(repo, tmp_path):
+    """Cobrado significa que existe geracao paga em algum lugar do Flow. Gerar de novo
+    pagaria a segunda; quem decide o que fazer com a primeira e uma pessoa olhando a
+    conta — e a mensagem diz o que olhar."""
+    custo = custo_de(Modelo.VEO_FAST, Tier.FREE, "8s")
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 200; repo.salvar_conta(c)
+    jid = repo.criar_job(job_fast())
+    t = _TransporteComCardTrocadoESaldo(saldos={cid: 200}, saldo_final=200 - custo)
+
+    await ciclo(Orquestrador(repo, t, raiz=tmp_path))
+
+    j = repo.job(jid)
+    assert j.estado is EstadoJob.FALHOU
+    assert j.id_remoto is not None, "ha geracao paga: o ponteiro e a pista dela"
+    assert "geracao_fantasma" not in [e["tipo"] for e in repo.eventos(jid)]
+
+
+async def test_card_trocado_com_saldo_ilegivel_desiste(repo, tmp_path):
+    """Leitura de saldo que falha e "nao sei", e "nao sei" desiste — nunca gera de
+    novo. O erro para este lado custa tempo; para o outro custa credito."""
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 200; repo.salvar_conta(c)
+    jid = repo.criar_job(job_fast())
+
+    class _Cego(_TransporteComCardTrocadoESaldo):
+        async def saldo(self, s):
+            raise RuntimeError("o menu do avatar nao abriu")
+
+    await ciclo(Orquestrador(repo, _Cego(saldos={cid: 200}), raiz=tmp_path))
+
+    j = repo.job(jid)
+    assert j.estado is EstadoJob.FALHOU
+    assert j.id_remoto is not None
+
+
 # --- recusa sem cobranca devolve o credito reservado --------------------------
 
 
@@ -1365,6 +1545,31 @@ async def test_sessao_e_reusada_entre_jobs_da_mesma_conta(repo, tmp_path):
     assert t.abertas == 0 and orq.sessoes_ociosas == 0
 
 
+async def test_encerrar_todas_fecha_tambem_a_janela_de_um_job_interrompido(repo, tmp_path):
+    """⚠️ A TERCEIRA PORTA DA JANELA ORFA, e e a que se abre em TODO desligamento.
+
+    `encerrar_todas` so percorria `_guardadas` — a fila de ociosas. A sessao que esta
+    NO MEIO de um job nao esta la (ela sai de `_guardadas` no instante em que a conta
+    volta a trabalhar), entao parar o servico com geracao em curso deixava aquele
+    Chrome de pe: sem processo dono, segurando o `--user-data-dir`, e o boot seguinte
+    esbarrando em perfil ocupado numa conta que nao tem defeito nenhum.
+
+    `_vivas` e o registro de TODA janela aberta, e e por ele que a varredura final
+    tem que passar.
+    """
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 50; repo.salvar_conta(c)
+    t = TransporteFalso(saldos={cid: 50})
+    orq = Orquestrador(repo, t, raiz=tmp_path)
+
+    # uma sessao aberta e OCUPADA: existe em `_vivas`, nunca passou por `_guardadas`
+    await orq._obter_sessao(repo.conta(cid))
+    assert t.abertas == 1 and orq.sessoes_ociosas == 0
+
+    await orq.encerrar_todas()
+    assert t.abertas == 0, "a janela do job interrompido ficaria na tela"
+
+
 async def test_sessao_ociosa_fecha_depois_do_prazo(repo, tmp_path):
     cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
     c = repo.conta(cid); c.saldo = 50; repo.salvar_conta(c)
@@ -1380,6 +1585,34 @@ async def test_sessao_ociosa_fecha_depois_do_prazo(repo, tmp_path):
     orq._guardadas[cid] = (sessao, datetime.now(timezone.utc) - timedelta(minutes=10))
     await orq._fechar_ociosas()
     assert t.abertas == 0 and orq.sessoes_ociosas == 0
+
+
+class _TransporteQueFalhaAoRenovar(TransporteFalso):
+    """A sessao guardada esta viva, mas a aba nova nao abre."""
+
+    async def renovar(self, s):
+        raise RuntimeError("Target page, context or browser has been closed")
+
+
+async def test_sessao_que_falha_ao_renovar_e_fechada_em_vez_de_ficar_orfa(repo, tmp_path):
+    """⚠️ A SEGUNDA PORTA DA JANELA ORFA. `_obter_sessao` TIRA a sessao de `_guardadas`
+    antes de tentar reusa-la; se `renovar` levantasse dali em diante, ela nao estava
+    mais na fila de ociosas nem tinha sido fechada — navegador de pe, invisivel para
+    `_fechar_ociosas` e para `encerrar_todas`, segurando o perfil da conta.
+    """
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 50; repo.salvar_conta(c)
+    repo.criar_job(job_fast("c1")); repo.criar_job(job_fast("c2"))
+    t = _TransporteQueFalhaAoRenovar(saldos={cid: 50})
+    orq = Orquestrador(repo, t, raiz=tmp_path)
+
+    await ciclo(orq)
+    assert t.abertas == 1, "a primeira sessao ficou guardada"
+    await ciclo(orq)
+
+    assert t.aberturas == 2, "renovar falhou: abre uma nova"
+    assert t.abertas == 1, "e a velha foi FECHADA, nao esquecida"
+    assert all(j.estado is EstadoJob.PRONTO for j in repo.jobs())
 
 
 async def test_sessao_que_morreu_parada_nao_e_reusada(repo, tmp_path):
@@ -1576,3 +1809,100 @@ async def test_sessao_que_morre_no_gerar_nao_ressuscita_no_finally(repo, tmp_pat
 
     assert repo.conta(cid).saude is SaudeSessao.EXPIRADA, \
         "o `salvar_conta` do finally ressuscitou a sessao a partir da copia em memoria"
+
+
+# --- a fila do FLOW nao e a fila do FLOWPOOL ---------------------------------
+#
+# ⚠️ MEDIDO no log de passo, 2026-09-13: entre aceitar o pedido e comecar a gerar, o
+# Flow ENFILEIRA, e o card enfileirado nao tem porcentagem nem midia. Para a espera
+# isso e igual a "gerando" — segue esperando —, mas para quem PERGUNTA sao respostas
+# opostas, e enquanto as duas chegavam ao painel como "gerando" toda demora do Google
+# parecia demora do FlowPool. O usuario reclamou exatamente disso.
+
+
+async def test_fila_do_flow_vira_evento_e_o_campo_zera_no_fim(repo, tmp_path):
+    """O EVENTO fica (historico) e o CAMPO zera (agora). Os dois, ou o painel mente."""
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 50; repo.salvar_conta(c)
+    jid = repo.criar_job(job_fast())
+
+    orq = Orquestrador(repo, TransporteFalso(saldos={cid: 50}, passos_na_fila=2),
+                       raiz=tmp_path, intervalo_polling=0)
+    await ciclo(orq)
+
+    j = repo.job(jid)
+    assert j.estado is EstadoJob.PRONTO
+    # o campo e o AGORA: o job terminou, entao ele nao esta mais na fila de ninguem
+    assert j.na_fila_desde is None
+    # o evento e o HISTORICO: e por ele que se responde, depois, quanto tempo se
+    # esperou pelo Google — a pergunta que nao tinha resposta nenhuma antes disto
+    fila = [e for e in repo.eventos(jid) if e["tipo"] == "na_fila_do_flow"]
+    assert len(fila) == 1
+    assert fila[0]["conta_id"] == cid
+    assert json.loads(fila[0]["payload"])["id_remoto"] == j.id_remoto
+
+
+async def test_geracao_que_nunca_enfileira_nao_inventa_evento(repo, tmp_path):
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 50; repo.salvar_conta(c)
+    jid = repo.criar_job(job_fast())
+
+    orq = Orquestrador(repo, TransporteFalso(saldos={cid: 50}, passos_rodando=3),
+                       raiz=tmp_path, intervalo_polling=0)
+    await ciclo(orq)
+
+    assert repo.job(jid).na_fila_desde is None
+    assert [e for e in repo.eventos(jid) if e["tipo"] == "na_fila_do_flow"] == []
+
+
+async def test_a_fila_e_anotada_na_virada_e_nao_a_cada_volta(repo, tmp_path):
+    """⚠️ `_esperar` chama isto a cada volta do polling. Gravar sempre seria um UPDATE
+    por segundo em cada job rodando, e um evento por segundo no historico — o
+    contrario de conseguir ler o que aconteceu."""
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 50; repo.salvar_conta(c)
+    jid = repo.criar_job(job_fast())
+    j = repo.job(jid)
+    j.conta_id = cid
+    j.id_remoto = "falso-1"
+    repo.salvar_job(j)
+
+    orq = Orquestrador(repo, TransporteFalso(saldos={cid: 50}), raiz=tmp_path)
+
+    orq._anotar_fila(j, True)
+    primeira = j.na_fila_desde
+    assert primeira is not None
+    orq._anotar_fila(j, True)          # ainda na fila: nada muda
+    assert j.na_fila_desde == primeira
+    assert len([e for e in repo.eventos(jid) if e["tipo"] == "na_fila_do_flow"]) == 1
+
+    orq._anotar_fila(j, False)
+    assert j.na_fila_desde is None
+    assert repo.job(jid).na_fila_desde is None
+    orq._anotar_fila(j, False)         # sair duas vezes tambem nao gera nada
+    assert len([e for e in repo.eventos(jid) if e["tipo"] == "na_fila_do_flow"]) == 1
+
+
+async def test_job_na_fila_do_flow_ja_tem_conta_e_nao_e_job_pendente(repo, tmp_path):
+    """A distincao que o painel precisa fazer: `pendente` e a fila do FLOWPOOL, sem
+    conta e sem reserva; `na_fila_desde` e a fila do FLOW, com a conta ja escolhida e
+    o credito ja reservado. Confundi-las manda a pessoa procurar defeito no lado
+    errado."""
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid); c.saldo = 50; repo.salvar_conta(c)
+    jid = repo.criar_job(job_fast())
+
+    pendente = repo.job(jid)
+    assert pendente.estado is EstadoJob.PENDENTE
+    assert pendente.conta_id is None
+    assert pendente.na_fila_desde is None
+
+    orq = Orquestrador(repo, TransporteFalso(saldos={cid: 50}, passos_na_fila=1),
+                       raiz=tmp_path, intervalo_polling=0)
+    await ciclo(orq)
+
+    ev = repo.eventos(jid)
+    fila = next(e for e in ev if e["tipo"] == "na_fila_do_flow")
+    despacho = next(e for e in ev if e["tipo"] == "despachado")
+    # o despacho vem ANTES: quando o Flow enfileira, o FlowPool ja fez a parte dele
+    assert despacho["id"] < fila["id"]

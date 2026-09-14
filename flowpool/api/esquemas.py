@@ -266,6 +266,12 @@ class RespostaJob(BaseModel):
     prioridade: int = 0
     # Quando o motor volta a olhar um job devolvido a fila. `None` e "na proxima volta".
     reavaliar_em: datetime | None = None
+    # Desde quando o FLOW diz que a geracao esta enfileirada — nao confundir com a
+    # fila do FlowPool, que e o estado `pendente`. Aqui o job ja foi despachado, ja
+    # tem conta e ja gastou reserva: quem esta ocupado e o Google. Sem este campo o
+    # painel dizia "gerando" nos dois casos e a pessoa nao tinha como saber se a
+    # demora era do robo ou da fila do Flow.
+    na_fila_desde: datetime | None = None
     # Sem estas duas datas nao ha tabela de jobs nem historico que se ordene por tempo
     # — so por id, que nao diz ha quanto tempo um job esta rodando.
     criado_em: datetime | None = None

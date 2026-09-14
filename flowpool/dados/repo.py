@@ -160,6 +160,12 @@ class Repo:
             self.con.execute("ALTER TABLE conta ADD COLUMN ip_saida TEXT")
         if "ip_lido_em" not in existentes:
             self.con.execute("ALTER TABLE conta ADD COLUMN ip_lido_em TEXT")
+        # mesmo motivo, na outra tabela: o banco em producao tem mais de mil jobs, e
+        # sem a coluna `_job` estouraria com KeyError na primeira listagem
+        do_job = {r["name"] for r in
+                  self.con.execute("PRAGMA table_info(job)").fetchall()}
+        if "na_fila_desde" not in do_job:
+            self.con.execute("ALTER TABLE job ADD COLUMN na_fila_desde TEXT")
 
     # ---------- contas ----------
 
@@ -323,10 +329,10 @@ class Repo:
         self.con.execute(
             """UPDATE job SET estado=?, conta_id=?, id_remoto=?, arquivo=?,
                    tentativas=?, custo_estimado=?, erro=?, reavaliar_em=?,
-                   atualizado_em=?
+                   na_fila_desde=?, atualizado_em=?
                WHERE id=?""",
             (j.estado.value, j.conta_id, j.id_remoto, j.arquivo, j.tentativas,
-             j.custo_estimado, j.erro, _txt(j.reavaliar_em),
+             j.custo_estimado, j.erro, _txt(j.reavaliar_em), _txt(j.na_fila_desde),
              _txt(datetime.now(timezone.utc)), j.id),
         )
         self.con.commit()
@@ -344,7 +350,9 @@ class Repo:
             conta_id=r["conta_id"], id_remoto=r["id_remoto"], arquivo=r["arquivo"],
             tentativas=r["tentativas"], custo_estimado=r["custo_estimado"],
             erro=r["erro"],
-            reavaliar_em=_dt(r["reavaliar_em"]), criado_em=_dt(r["criado_em"]),
+            reavaliar_em=_dt(r["reavaliar_em"]),
+            na_fila_desde=_dt(r["na_fila_desde"]),
+            criado_em=_dt(r["criado_em"]),
             atualizado_em=_dt(r["atualizado_em"]),
         )
 

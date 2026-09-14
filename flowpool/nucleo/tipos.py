@@ -256,6 +256,11 @@ class Job:
     custo_estimado: int | None = None
     erro: str | None = None
     reavaliar_em: datetime | None = None
+    # Desde quando o Flow diz que este job esta ENFILEIRADO — e `None` no instante em
+    # que ele sai da fila. E estado do AGORA, nao historico: quem quer saber que um
+    # job passou pela fila le o evento `na_fila_do_flow`, que fica. Aqui um valor
+    # velho faria o painel anunciar fila num job que ja esta gerando ha dez minutos.
+    na_fila_desde: datetime | None = None
     criado_em: datetime | None = None
     atualizado_em: datetime | None = None
 

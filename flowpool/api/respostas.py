@@ -45,6 +45,7 @@ def resposta_job(j: Job, raiz: Path | str) -> RespostaJob:
                        referencias=list(j.referencias),
                        frame_inicial=j.frame_inicial, frame_final=j.frame_final,
                        prioridade=j.prioridade, reavaliar_em=j.reavaliar_em,
+                       na_fila_desde=j.na_fila_desde,
                        criado_em=j.criado_em, atualizado_em=j.atualizado_em)
 
 

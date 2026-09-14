@@ -47,6 +47,19 @@ def criar_app(repo: Repo, transporte: FlowTransport, raiz: Path | str,
         if tarefa:
             orq.parar()
             tarefa.cancel()
+            # ⚠️ O `cancel` ACIMA TORNA INALCANCAVEL O FIM DE `rodar()`, e era la que
+            # morava a parada limpa. O laco fica quase sempre dormindo entre voltas;
+            # cancelar ali levanta `CancelledError` no `await`, o `while` sai por
+            # excecao e o `await self.encerrar_todas()` do rodape nunca roda. Efeito:
+            # TODO desligamento do servico deixava as janelas do Chrome abertas —
+            # sem dono, segurando o `--user-data-dir`, e o boot seguinte esbarrando em
+            # perfil ocupado.
+            #
+            # Fechar aqui, e nao esperar o laco: desligamento tem que ser rapido e
+            # previsivel. A geracao em curso morre — ja morria —, e o job preso em
+            # `rodando` e resolvido por `orq.recuperar()` no boot seguinte. O que muda
+            # e que agora o navegador dela fecha junto.
+            await orq.encerrar_todas()
 
     app = FastAPI(title="FlowPool", lifespan=ciclo)
     app.state.repo = repo

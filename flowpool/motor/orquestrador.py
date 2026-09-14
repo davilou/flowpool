@@ -242,9 +242,22 @@ class Orquestrador:
         guardada = self._guardadas.pop(conta.id, None)
         if guardada is not None:
             sessao, _ = guardada
-            if await self.transporte.viva(sessao):
-                await self.transporte.renovar(sessao)
-                return sessao
+            # ⚠️ O `pop` JA ACONTECEU, e por isso o `except` nao e opcional. Daqui em
+            # diante a sessao nao esta mais na fila de ociosas; se `renovar` levantar,
+            # ninguem mais tem a referencia dela — nem `_fechar_ociosas`, nem
+            # `encerrar_todas` — e o Chrome fica de pe segurando o perfil da conta,
+            # que e a janela orfa vista em 2026-09-10 (ver `abrir_sessao`).
+            #
+            # Falhar ao renovar e a mesma descoberta que `viva` False, um passo
+            # depois: o navegador guardado nao serve. Fecha e abre outro.
+            try:
+                if await self.transporte.viva(sessao):
+                    await self.transporte.renovar(sessao)
+                    return sessao
+            except Exception as e:
+                self.repo.registrar_evento(
+                    None, conta.id, "reuso_falhou",
+                    json.dumps({"erro": f"{type(e).__name__}: {e}"}))
             await self._fechar_sessao(sessao, conta.id)
         # `_vivas` e escrita AQUI e apagada em `_fechar_sessao`, os dois pontos unicos
         # por onde navegador abre e fecha. Registrar em cada chamador seria esquecer um.
@@ -305,8 +318,22 @@ class Orquestrador:
         return True
 
     async def encerrar_todas(self) -> None:
+        """Fecha TODA janela que o motor abriu. Nao sobra Chrome depois desta chamada.
+
+        ⚠️ `_guardadas` NAO BASTA, e a diferenca aparece exatamente no desligamento com
+        trabalho em curso: a sessao de um job nao esta na fila de ociosas — ela sai de
+        `_guardadas` no instante em que a conta volta a trabalhar. Parar o servico ali
+        deixava aquele Chrome de pe, sem dono, segurando o `--user-data-dir`, e o boot
+        seguinte esbarrava em perfil ocupado numa conta sem defeito nenhum.
+
+        `_vivas` e o registro de toda janela aberta, e por isso e ele quem fecha a
+        conta. Idempotente: `_fechar_sessao` tira de `_vivas` e engole erro de browser
+        ja morto, entao chamar duas vezes nao custa nada.
+        """
         for conta_id in list(self._guardadas):
             await self.encerrar_sessao(conta_id)
+        for conta_id, sessao in list(self._vivas.items()):
+            await self._fechar_sessao(sessao, conta_id)
 
     async def _fechar_ociosas(self) -> None:
         limite = datetime.now(timezone.utc) - OCIOSIDADE_SESSAO
@@ -728,6 +755,16 @@ class Orquestrador:
             json.dumps({"modelo": job.modelo.value, "retomada": retomando}))
 
         sessao = None
+        # o que ESTA tentativa colocou em reserva. Vive numa local, e nao em
+        # `job.custo_estimado`, porque `_estornar` zera aquele campo no caminho da
+        # falha — inclusive quando NAO devolve nada — e quem precisa do numero
+        # (`_soltar_geracao_fantasma`) so roda depois, no `finally`. Zero numa
+        # retomada, que nao reserva nada: la nao ha o que comparar.
+        reservado = 0
+        # o `CardTrocado` do ciclo, se houver. A DECISAO sobre ele nao cabe aqui: ela
+        # precisa saber se a geracao foi COBRADA, e esse numero so existe depois da
+        # reconciliacao, no `finally`. Ver `_fechar_card_trocado`.
+        card_trocado: Exception | None = None
         try:
             sessao = await self._obter_sessao(conta)
             await self._resolver_projeto(sessao, job, conta)
@@ -740,22 +777,25 @@ class Orquestrador:
                 # devolve depois
                 job.custo_estimado = reservar(conta, job.modelo, job.quantidade,
                                               job.duracao)
+                reservado = job.custo_estimado
                 self.repo.salvar_conta(conta)
                 self.repo.salvar_job(job)
 
                 job.id_remoto = await self.transporte.gerar(sessao, self._pedido(job))
                 self.repo.salvar_job(job)
 
-            estado = await self._esperar(sessao, job.id_remoto)
+            estado = await self._esperar(sessao, job, job.id_remoto)
             if estado is not Estado.PRONTO:
                 raise GeracaoFalhou(f"Flow devolveu {estado.value}")
 
             destino = self.raiz / job.destino / f"{job.nome}{_extensao(job.modo)}"
             try:
                 arquivo = await self.transporte.baixar(sessao, job.id_remoto, destino)
-            except CardTrocado as e:
-                self._apos_card_trocado(job, conta, sessao, e)
-                return
+            except CardTrocado:
+                # NAO e falha de download, e por isso nao entra no laco dele. Sobe
+                # para o tratador do ciclo, que tem a politica — uma so, agora que a
+                # divergencia de tipo pode vir tambem do polling.
+                raise
             except Exception as e:
                 self._apos_download_falho(job, conta, e)
                 return
@@ -766,6 +806,15 @@ class Orquestrador:
             job.erro = None
             self.repo.salvar_job(job)
             self.repo.registrar_evento(job.id, conta.id, "pronto")
+
+        except CardTrocado as e:
+            card_trocado = e
+            self._anotar_card_trocado(job, conta, e)
+            # ⚠️ ANTES SO EXISTIA EM VOLTA DO `baixar`, e por isso o mesmo erro vindo
+            # do polling caia no `except Exception` la embaixo: virava falha comum,
+            # gastava tentativa do job e guardava `id_remoto` — de modo que a
+            # tentativa seguinte retomava o ponteiro morto e chegava na mesma recusa.
+            # Jobs 1114-1116 e 1120-1128 (2026-09-13).
 
         except SessaoMorta as e:
             self._ao_perder_sessao(job, conta, sessao, e)
@@ -781,26 +830,69 @@ class Orquestrador:
 
         finally:
             if sessao is not None:
-                await self._encerrar_ciclo(job, conta, sessao)
+                await self._encerrar_ciclo(job, conta, sessao, reservado,
+                                           card_trocado)
 
-    def _apos_card_trocado(self, job: Job, conta: Conta, sessao, e: Exception) -> None:
-        """O card aberto nao e o resultado deste job. Desiste, sem gastar tentativa."""
-        # ⚠️ ISTO NAO E FALHA DE DOWNLOAD, E NAO ENTRA NO LACO DELE. O laco
-        # abaixo existe para a falha que passa sozinha (o Chrome travando no
-        # blob); um card do tipo errado nao vira o certo com o tempo — a
-        # identificacao e que furou. MEDIDO nos jobs 583-588 (2026-09-09): 21
-        # aberturas de navegador cada, todas parando na mesma recusa.
-        #
-        # Desiste na hora, e sem mexer em `id_remoto`: soltar ele mandaria
-        # gerar de novo, e se a geracao original EXISTIR (so mal identificada)
-        # isso paga duas vezes. Quem decide entre as duas coisas e uma pessoa
-        # olhando a conta — e agora a mensagem diz o que olhar.
+    def _anotar_card_trocado(self, job: Job, conta: Conta, e: Exception) -> None:
+        """Poe o card trocado na linha do tempo. NAO decide o destino do job.
+
+        Vale para o CICLO INTEIRO, e nao so para o download. A divergencia de tipo
+        passou a ser vista tambem no polling (`consultar` le `flow-image-tile` /
+        `flow-video-tile`), e enquanto o tratador so envolvia o `baixar` o mesmo erro
+        vindo dali caia no `except Exception` generico: gastava tentativa do job e
+        guardava `id_remoto`, de modo que a tentativa seguinte retomava o ponteiro
+        morto — jobs 1114-1116 e 1120-1128, 2026-09-13.
+
+        O que fazer com o job depende de a geracao ter sido COBRADA, e esse numero so
+        existe depois da reconciliacao. Por isso a decisao mora em
+        `_fechar_card_trocado`, chamada do `finally`.
+        """
         self.repo.registrar_evento(
             job.id, conta.id, "card_trocado",
             json.dumps({"id_remoto": job.id_remoto, "erro": str(e)}))
-        self._devolver(job, f"{type(e).__name__}: {e}", gasta_tentativa=False,
-                       falha=sessao.falha if sessao else None, desistir=True)
-        return
+
+    def _fechar_card_trocado(self, job: Job, conta: Conta, sessao, e: Exception,
+                             delta: int | None, reservado: int) -> None:
+        """Card trocado: gera de novo se nada foi cobrado, senao chama uma pessoa.
+
+        ⚠️ ISTO NAO E FALHA DE DOWNLOAD, E NAO ENTRA NO LACO DELE. Aquele laco existe
+        para a falha que passa sozinha (o Chrome travando no blob); um card do tipo
+        errado nao vira o certo com o tempo — a identificacao e que furou. MEDIDO nos
+        jobs 583-588 (2026-09-09): 21 aberturas de navegador cada, todas parando na
+        mesma recusa. Nenhum dos dois caminhos daqui gasta tentativa do job.
+
+        SAO PRECISAS AS DUAS EVIDENCIAS PARA GERAR DE NOVO, e cada uma sozinha ja
+        enganou este codigo:
+
+        * so o CARD nao basta — a geracao pode existir e estar apenas mal
+          identificada, e foi essa duvida que fez a politica original desistir sempre;
+        * so o SALDO nao basta, e essa foi minha regressao de 2026-09-13. Eu soltava o
+          ponteiro quando o reservado voltava inteiro, e o log de passo mostrou por que
+          esta errado: o card dizia `movie / na fila / <prompt>`. O Flow ENFILEIRA a
+          geracao e cobra quando ela COMECA, nao quando aceita. No job 1133 o ponteiro
+          foi solto, o job gerou de novo na mesma conta e a conta 1 caiu de 50 para 38
+          logo depois — pagou duas vezes.
+
+        Saldo ilegivel (`delta` None) conta como cobrado: "nao sei" desiste. O erro
+        para este lado custa tempo de uma pessoa; para o outro, credito.
+        """
+        erro = f"{type(e).__name__}: {e}"
+        falha = sessao.falha if sessao else None
+        if delta is not None and reservado > 0 and delta >= reservado:
+            self.repo.registrar_evento(
+                job.id, conta.id, "geracao_fantasma",
+                json.dumps({"id_remoto": job.id_remoto, "delta": delta,
+                            "reservado": reservado}))
+            # `_devolver` solta a conta junto quando `id_remoto` e None, e e o certo:
+            # se nao existe geracao presa aquela conta, nada prende o job a ela — e no
+            # caso medido era justamente a conta que estava recusando.
+            job.id_remoto = None
+            self._devolver(job, erro, gasta_tentativa=False, falha=falha)
+            return
+        # cobrado, ou sem saber: existe geracao paga em algum lugar do Flow. Desiste
+        # sem mexer em `id_remoto` — ele e a pista para achar a orfa — e a mensagem
+        # diz o que olhar.
+        self._devolver(job, erro, gasta_tentativa=False, falha=falha, desistir=True)
 
     def _apos_download_falho(self, job: Job, conta: Conta, e: Exception) -> None:
         """O download nao trouxe os bytes. Conta, respeita o teto, devolve o job."""
@@ -956,9 +1048,17 @@ class Orquestrador:
         self._devolver(job, f"{type(e).__name__}: {e}", gasta_tentativa=True,
                        falha=sessao.falha if sessao else None)
 
-    async def _encerrar_ciclo(self, job: Job, conta: Conta, sessao) -> None:
-        """Reconcilia o saldo e decide se a sessao fica guardada ou e fechada."""
+    async def _encerrar_ciclo(self, job: Job, conta: Conta, sessao,
+                              reservado: int = 0,
+                              card_trocado: Exception | None = None) -> None:
+        """Reconcilia o saldo, fecha o card trocado e guarda ou fecha a sessao.
+
+        O card trocado se decide AQUI porque e aqui que o saldo e lido: a escolha
+        entre "gera de novo" e "chama uma pessoa" depende de a geracao ter sido
+        cobrada, e `delta` e a unica evidencia disso. Ver `_fechar_card_trocado`.
+        """
         saudavel = False
+        delta: int | None = None
         try:
             lido = await self.transporte.saldo(sessao)
             delta = reconciliar(conta, lido, datetime.now(timezone.utc))
@@ -977,6 +1077,9 @@ class Orquestrador:
             # o silencio que transformava conta seca em laco infinito
             self.repo.registrar_evento(job.id, conta.id, "reconciliacao_falhou",
                                        json.dumps({"erro": str(e)}))
+        if card_trocado is not None:
+            self._fechar_card_trocado(job, conta, sessao, card_trocado,
+                                      delta, reservado)
         # A leitura de saldo e a PROVA de que a sessao ainda responde: ela
         # abre e fecha o menu do avatar. Sessao que passou fica guardada para
         # o proximo job da conta; sessao que falhou ali e fechada — o proximo
@@ -1132,14 +1235,52 @@ class Orquestrador:
             return None
         return await diagnostico.diagnosticar_job(self.repo, job_id, self.diagnosticador)
 
-    async def _esperar(self, sessao, id_remoto: str) -> Estado:
+    async def _esperar(self, sessao, job: Job, id_remoto: str) -> Estado:
+        """Espera a geracao sair de RODANDO. NA_FILA espera igual, e conta diferente.
+
+        Para a espera, "o robo esta gerando" e "o Google ainda nem comecou" sao a
+        mesma ordem: continue. Para quem PERGUNTA, sao respostas opostas — e enquanto
+        as duas chegavam ao painel como "gerando", toda demora do Flow parecia demora
+        do FlowPool. `_anotar_fila` e o unico lugar que sabe da diferenca.
+
+        O teto de `timeout_geracao` continua correndo durante a fila, de proposito:
+        ele e a rede que impede um job de esperar para sempre, e afrouxa-lo por causa
+        de um rotulo na tela do Google seria trocar uma rede por uma promessa.
+        """
         limite = datetime.now(timezone.utc) + self.timeout_geracao
-        while datetime.now(timezone.utc) < limite:
-            estado = await self.transporte.consultar(sessao, id_remoto)
-            if estado is not Estado.RODANDO:
-                return estado
-            await asyncio.sleep(self.intervalo_polling)
-        raise TimeoutError(f"geracao {id_remoto} passou de {self.timeout_geracao}")
+        try:
+            while datetime.now(timezone.utc) < limite:
+                estado = await self.transporte.consultar(sessao, id_remoto)
+                # por VALOR, nao por identidade: `Estado` herda de `str, Enum`
+                self._anotar_fila(job, estado == Estado.NA_FILA)
+                if estado not in (Estado.RODANDO, Estado.NA_FILA):
+                    return estado
+                await asyncio.sleep(self.intervalo_polling)
+            raise TimeoutError(f"geracao {id_remoto} passou de {self.timeout_geracao}")
+        finally:
+            # sair da espera e sair da fila, por qualquer porta — inclusive a do
+            # timeout. Sem isto o campo ficaria ligado num job que ja terminou, e o
+            # painel anunciaria fila para sempre.
+            self._anotar_fila(job, False)
+
+    def _anotar_fila(self, job: Job, na_fila: bool) -> None:
+        """Liga e desliga o aviso de fila do Flow. So age na VIRADA.
+
+        Idempotente de proposito: `_esperar` chama isto a cada volta do polling, e
+        gravar sempre seria um UPDATE por segundo em cada job rodando.
+
+        O CAMPO e o agora e o EVENTO e o historico, e por isso os dois existem. O
+        campo zera quando a fila acaba — senao o painel mentiria — e o evento fica,
+        que e o que permite responder depois quanto tempo se esperou pelo Google.
+        """
+        if na_fila == (job.na_fila_desde is not None):
+            return
+        job.na_fila_desde = datetime.now(timezone.utc) if na_fila else None
+        self.repo.salvar_job(job)
+        if na_fila:
+            self.repo.registrar_evento(
+                job.id, job.conta_id, "na_fila_do_flow",
+                json.dumps({"id_remoto": job.id_remoto}))
 
     @staticmethod
     def _pedido(job: Job) -> Pedido:

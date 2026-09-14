@@ -449,7 +449,14 @@ function miniatura(j, grande = false) {
   return `<span class="${cls}"><img src="${esc(urlMidia(j.caminho))}" alt="" loading="lazy"></span>`;
 }
 
+// A fila do FlowPool (`pendente`) e a fila do FLOW sao coisas diferentes e o painel
+// dizia "gerando" para a segunda. Job com `na_fila_desde` ja foi despachado, ja tem
+// conta e ja gastou reserva — quem esta demorando e o Google, e e isso que a pilula
+// precisa dizer, ou a pessoa vai procurar defeito no lado errado.
 function pilulaEstado(j) {
+  if (j.estado === "rodando" && j.na_fila_desde) {
+    return `<span class="pilula rodando na-fila-flow" title="o Flow aceitou o pedido e ainda nao comecou a gerar — fila do Google, nao do FlowPool">na fila do Flow</span>`;
+  }
   return `<span class="pilula ${esc(j.estado)}">${esc(NOMES_ESTADO[j.estado] || j.estado)}</span>`;
 }
 

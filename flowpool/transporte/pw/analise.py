@@ -584,13 +584,26 @@ def indice_por_sufixo(rotulos, alvo: str) -> int:
 # 2 s, "15 leituras" caiu de 75 s para 30 s e toda imagem lenta virou "Flow devolveu
 # falhou" aos 36 s — a retomada a encontrava pronta 4 s depois (jobs 145-158,
 # 2026-09-06). O prazo tem que significar a mesma coisa em qualquer ritmo de leitura.
-SEM_PROGRESSO_S = 90.0
+# Quanto tempo um card pode ficar sem NENHUM sinal antes de ser dado por parado.
+#
+# ⚠️ ERA 90, E 90 ERA MENOR QUE O NORMAL. Medido em 2026-09-13, no mesmo lote: as
+# geracoes que deram certo levaram 51 s e 57 s do aceite ao download, e uma que estava
+# apenas ENFILEIRADA seguia sem sinal aos 91 s. O limite estava colado no tempo de
+# trabalho, entao bastava a fila do Flow engasgar para um video bom virar "falhou" —
+# com o usuario vendo o clipe ficar pronto na conta.
+#
+# Subir custa pouco: desistir tarde e so tempo de polling, e o teto de dez minutos do
+# orquestrador continua atras como rede. Desistir cedo mata geracao paga.
+SEM_PROGRESSO_S = 240.0
 
 
 def estado_do_card(falhou: bool, tem_porcentagem: bool, tem_midia: bool,
                    parado_ha_s: float | None,
-                   limite_s: float = SEM_PROGRESSO_S) -> str:
-    """O que um card e, dado o que se le nele. Devolve 'falhou' | 'rodando' | 'pronto'.
+                   limite_s: float = SEM_PROGRESSO_S,
+                   na_fila: bool = False) -> str:
+    """O que um card e, dado o que se le nele.
+
+    Devolve 'falhou' | 'rodando' | 'pronto' | 'na_fila'.
 
     A ORDEM E O CONTEUDO DA DECISAO. Porcentagem vem ANTES da midia: um card de video
     em andamento tem miniatura borrada (um <img>) e "8%" ao mesmo tempo — MEDIDO por
@@ -599,6 +612,20 @@ def estado_do_card(falhou: bool, tem_porcentagem: bool, tem_midia: bool,
 
     `parado_ha_s` e ha quanto tempo o card esta sem nenhum dos dois sinais (`None` =
     acabou de ficar assim). So passa de `limite_s` e que se desiste.
+
+    `na_fila` e o TERCEIRO sinal, e entrou depois de custar uma tarde: entre aceitar o
+    pedido e comecar a gerar, o Flow enfileira, e card enfileirado nao tem porcentagem
+    nem midia. Ele e o unico dos tres que diz "existe e ainda nem comecou", entao
+    enquanto ele estiver na tela nao ha prazo nenhum correndo. Vem DEPOIS de falha e
+    midia porque nao apaga nenhuma das duas: o Flow deixa o rotulo na tela mais tempo
+    do que a fila dura.
+
+    ⚠️ 'na_fila' E VEREDITO PROPRIO, E NAO UM APELIDO DE 'rodando'. Para a ESPERA os
+    dois sao a mesma coisa — segue esperando —, mas para quem PERGUNTA sao respostas
+    opostas: "o robo esta gerando" e "o Google ainda nem comecou". Enquanto os dois
+    voltavam como 'rodando', a demora do Flow chegava ao painel como demora do
+    FlowPool, e nao havia como saber de quem era a culpa depois. Quem so quer saber
+    se espera trata os dois junto; quem conta ao usuario, nao.
     """
     if falhou:
         return "falhou"
@@ -606,6 +633,8 @@ def estado_do_card(falhou: bool, tem_porcentagem: bool, tem_midia: bool,
         return "rodando"
     if tem_midia:
         return "pronto"
+    if na_fila:
+        return "na_fila"
     if parado_ha_s is not None and parado_ha_s >= limite_s:
         return "falhou"
     return "rodando"

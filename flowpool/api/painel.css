@@ -228,6 +228,8 @@ svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width:
 .pilula.pendente { color: var(--fg-2); }
 .pilula.rodando { color: var(--acento-forte); border-color: var(--acento-borda); background: var(--acento-fundo); }
 .pilula.rodando::before { animation: pulsa 1.4s ease-in-out infinite; }
+/* esperando o Google, nao gerando: mesma familia da pilula rodando, cor de espera */
+.pilula.rodando.na-fila-flow { color: var(--aviso); border-color: rgba(226, 165, 60, 0.35); background: var(--aviso-fundo); }
 .pilula.pronto { color: var(--ok); border-color: rgba(60, 207, 142, 0.3); background: var(--ok-fundo); }
 .pilula.falhou { color: var(--erro); border-color: rgba(239, 95, 95, 0.3); background: var(--erro-fundo); }
 .pilula.cancelado { color: var(--fg-3); }

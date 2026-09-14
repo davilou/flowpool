@@ -11,6 +11,7 @@ import pytest
 
 from flowpool.nucleo.tipos import Conta, Modelo, Modo, Tier
 from flowpool.transporte.base import (
+    CardTrocado,
     Estado,
     GeracaoFalhou,
     LimiteDeUso,
@@ -1581,17 +1582,29 @@ async def test_nem_card_nem_aviso_devolve_falso_no_teto():
 
 
 class _CardDaGrade:
-    """Um card da grade, com ou sem midia e com ou sem porcentagem."""
+    """Um card da grade, com ou sem midia, com ou sem porcentagem, de um TIPO."""
 
-    def __init__(self, midia=False, texto=""):
+    def __init__(self, midia=False, texto="", tipo=None, falha=False):
         self.midia = midia
         self.texto = texto
+        # "imagem" | "video" | None. None e o card que nao casa nenhum dos dois
+        # elementos de tipo — falha, ou tile ainda nascendo.
+        self.tipo = tipo
+        self.falha = falha
 
     def locator(self, seletor):
         return _LocatorContado(self, seletor)
 
     def quantos(self, seletor):
-        return 1 if (self.midia and seletor == sel.CARD_MIDIA) else 0
+        if seletor == sel.CARD_MIDIA:
+            return 1 if self.midia else 0
+        if seletor == sel.CARD_VIDEO:
+            return 1 if self.tipo == "video" else 0
+        if seletor == sel.CARD_IMAGEM:
+            return 1 if self.tipo == "imagem" else 0
+        if seletor in (sel.CARD_FALHA, sel.CARD_FALHA_TITULO):
+            return 1 if self.falha else 0
+        return 0
 
     async def inner_text(self, timeout=None):
         return self.texto
@@ -1679,6 +1692,115 @@ async def test_progresso_no_meio_zera_a_paciencia():
     assert await _consultar(t, vazio) is Estado.RODANDO
     agora[0] += 1
     assert await _consultar(t, vazio) is Estado.FALHOU
+
+
+# --- consultar NAO diz PRONTO para um card que nao e deste job -----------------
+
+
+def _com_modo(modo, card):
+    """Um transporte que ja sabe o modo daquele card, como depois de `gerar`."""
+    t = TransportePlaywright()
+    t._modo_do_card[(1, "card-0")] = modo
+    return t, card
+
+
+async def test_consultar_recusa_o_tile_de_imagem_num_job_de_video():
+    """⚠️ O DEFEITO QUE ESTE TESTE TRANCA — jobs 1114-1116 e 1120-1128, 2026-09-13.
+
+    Depois de a geracao sumir da grade, `card-0` (que e POSICAO) passou a apontar para
+    a imagem de referencia enviada. `consultar` exigia apenas um `<img>` dentro do
+    tile, achou, disse PRONTO, e so o menu do card — la no `baixar`, depois de abrir
+    navegador — descobriu que era imagem. O tipo esta no ELEMENTO do tile e da para
+    ler durante o polling.
+    """
+    t, card = _com_modo(Modo.INGREDIENTS2V,
+                        _CardDaGrade(midia=True, texto="um navio", tipo="imagem"))
+    with pytest.raises(CardTrocado, match="nao e o resultado deste job"):
+        await _consultar(t, card)
+
+
+async def test_consultar_recusa_o_tile_de_video_num_job_de_imagem():
+    t, card = _com_modo(Modo.IMAGEM,
+                        _CardDaGrade(midia=True, texto="um gato", tipo="video"))
+    with pytest.raises(CardTrocado):
+        await _consultar(t, card)
+
+
+async def test_consultar_aceita_o_tile_do_tipo_certo():
+    t, card = _com_modo(Modo.INGREDIENTS2V,
+                        _CardDaGrade(midia=True, texto="um navio", tipo="video"))
+    assert await _consultar(t, card) is Estado.PRONTO
+
+
+async def test_consultar_nao_recusa_quando_o_tile_nao_diz_o_tipo():
+    """"Nao sei" nao pode virar CardTrocado: seria matar geracao boa por um elemento
+    que o Google renomeou."""
+    t, card = _com_modo(Modo.INGREDIENTS2V,
+                        _CardDaGrade(midia=True, texto="um navio", tipo=None))
+    assert await _consultar(t, card) is Estado.PRONTO
+
+
+async def test_consultar_sem_modo_lembrado_nao_recusa_nada():
+    """Depois de um restart do servico `_modo_do_card` esta vazio. Sem o que comparar,
+    a conferencia se cala — quem decide entao e o menu, no `baixar`."""
+    t = TransportePlaywright()
+    card = _CardDaGrade(midia=True, texto="um navio", tipo="imagem")
+    assert await _consultar(t, card) is Estado.PRONTO
+
+
+async def test_video_ainda_gerando_nao_e_recusado_pelo_tipo():
+    """A conferencia mora no ponto em que se diria PRONTO, e nao na entrada.
+
+    Card em andamento pode nao ter elemento de tipo nenhum, ou ter uma miniatura
+    borrada; recusar ali transformaria "esta gerando" em "card trocado" e mataria o
+    job com o video a caminho.
+    """
+    t, card = _com_modo(Modo.INGREDIENTS2V,
+                        _CardDaGrade(midia=True, texto="8% um navio", tipo="imagem"))
+    assert await _consultar(t, card) is Estado.RODANDO
+
+
+async def test_o_relogio_do_card_anterior_nao_condena_o_proximo():
+    """⚠️ MEDIDO NO JOB 1133, conta 1, 2026-09-13 — as duas linhas no MESMO segundo:
+
+        [  24s] conta 1: o Flow aceitou: card-0
+        [  24s] conta 1: card-0: 113s sem midia e sem porcentagem — o card parou de
+                progredir.
+
+    `_parado` e indexado por `(conta, id_remoto)`, e `id_remoto` e a string `card-0`
+    tambem na geracao SEGUINTE. O ramo `grade.falhou` devolvia FALHOU sem soltar a
+    chave, entao o cronometro da tentativa anterior continuava correndo e matava um
+    card com zero segundo de vida — sem nem dar chance de ele sair da fila.
+    """
+    t = TransportePlaywright()
+    agora = [1000.0]
+    t._relogio = lambda: agora[0]
+    vazio = _CardDaGrade(midia=False, texto="um navio")
+
+    assert await _consultar(t, vazio) is Estado.RODANDO       # marca o inicio
+    agora[0] += analise.SEM_PROGRESSO_S
+    assert await _consultar(t, vazio) is Estado.FALHOU         # desiste desta geracao
+
+    # o Flow aceita uma geracao NOVA, que reusa a mesma posicao `card-0`
+    t.esquecer_card(1, "card-0")
+    assert await _consultar(t, vazio) is Estado.RODANDO, "o card novo nasce com prazo"
+    agora[0] += analise.SEM_PROGRESSO_S - 1
+    assert await _consultar(t, vazio) is Estado.RODANDO, "prazo inteiro, nao o resto"
+
+
+async def test_card_de_falha_tambem_solta_o_cronometro():
+    """O outro caminho de FALHOU — o card de falha na tela — soltava tudo menos o
+    cronometro, e era essa assimetria que vazava para a geracao seguinte."""
+    t = TransportePlaywright()
+    agora = [1000.0]
+    t._relogio = lambda: agora[0]
+    vazio = _CardDaGrade(midia=False, texto="um navio")
+    await _consultar(t, vazio)                                 # marca o inicio
+    agora[0] += 50
+
+    falho = _CardDaGrade(midia=False, texto="Falha", falha=True)
+    assert await _consultar(t, falho) is Estado.FALHOU
+    assert (1, "card-0") not in t._parado
 
 
 async def test_video_a_8_por_cento_com_miniatura_borrada_esta_rodando():
@@ -1877,8 +1999,40 @@ def test_card_de_falha_e_falha_antes_de_qualquer_outro_sinal():
 def test_card_sem_sinal_espera_por_tempo_e_nao_por_leituras():
     assert analise.estado_do_card(False, False, False, None) == "rodando"
     assert analise.estado_do_card(False, False, False, 35.0) == "rodando"   # 15 leituras de 2 s
-    assert analise.estado_do_card(False, False, False, 89.0) == "rodando"
-    assert analise.estado_do_card(False, False, False, 90.0) == "falhou"
+    assert analise.estado_do_card(False, False, False, analise.SEM_PROGRESSO_S - 1) == "rodando"
+    assert analise.estado_do_card(False, False, False, analise.SEM_PROGRESSO_S) == "falhou"
+
+
+def test_card_na_fila_nao_morre_por_mais_tempo_que_passe():
+    """⚠️ MEDIDO no log de passo, 2026-09-13 — o texto do card que foi dado por morto:
+
+        card-0: 91s sem midia e sem porcentagem — o card parou de progredir.
+        Texto: 'movie
+na fila
+the large container ship glides steadily...'
+
+    `na fila` e o Flow dizendo que a geracao existe e ainda NAO COMECOU. Card
+    enfileirado nao tem porcentagem nem midia — os dois unicos sinais que esta funcao
+    conhecia —, entao a paciencia acabava enquanto o video esperava a vez. O usuario
+    abria a conta, via o video sendo gerado, e o painel dizia que tinha falhado.
+    """
+    assert analise.estado_do_card(False, False, False, 10_000.0, na_fila=True) == "na_fila"
+
+
+def test_a_fila_e_veredito_proprio_e_nao_apelido_de_rodando():
+    """Os dois esperam igual, e e por isso que davam na mesma no comeco. Mas so um
+    deles diz "o Google ainda nem comecou", e sem essa distincao a demora do Flow
+    chegava ao painel como demora do FlowPool."""
+    assert analise.estado_do_card(False, True, False, None, na_fila=True) == "rodando"
+    assert analise.estado_do_card(False, False, False, 1.0) == "rodando"
+    assert analise.estado_do_card(False, False, False, 1.0, na_fila=True) == "na_fila"
+
+
+def test_a_fila_nao_apaga_uma_falha_nem_uma_midia_pronta():
+    """A ordem dos sinais nao muda: falha decide primeiro, e midia continua sendo
+    PRONTO. `na_fila` so responde por quem nao tem nenhum dos outros."""
+    assert analise.estado_do_card(True, False, False, None, na_fila=True) == "falhou"
+    assert analise.estado_do_card(False, False, True, 0.0, na_fila=True) == "pronto"
 
 
 # --- teto de 24 tiles: a contagem satura e deixa de ser sinal -----------------
@@ -2260,3 +2414,75 @@ async def test_consultar_nao_fotografa_troca_de_conta():
         await t.consultar(_SessaoFake(), "card-0")
 
     assert tirou == []
+
+
+# --- navegador aberto que ninguem fecha: a janela orfa ------------------------
+
+
+class _CtxDaAbertura:
+    def __init__(self, pagina):
+        self.pages = [pagina]
+        self.fechado = False
+
+    async def close(self):
+        self.fechado = True
+
+    async def new_page(self):
+        return self.pages[0]
+
+
+class _PwDaAbertura:
+    def __init__(self):
+        self.parado = False
+
+    async def stop(self):
+        self.parado = True
+
+
+class _PaginaQueNaoNavega:
+    url = "about:blank"
+
+    def __init__(self, erro):
+        self.erro = erro
+
+    async def goto(self, *a, **kw):
+        raise self.erro
+
+    def is_closed(self):
+        return False
+
+
+def _conta_pw():
+    return Conta(id=1, email="a@b.com", tier=Tier.FREE, perfil="p/1")
+
+
+async def test_navegador_fecha_quando_a_navegacao_falha(monkeypatch, tmp_path):
+    """⚠️ A JANELA ORFA, E ELA TRAVA A CONTA INTEIRA — MEDIDO no banco, 2026-09-10.
+
+    `abrir_contexto` sobe o Chrome; so DEPOIS vem o `goto`. O `try` daqui comecava
+    abaixo dele, entao um `Page.goto: net::ERR_TUNNEL_CONNECTION_FAILED` (proxy fora
+    do ar) levantava com o navegador DE PE e sem ninguem segurando a referencia: ele
+    nao esta em `_guardadas`, entao `_fechar_ociosas` nunca o ve, e `encerrar_todas`
+    tampouco. A janela fica na tela para sempre.
+
+    E o estrago nao para na janela. Ela segura o `--user-data-dir`, e todo job
+    seguinte daquela conta morre em `launch_persistent_context: Target page, context
+    or browser has been closed` — que foi exatamente a cascata das contas 4, 6 e 7 em
+    2026-09-10 18:26-18:28.
+
+    `validar_perfil`, a irma desta funcao, sempre teve o `finally` certo.
+    """
+    ctx = _CtxDaAbertura(_PaginaQueNaoNavega(RuntimeError("net::ERR_TUNNEL_CONNECTION_FAILED")))
+    pw = _PwDaAbertura()
+
+    async def _abrir(perfil, proxy=None):
+        return pw, ctx
+
+    monkeypatch.setattr(
+        "flowpool.transporte.pw.transporte.abrir_contexto", _abrir)
+
+    with pytest.raises(RuntimeError, match="TUNNEL"):
+        await TransportePlaywright().abrir_sessao(_conta_pw())
+
+    assert ctx.fechado, "o Chrome ficaria aberto segurando o perfil da conta"
+    assert pw.parado, "e o driver do Playwright junto"

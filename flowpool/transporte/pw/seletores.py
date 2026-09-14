@@ -465,6 +465,20 @@ RODAPE_TILE = "flow-tile-hover-footer"
 CARD_MIDIA = "img, video"
 PADRAO_PORCENTAGEM = r"(\d{1,3})\s*%"
 
+# ⚠️ O TERCEIRO ESTADO, e ele custou uma tarde. MEDIDO 2026-09-13 no log de passo, no
+# texto de um card que o app tinha acabado de dar por morto:
+#
+#     ['movie', 'na fila', 'the large container ship glides steadily across...']
+#
+# Entre aceitar o pedido e começar a gerar, o Flow ENFILEIRA. Card enfileirado não tem
+# porcentagem e não tem mídia — os dois únicos sinais que `estado_do_card` conhecia —,
+# então ele era indistinguível de um card travado e morria em `SEM_PROGRESSO_S`. O
+# usuário abria a conta, via o vídeo sendo gerado, e o painel dizia que falhou.
+#
+# `na fila` é o texto MEDIDO; `in queue`/`queued` entram pelo mesmo motivo que em
+# `CARD_LIMITE_DE_USO` — o rótulo vem do i18n do Google e um deploy pode trocá-lo.
+PADRAO_NA_FILA = r"(?i)\bna fila\b|\bin queue\b|\bqueued\b"
+
 # O ID DO RESULTADO MUDOU DE FORMA. A aplicação antiga trazia
 # `...getMediaUrlRedirect?name=<uuid>`; a nova traz o conteúdo noutro domínio:
 #

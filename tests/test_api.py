@@ -1188,3 +1188,24 @@ def test_conta_nunca_conferida_vem_com_ip_nulo(cliente):
     repo.criar_conta("a@b.com", Tier.FREE, "p/1")
     linha = c.get("/contas").json()[0]
     assert linha["ip_saida"] is None and linha["ip_lido_em"] is None
+
+
+def test_resposta_do_job_leva_na_fila_desde_ate_o_painel(cliente):
+    """Sem este campo na resposta, o painel mostra "gerando" tanto para o robo gerando
+    quanto para o Google segurando o pedido — e a pessoa vai procurar defeito no lado
+    errado. `pendente` continua sendo a fila do FLOWPOOL; esta e a do FLOW."""
+    c, repo = cliente
+    r = c.post("/jobs", json={"modo": "t2v", "modelo": "veo-fast", "prompt": "uma gata",
+                              "produto": "Video Roupa", "nome": "c1"})
+    jid = r.json()["id"]
+    assert r.json()["na_fila_desde"] is None
+
+    j = repo.job(jid)
+    j.estado = EstadoJob.RODANDO
+    j.na_fila_desde = datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
+    repo.salvar_job(j)
+
+    corpo = c.get(f"/jobs/{jid}").json()
+    assert corpo["estado"] == "rodando"
+    assert corpo["na_fila_desde"].startswith("2026-09-14T12:00:00")
+    assert c.get("/jobs").json()[0]["na_fila_desde"] == corpo["na_fila_desde"]

@@ -365,3 +365,46 @@ def test_banco_antigo_ganha_as_colunas_sem_perder_conta(tmp_path):
     c.ip_saida = "203.0.113.7"
     r.salvar_conta(c)
     assert r.contas()[0].ip_saida == "203.0.113.7"
+
+
+def test_na_fila_desde_atravessa_o_banco_em_utc(repo):
+    """Mesma regra de `reavaliar_em`: data no banco vai em UTC. Aqui ela e lida de
+    volta para o painel dizer ha quanto tempo o Flow esta segurando o job — com dois
+    offsets diferentes a conta de "ha quanto tempo" sai errada sem erro nenhum."""
+    outro_fuso = timezone(timedelta(hours=-3))
+    j = Job(id=0, modo=Modo.T2V, modelo=Modelo.VEO_FAST, prompt="p", destino="d", nome="n")
+    jid = repo.criar_job(j)
+
+    j = repo.job(jid)
+    assert j.na_fila_desde is None          # nasce fora da fila do Flow
+    j.na_fila_desde = datetime(2026, 9, 14, 9, 0, tzinfo=outro_fuso)   # 12:00 UTC
+    repo.salvar_job(j)
+
+    cru = repo.con.execute("SELECT na_fila_desde FROM job WHERE id=?", (jid,)).fetchone()[0]
+    assert cru == "2026-09-14T12:00:00+00:00"
+    assert repo.job(jid).na_fila_desde == datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
+
+    # e volta a None quando a fila acaba: o campo e o AGORA, nao o historico
+    j.na_fila_desde = None
+    repo.salvar_job(j)
+    assert repo.job(jid).na_fila_desde is None
+
+
+def test_migracao_acrescenta_na_fila_desde_em_banco_antigo(tmp_path):
+    """⚠️ `CREATE TABLE IF NOT EXISTS` nao acrescenta coluna em tabela que ja existe.
+    O banco em producao tem mais de mil jobs: sem a migracao, `_job` estouraria com
+    KeyError na primeira listagem do painel."""
+    caminho = tmp_path / "antigo.db"
+    r = Repo(caminho)
+    r.criar_esquema()
+    r.con.execute("ALTER TABLE job DROP COLUMN na_fila_desde")
+    r.con.commit()
+    jid = r.criar_job(Job(id=0, modo=Modo.T2V, modelo=Modelo.VEO_FAST, prompt="p",
+                          destino="d", nome="n"))
+    r.close()
+
+    reaberto = Repo(caminho)
+    reaberto.criar_esquema()
+    lido = reaberto.job(jid)
+    assert lido is not None
+    assert lido.na_fila_desde is None

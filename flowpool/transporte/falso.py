@@ -25,6 +25,9 @@ class TransporteFalso:
     - `morre_ao_gerar`: `gerar` levanta `SessaoMorta` (o Chrome caiu no meio).
     - `falha_em`: a geracao e aceita e volta `FALHOU`.
     - `passos_rodando`: as N primeiras consultas de cada geracao voltam `RODANDO`.
+    - `passos_na_fila`: e as N PRIMEIRAS DE TODAS voltam `NA_FILA` — o Flow aceitou o
+      pedido e ainda nem comecou. Vem antes de `passos_rodando` porque e essa a ordem
+      real: enfileira, depois gera.
     - `nunca_termina`: a geracao fica `RODANDO` para sempre, para exercitar timeout.
     - `projetos`: nomes de projeto que ja existem em cada conta, como se tivessem sido
       criados na mao pelo site. E o que exercita a adocao.
@@ -32,7 +35,8 @@ class TransporteFalso:
 
     def __init__(self, saldos: dict[int, int], mortas: set[int] | None = None,
                  falha_em: set[int] | None = None, latencia: float = 0.0,
-                 passos_rodando: int = 0, nunca_termina: set[int] | None = None,
+                 passos_rodando: int = 0, passos_na_fila: int = 0,
+                 nunca_termina: set[int] | None = None,
                  morre_ao_gerar: set[int] | None = None,
                  projetos: dict[int, list[str]] | None = None) -> None:
         self.saldos = dict(saldos)
@@ -40,6 +44,7 @@ class TransporteFalso:
         self.falha_em = falha_em or set()
         self.latencia = latencia
         self.passos_rodando = passos_rodando
+        self.passos_na_fila = passos_na_fila
         self.nunca_termina = nunca_termina or set()
         self.morre_ao_gerar = morre_ao_gerar or set()
         # quantas sessoes foram abertas. E o contador que denuncia navegador aberto
@@ -140,9 +145,13 @@ class TransporteFalso:
         _, final = self.geracoes[id_remoto]
         vistas = self.consultas[id_remoto]
         self.consultas[id_remoto] = vistas + 1
+        # a fila do Flow vem ANTES de qualquer trabalho, inclusive antes de uma
+        # geracao que nunca termina: enfileirar e o passo que precede gerar
+        if vistas < self.passos_na_fila:
+            return Estado.NA_FILA
         if final is Estado.RODANDO:
             return Estado.RODANDO
-        return Estado.RODANDO if vistas < self.passos_rodando else final
+        return Estado.RODANDO if vistas < self.passos_na_fila + self.passos_rodando else final
 
     async def baixar(self, s: Sessao, id_remoto: str, destino: Path) -> Path:
         destino.parent.mkdir(parents=True, exist_ok=True)
