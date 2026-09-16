@@ -1554,7 +1554,8 @@ class TransportePlaywright:
                 raise LimiteDeUso(
                     f"conta {s.conta.email}: o Flow recusou por {porque} "
                     f"(sem cobranca por esta geracao; o saldo continua valendo)",
-                    motivo="atividade_incomum" if antiabuso else "limite_de_uso")
+                    motivo=(LimiteDeUso.MOTIVO_ANTIABUSO if antiabuso
+                            else LimiteDeUso.MOTIVO_COTA))
 
             vezes = self._repeticoes.get((s.conta.id, id_remoto), 0)
             # CONFERIR o botao antes de mirar nele. O card de falha tem tres botoes em

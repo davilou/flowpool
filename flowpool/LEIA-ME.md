@@ -183,6 +183,35 @@ Proxy **com usuário e senha não funciona no cadastro** — o `chrome.exe` abre
 de autenticação que trava tudo sem mensagem. Use proxy autorizado por IP ou um
 retransmissor local sem senha.
 
+### Fuga: a conta recusada por antiabuso sai por outro IP
+
+Quando o Flow recusa com "Notamos uma atividade incomum" (sem cobrar), a conta **não
+descansa uma hora**: ela entra em *fuga*, e o próximo job dela sobe o Chrome pelo
+proxy de fuga. Se for recusada de novo em fuga, aí sim descansa. Recusa por **limite
+de uso** (cota) não entra em fuga — outro IP não resolve cota. A fuga dura até o
+serviço reiniciar; depois a conta volta ao seu IP.
+
+| variável | padrão | para quê |
+|---|---|---|
+| `FLOWPOOL_PROXY_FUGA` | vazia (sem fuga) | URL `http`, `https`, `socks5` ou `socks5h` por onde a conta em fuga sai. URL inválida derruba a subida do serviço |
+
+O proxy gratuito medido (2026-09-16) é o **Cloudflare WARP em modo proxy**: instala com
+`winget install Cloudflare.Warp`, e depois:
+
+```bash
+warp-cli --accept-tos registration new
+warp-cli --accept-tos mode proxy
+warp-cli --accept-tos connect
+```
+
+Isso abre um SOCKS5 em `127.0.0.1:40000` **só para quem apontar para ele** — a máquina
+continua no IP de casa. `FLOWPOOL_PROXY_FUGA=socks5://127.0.0.1:40000`. O IP de saída
+muda a cada `disconnect`/`connect`, sempre dentro da faixa da Cloudflare. A extensão de
+VPN do Chrome **não serve** ao robô: o Playwright sobe com `--disable-extensions`.
+
+No histórico, a fuga aparece como evento `conta_em_fuga`, logo antes do
+`conta_no_limite` da recusa que a causou.
+
 ## API
 
 Documentação interativa em **http://127.0.0.1:8777/docs**.

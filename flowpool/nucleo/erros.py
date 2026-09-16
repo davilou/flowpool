@@ -55,6 +55,12 @@ class LimiteDeUso(Exception):
     """
 
     MOTIVO_DESCONHECIDO = "desconhecido"
+    # Os dois motivos MEDIDOS. Sao constantes, e nao literais no transporte, porque
+    # o motor DECIDE por eles desde 2026-09-16: antiabuso manda a conta sair por outro
+    # IP (fuga), cota manda esperar o reset. Um literal digitado diferente nos dois
+    # lados faria a fuga nunca acontecer, sem erro nenhum.
+    MOTIVO_ANTIABUSO = "atividade_incomum"
+    MOTIVO_COTA = "limite_de_uso"
 
     def __init__(self, mensagem: str, motivo: str = MOTIVO_DESCONHECIDO) -> None:
         super().__init__(mensagem)

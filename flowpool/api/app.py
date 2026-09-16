@@ -33,9 +33,9 @@ from flowpool.transporte.base import FlowTransport
 def criar_app(repo: Repo, transporte: FlowTransport, raiz: Path | str,
               rodar_motor: bool = False,
               max_simultaneos: int = MAX_SIMULTANEOS,
-              diagnosticador=None) -> FastAPI:
+              diagnosticador=None, proxy_fuga: str | None = None) -> FastAPI:
     orq = Orquestrador(repo, transporte, raiz, max_simultaneos=max_simultaneos,
-                       diagnosticador=diagnosticador)
+                       diagnosticador=diagnosticador, proxy_fuga=proxy_fuga)
 
     @asynccontextmanager
     async def ciclo(app: FastAPI):

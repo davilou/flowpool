@@ -17,7 +17,8 @@ from flowpool.api.app import criar_app
 from flowpool.dados.repo import Repo
 from flowpool.motor.diagnostico import DiagnosticadorLocal
 from flowpool.motor.diagnostico import ligado as diagnostico_ligado
-from flowpool.motor.orquestrador import teto_do_ambiente
+from flowpool.motor.orquestrador import proxy_de_fuga_do_ambiente, teto_do_ambiente
+from flowpool.nucleo.proxy import mascarar
 from flowpool.transporte.pw.cura import ligar_no_banco
 from flowpool.transporte.pw.transporte import TransportePlaywright
 
@@ -66,11 +67,15 @@ def main() -> None:
     # job que falha de vez recebe um diagnostico do modelo de visao local, em segundo
     # plano — o mesmo llama.cpp da auto-cura. `FLOWPOOL_DIAGNOSTICO=0` desliga.
     diagnosticador = DiagnosticadorLocal() if diagnostico_ligado() else None
+    # Conta recusada por antiabuso sai por este proxy em vez de descansar uma hora.
+    # `FLOWPOOL_PROXY_FUGA` invalida derruba AQUI, com o Chrome ainda fechado.
+    proxy_fuga = proxy_de_fuga_do_ambiente()
     app = criar_app(repo=repo, transporte=transporte, raiz=RAIZ,
                     rodar_motor=True, max_simultaneos=MAX_SIMULTANEOS,
-                    diagnosticador=diagnosticador)
+                    diagnosticador=diagnosticador, proxy_fuga=proxy_fuga)
     print(f"FlowPool no ar. Painel: http://127.0.0.1:{PORTA}/"
-          + (f" | diagnostico: {diagnosticador.modelo}" if diagnosticador else ""))
+          + (f" | diagnostico: {diagnosticador.modelo}" if diagnosticador else "")
+          + (f" | fuga: {mascarar(proxy_fuga)}" if proxy_fuga else ""))
     uvicorn.run(app, host="127.0.0.1", port=PORTA)
 
 
