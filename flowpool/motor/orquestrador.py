@@ -8,7 +8,6 @@ import os
 import random
 import time
 from contextlib import suppress
-from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -16,7 +15,6 @@ from flowpool.dados.repo import Repo
 from flowpool.motor import diagnostico
 from flowpool.nucleo.credito import LIMIAR_DIVERGENCIA, liberar, reconciliar, reservar
 from flowpool.nucleo.escolha import apta, escolher
-from flowpool.nucleo.proxy import analisar, mascarar
 from flowpool.nucleo.tipos import Conta, EstadoJob, Job, Modo, SaudeSessao
 from flowpool.transporte.base import (
     CardTrocado,
@@ -138,25 +136,6 @@ def teto_do_ambiente(padrao: int = MAX_SIMULTANEOS) -> int:
         return padrao
 
 
-def proxy_de_fuga_do_ambiente() -> str | None:
-    """Le `FLOWPOOL_PROXY_FUGA`: por onde a conta recusada por antiabuso sai.
-
-    Vazia e o normal: sem fuga, a recusa descansa a conta uma hora, como sempre.
-    Ao contrario de `teto_do_ambiente`, URL invalida DERRUBA a subida
-    (`ProxyInvalido`): um teto errado se percebe no painel, um proxy errado so se
-    perceberia na primeira recusa — horas depois, com a fila parada e o Chrome
-    abrindo pelo IP errado sem dizer nada.
-
-    MEDIDO 2026-09-16: `socks5://127.0.0.1:40000` e o Cloudflare WARP em modo proxy
-    (`warp-cli mode proxy`), gratuito; o IP de saida trocou a cada reconexao.
-    """
-    bruto = os.environ.get("FLOWPOOL_PROXY_FUGA", "").strip()
-    if not bruto:
-        return None
-    analisar(bruto)   # levanta ProxyInvalido; o valor traduzido nao interessa aqui
-    return bruto
-
-
 def _extensao(modo: Modo) -> str:
     return ".png" if modo is Modo.IMAGEM else ".mp4"
 
@@ -183,18 +162,10 @@ class Orquestrador:
                  timeout_geracao: timedelta = TIMEOUT_GERACAO,
                  intervalo_polling: float = INTERVALO_POLLING,
                  espaco_entre_despachos: float = ESPACO_ENTRE_DESPACHOS,
-                 diagnosticador: diagnostico.Diagnosticador | None = None,
-                 proxy_fuga: str | None = None) -> None:
+                 diagnosticador: diagnostico.Diagnosticador | None = None) -> None:
         self.repo = repo
         self.transporte = transporte
         self.raiz = Path(raiz)
-        # Por onde sai a conta recusada por ANTIABUSO (ver `_ao_bater_limite`). None =
-        # sem fuga, a conta descansa. `_em_fuga` e memoria de processo de proposito:
-        # reiniciou, a conta volta ao IP de casa e, se for recusada, entra em fuga de
-        # novo ao custo de uma recusa sem cobranca. Coluna no banco seria mais um
-        # estado para o painel explicar, por um dado que se recupera sozinho.
-        self.proxy_fuga = proxy_fuga
-        self._em_fuga: set[int] = set()
         # Quem explica um job que falhou de vez (`motor/diagnostico.py`). `None` = sem
         # diagnostico, que e o padrao DE PROPOSITO: quem liga e o `__main__`, com o
         # modelo local; um teste que falha um job nao pode sair batendo em HTTP.
@@ -268,12 +239,6 @@ class Orquestrador:
         que morreu": o navegador pode ter caido sozinho, e a pagina fechada so seria
         descoberta no primeiro clique, como um erro de sequencia que nao e.
         """
-        # A conta em FUGA sai pelo proxy de fuga, e nao pelo seu. E uma copia: o
-        # `proxy` da conta no banco continua sendo o dela, e e ele que volta quando o
-        # processo reinicia. O transporte nao sabe que fuga existe — recebe uma conta
-        # com proxy, como qualquer outra.
-        if conta.id in self._em_fuga and self.proxy_fuga:
-            conta = replace(conta, proxy=self.proxy_fuga)
         guardada = self._guardadas.pop(conta.id, None)
         if guardada is not None:
             sessao, _ = guardada
@@ -285,12 +250,8 @@ class Orquestrador:
             #
             # Falhar ao renovar e a mesma descoberta que `viva` False, um passo
             # depois: o navegador guardado nao serve. Fecha e abre outro.
-            #
-            # E a sessao so serve se saiu pelo IP CERTO. A recusa por antiabuso
-            # acontece com o Chrome de casa aberto e saudavel, e `_encerrar_ciclo` o
-            # guarda; reusa-lo na fuga sairia pelo mesmo IP recem-recusado, sem erro.
             try:
-                if sessao.conta.proxy == conta.proxy and await self.transporte.viva(sessao):
+                if await self.transporte.viva(sessao):
                     await self.transporte.renovar(sessao)
                     return sessao
             except Exception as e:
@@ -521,13 +482,7 @@ class Orquestrador:
         cheio = escolher(contas, job.modelo, agora, job.quantidade,
                          job.duracao) is not None
         job.estado = EstadoJob.PENDENTE
-        # ⚠️ "NINGUEM SERVE" ESPERA A PRIMEIRA CONTA VOLTAR, NAO UMA HORA FIXA.
-        # MEDIDO 2026-09-16: o job 1654 foi adiado para 22:11 com as contas 7, 8, 9 e
-        # 2 saindo do descanso as 21:45 — 25 min de fila parada por leva.
-        # `_quando_reavaliar` ja calculava o instante certo para o caminho da recusa;
-        # o despacho e que ficou com a hora fixa da primeira versao.
-        job.reavaliar_em = (agora + ESPERA_JANELA if cheio
-                            else self._quando_reavaliar(job, agora))
+        job.reavaliar_em = agora + (ESPERA_JANELA if cheio else ESPERA_RESET)
         self.repo.salvar_job(job)
         self.repo.registrar_evento(
             job.id, None, "sem_conta_livre" if cheio else "sem_conta_apta")
@@ -1026,19 +981,11 @@ class Orquestrador:
         # `_estornar`. O `salvar_conta` logo abaixo grava o saldo devolvido junto
         # com o `limite_ate`.
         self._estornar(job, conta, sem_cobranca=True)
-        em_fuga = self._entrar_em_fuga(job, conta, e)
-        if em_fuga:
-            # A conta NAO descansa: continua apta, continua a de maior saldo, e o
-            # proximo despacho a escolhe de novo — agora saindo pelo proxy de fuga
-            # (`_obter_sessao`). O resto do tratamento e igual: estorno feito acima,
-            # job solto abaixo.
-            self.repo.salvar_conta(conta)
-        else:
-            # ⚠️ `limite_ate`, NAO `seca_ate`. `seca_ate` e sobre credito e libera de
-            # proposito o que e de graca — com ele, `apta` seguia devolvendo True para
-            # imagem e o motor reescolhia a conta que acabara de recusar.
-            conta.limite_ate = datetime.now(timezone.utc) + ESPERA_RESET
-            self.repo.salvar_conta(conta)
+        # ⚠️ `limite_ate`, NAO `seca_ate`. `seca_ate` e sobre credito e libera de
+        # proposito o que e de graca — com ele, `apta` seguia devolvendo True para
+        # imagem e o motor reescolhia a conta que acabara de recusar.
+        conta.limite_ate = datetime.now(timezone.utc) + ESPERA_RESET
+        self.repo.salvar_conta(conta)
 
         # ⚠️ QUEM DESCANSA E A CONTA, NAO O JOB. A primeira versao disto copiou o
         # `job.reavaliar_em = conta.seca_ate` do saldo e ESTACIONOU O JOB POR UMA
@@ -1046,13 +993,7 @@ class Orquestrador:
         # parado enquanto as contas 3 e 5 estavam com saldo 50 e sem descanso.
         # `reivindicar` so pega job com `reavaliar_em` nulo ou vencido, e a escolha
         # de conta ja pula quem tem `seca_ate` no futuro: marcar a conta basta.
-        #
-        # Em FUGA o job volta SEM prazo: a conta que acabou de recusar e a que vai
-        # tentar de novo, pelo outro IP. `_quando_reavaliar` nao serve aqui — ela
-        # ainda ve esta conta em `_ocupadas` (o ciclo nao terminou) e, sem `limite_ate`
-        # para apontar, cairia na hora fixa.
-        job.reavaliar_em = (None if em_fuga else
-                            self._quando_reavaliar(job, datetime.now(timezone.utc)))
+        job.reavaliar_em = self._quando_reavaliar(job, datetime.now(timezone.utc))
 
         # ⚠️ E SOLTA A CONTA E O CARD. `_devolver` preserva `conta_id` sempre que
         # `id_remoto` esta preenchido, porque isso normalmente significa "existe
@@ -1070,26 +1011,6 @@ class Orquestrador:
         self._evento_de_falha(job, conta, "conta_no_limite", {"motivo": e.motivo})
         self._devolver(job, str(e), gasta_tentativa=False,
                        falha=sessao.falha if sessao else None)
-
-    def _entrar_em_fuga(self, job: Job, conta: Conta, e: LimiteDeUso) -> bool:
-        """Se esta recusa manda a conta sair por outro IP em vez de descansar.
-
-        So o ANTIABUSO: cota nao passa trocando de IP, e a conta ja em fuga que e
-        recusada de novo mostrou que o IP nao era o problema — descansa. Sem proxy de
-        fuga configurado, nada muda.
-
-        MEDIDO 2026-09-16 20:45 UTC: contas 7, 8, 9 e 2 recusadas em sequencia, uma
-        a cada 5 s, todas pelo IP de casa; o Davi destravou uma na mao trocando de IP
-        e gerou. O motor faz o mesmo, e este metodo e a medicao limpa daquilo: robo,
-        mesma cadencia, so o IP muda.
-        """
-        if (not self.proxy_fuga or e.motivo != LimiteDeUso.MOTIVO_ANTIABUSO
-                or conta.id in self._em_fuga):
-            return False
-        self._em_fuga.add(conta.id)
-        self.repo.registrar_evento(job.id, conta.id, "conta_em_fuga",
-                                   json.dumps({"proxy": mascarar(self.proxy_fuga)}))
-        return True
 
     def _ao_secar(self, job: Job, conta: Conta, sessao, e: Exception) -> None:
         """Nao ha credito para este pedido. A conta seca com prazo, o job volta."""

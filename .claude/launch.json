@@ -1,17 +1,11 @@
-﻿{
-    "version":  "0.0.1",
-    "configurations":  [
-                           {
-                               "name":  "flowpool",
-                               "runtimeExecutable":  ".venv/Scripts/python.exe",
-                               "runtimeArgs":  [
-                                                   "-m",
-                                                   "flowpool"
-                                               ],
-                               "port":  8777,
-                               "env":  {
-                                           "FLOWPOOL_PROXY_FUGA":  "socks5://127.0.0.1:40000"
-                                       }
-                           }
-                       ]
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "flowpool",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeArgs": ["-m", "flowpool"],
+      "port": 8777
+    }
+  ]
 }
