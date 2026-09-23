@@ -1927,3 +1927,86 @@ async def test_job_na_fila_do_flow_ja_tem_conta_e_nao_e_job_pendente(repo, tmp_p
     despacho = next(e for e in ev if e["tipo"] == "despachado")
     # o despacho vem ANTES: quando o Flow enfileira, o FlowPool ja fez a parte dele
     assert despacho["id"] < fila["id"]
+
+
+# --- card falho declarado pelo Flow: gera de novo, em OUTRA conta -------------
+# RELATADO 2026-09-23, jobs 2443/2445/2446/2447: o card dizia "Nao foi possivel gerar
+# o video", o Flow nao cobrou, e o job voltava a fila com `id_remoto` guardado. A
+# retomada na mesma conta achava a referencia no lugar do card morto e terminava em
+# CardTrocado — uma mensagem que escondia a recusa. Pedido do Davi: gerar de novo, em
+# outra conta.
+
+
+def _conta_com_saldo(repo, email, saldo, perfil):
+    cid = repo.criar_conta(email, Tier.FREE, perfil)
+    c = repo.conta(cid)
+    c.saldo = saldo
+    c.saldo_confiavel = True
+    c.saldo_lido_em = datetime.now(timezone.utc)
+    repo.salvar_conta(c)
+    return cid
+
+
+async def test_card_falho_gera_de_novo_em_outra_conta_sem_retomar(repo, tmp_path):
+    recusa = _conta_com_saldo(repo, "a@b.com", 500, "p/1")   # maior saldo: vai primeiro
+    boa = _conta_com_saldo(repo, "b@b.com", 400, "p/2")
+    jid = repo.criar_job(job_fast())
+
+    t = TransporteFalso(saldos={recusa: 500, boa: 400}, card_falho_em={recusa})
+    orq = Orquestrador(repo, t, raiz=tmp_path)
+    for _ in range(3):
+        await ciclo(orq)
+        if repo.job(jid).estado is EstadoJob.PRONTO:
+            break
+
+    j = repo.job(jid)
+    assert j.estado is EstadoJob.PRONTO
+    assert j.conta_id == boa
+    despachos = sorted((e for e in repo.eventos() if e["tipo"] == "despachado"),
+                       key=lambda e: e["id"])
+    # a que recusou continua com o MAIOR saldo — o Flow nao cobrou —, e sem a trava
+    # seria escolhida de novo
+    assert [e["conta_id"] for e in despachos] == [recusa, boa]
+    assert not any(json.loads(e["payload"])["retomada"] for e in despachos)
+    ev = next(e for e in repo.eventos() if e["tipo"] == "card_falhou")
+    assert "Nao foi possivel gerar o video" in json.loads(ev["payload"])["erro"]
+
+
+async def test_card_falho_numa_conta_so_desiste_com_o_texto_do_flow(repo, tmp_path):
+    cid = _conta_com_saldo(repo, "a@b.com", 500, "p/1")
+    jid = repo.criar_job(job_fast())
+
+    t = TransporteFalso(saldos={cid: 500}, card_falho_em={cid})
+    orq = Orquestrador(repo, t, raiz=tmp_path)
+    for _ in range(MAX_TENTATIVAS):
+        await ciclo(orq)
+
+    j = repo.job(jid)
+    assert j.estado is EstadoJob.FALHOU
+    assert "Nao foi possivel gerar o video" in j.erro
+    assert "CardTrocado" not in j.erro
+    # nao cobrado, e nada estornado a mais: a reconciliacao adota o saldo lido
+    assert repo.conta(cid).saldo == 500
+
+
+def test_depois_do_card_falho_espera_outra_conta_ocupada(repo, tmp_path):
+    recusa = _conta_com_saldo(repo, "a@b.com", 500, "p/1")
+    boa = _conta_com_saldo(repo, "b@b.com", 400, "p/2")
+    job = repo.job(repo.criar_job(job_fast()))
+    orq = Orquestrador(repo, TransporteFalso(saldos={}), raiz=tmp_path)
+    orq._evitar[job.id] = {recusa}
+    orq._ocupadas.add(boa)
+
+    assert orq._conta_para(job, datetime.now(timezone.utc)) is None
+
+
+def test_depois_do_card_falho_sem_outra_apta_volta_na_mesma(repo, tmp_path):
+    # pool de uma conta so nao pode travar: sem nenhuma OUTRA apta, a que recusou serve
+    recusa = _conta_com_saldo(repo, "a@b.com", 500, "p/1")
+    _conta_com_saldo(repo, "b@b.com", 0, "p/2")
+    job = repo.job(repo.criar_job(job_fast()))
+    orq = Orquestrador(repo, TransporteFalso(saldos={}), raiz=tmp_path)
+    orq._evitar[job.id] = {recusa}
+
+    escolhida = orq._conta_para(job, datetime.now(timezone.utc))
+    assert escolhida is not None and escolhida.id == recusa

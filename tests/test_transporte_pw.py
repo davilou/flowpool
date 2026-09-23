@@ -11,6 +11,7 @@ import pytest
 
 from flowpool.nucleo.tipos import Conta, Modelo, Modo, Tier
 from flowpool.transporte.base import (
+    CardFalhou,
     CardTrocado,
     Estado,
     GeracaoFalhou,
@@ -1799,8 +1800,33 @@ async def test_card_de_falha_tambem_solta_o_cronometro():
     agora[0] += 50
 
     falho = _CardDaGrade(midia=False, texto="Falha", falha=True)
-    assert await _consultar(t, falho) is Estado.FALHOU
+    with pytest.raises(CardFalhou):
+        await _consultar(t, falho)
     assert (1, "card-0") not in t._parado
+
+
+async def test_card_de_falha_do_flow_levanta_card_falhou_com_o_texto_do_card():
+    # RELATADO 2026-09-23, jobs 2443/2445/2446/2447: o card dizia "Nao foi possivel
+    # gerar o video", o erro gravado era so "Flow devolveu falhou", e a retomada
+    # seguinte achava a referencia no lugar do card morto e terminava em CardTrocado.
+    # O texto do Flow e a unica explicacao que existe — ele tem que chegar ao erro.
+    t = TransportePlaywright()
+    falho = _CardDaGrade(texto="Falha\nNão foi possível gerar o vídeo.", falha=True)
+    # `dom.seguro` normaliza: minusculas, sem acento
+    with pytest.raises(CardFalhou, match="nao foi possivel gerar o video"):
+        await _consultar(t, falho)
+
+
+async def test_card_que_parou_de_progredir_continua_devolvendo_falhou():
+    # o outro FALHOU nao e declaracao do Flow: o card pode so estar lento, e retomar
+    # nele continua sendo o certo. Nao pode virar CardFalhou.
+    t = TransportePlaywright()
+    agora = [1000.0]
+    t._relogio = lambda: agora[0]
+    parado = _CardDaGrade(midia=False, texto="um navio")
+    await _consultar(t, parado)
+    agora[0] += 10_000
+    assert await _consultar(t, parado) is Estado.FALHOU
 
 
 async def test_video_a_8_por_cento_com_miniatura_borrada_esta_rodando():
@@ -1878,7 +1904,7 @@ class _PaginaQueRecusaPendente(_EscopoQueRecusaPendente):
 
 
 async def test_card_de_falha_nao_manda_o_botao_repetir_pendente_ao_playwright():
-    """O card falhou, `BOTAO_REPETIR_CARD` esta PENDENTE: devolve FALHOU, nao estoura.
+    """O card falhou, `BOTAO_REPETIR_CARD` esta PENDENTE: `CardFalhou`, nao XPath.
 
     ⚠️ ESTE E O DEFEITO DOS JOBS 583-588 (2026-09-09). O Flow recusou as seis geracoes
     com "Notamos uma atividade incomum / Nao houve cobranca"; `por_limite_de_uso` nao
@@ -1892,7 +1918,10 @@ async def test_card_de_falha_nao_manda_o_botao_repetir_pendente_ao_playwright():
     sessao = Sessao(conta=Conta(id=1, email="a@b.com", tier=Tier.FREE, perfil=Path(".")),
                     handle=(None, None, pagina))
 
-    assert await TransportePlaywright().consultar(sessao, "card-0") is Estado.FALHOU
+    # desde 2026-09-23 o card falho levanta `CardFalhou` em vez de devolver FALHOU;
+    # o que este teste guarda continua valendo: nada de erro de XPath
+    with pytest.raises(CardFalhou):
+        await TransportePlaywright().consultar(sessao, "card-0")
 
 
 async def test_consultar_troca_de_conta_no_card_de_atividade_incomum():

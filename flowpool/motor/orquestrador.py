@@ -23,6 +23,7 @@ from flowpool.nucleo.credito import (
 from flowpool.nucleo.escolha import apta, escolher
 from flowpool.nucleo.tipos import Conta, EstadoJob, Job, Modo, SaudeSessao
 from flowpool.transporte.base import (
+    CardFalhou,
     CardTrocado,
     Estado,
     FlowTransport,
@@ -195,6 +196,10 @@ class Orquestrador:
         self._ocupadas: set[int] = set()
         # downloads que falharam por job — nao gastam tentativa, mas tem teto
         self._downloads_falhos: dict[int, int] = {}
+        # contas em que o Flow declarou o card falho, por job. A proxima tentativa
+        # prefere OUTRA conta (pedido do Davi, 2026-09-23). Em memoria, como
+        # `_ocupadas`: reiniciar esquece, e o pior caso e uma tentativa a mais.
+        self._evitar: dict[int, set[int]] = {}
         self._tarefas: set[asyncio.Task] = set()
         # O despertador do laco. `rodar` dorme sobre ele em vez de sobre um relogio:
         # conta liberada ou saldo lido acordam o motor na hora, em vez de dali a
@@ -547,6 +552,24 @@ class Orquestrador:
             if anterior is not None and anterior.id not in self._ocupadas \
                     and apta(anterior, job.modelo, agora, job.quantidade, job.duracao):
                 return anterior
+        return self._escolher_evitando(contas, job, agora)
+
+    def _escolher_evitando(self, contas: list[Conta], job: Job,
+                           agora: datetime) -> Conta | None:
+        """`escolher`, pulando as contas em que o Flow ja declarou este job falho.
+
+        As evitadas entram como OCUPADAS, e a volta para elas so acontece quando
+        nenhuma OUTRA conta e apta, nem livre nem ocupada: pool de uma conta so nao
+        pode travar. Se a outra existe e so esta ocupada, o job espera por ela.
+        """
+        evitar = self._evitar.get(job.id, set())
+        outra = escolher(contas, job.modelo, agora, job.quantidade, job.duracao,
+                         ocupadas=self._ocupadas | evitar)
+        if outra is not None or not evitar:
+            return outra
+        if escolher(contas, job.modelo, agora, job.quantidade, job.duracao,
+                    ocupadas=evitar) is not None:
+            return None      # existe outra apta, so esta ocupada: espera por ela
         return escolher(contas, job.modelo, agora, job.quantidade, job.duracao,
                         ocupadas=self._ocupadas)
 
@@ -826,6 +849,9 @@ class Orquestrador:
             # tentativa seguinte retomava o ponteiro morto e chegava na mesma recusa.
             # Jobs 1114-1116 e 1120-1128 (2026-09-13).
 
+        except CardFalhou as e:
+            self._ao_card_falhar(job, conta, sessao, e)
+
         except SessaoMorta as e:
             self._ao_perder_sessao(job, conta, sessao, e)
 
@@ -1058,6 +1084,30 @@ class Orquestrador:
         self._devolver(job, f"{type(e).__name__}: {e}", gasta_tentativa=True,
                        falha=sessao.falha if sessao else None)
 
+    def _ao_card_falhar(self, job: Job, conta: Conta, sessao, e: CardFalhou) -> None:
+        """O Flow declarou a geracao falha no card. Gera de novo, em OUTRA conta.
+
+        RELATADO 2026-09-23, jobs 2443/2445/2446/2447: tratado como falha comum, o job
+        voltava com `id_remoto` e retomava na mesma conta um card que o Flow ja tinha
+        tirado da grade — e terminava em CardTrocado, escondendo a recusa.
+
+        Gasta tentativa, ao contrario do limite de uso: o motivo pode ser o PEDIDO
+        (prompt, referencia), e sem teto ele rodaria o pool inteiro. O texto do card
+        vai no evento porque `job.erro` e sobrescrito pela tentativa seguinte.
+        """
+        # sem `sem_cobranca`: nas quatro medidas o Flow nao cobrou, mas o card nao
+        # AFIRMA isso. `_estornar` nao devolve, e a reconciliacao do `finally` adota o
+        # saldo lido — que e a unica evidencia de cobranca que existe.
+        self._estornar(job, conta)
+        self.repo.salvar_conta(conta)
+        self._evitar.setdefault(job.id, set()).add(conta.id)
+        self._evento_de_falha(job, conta, "card_falhou", {"erro": str(e)})
+        # soltar os dois e o que impede a retomada do card morto — ver `_devolver`
+        job.id_remoto = None
+        job.conta_id = None
+        self._devolver(job, f"{type(e).__name__}: {e}", gasta_tentativa=True,
+                       falha=sessao.falha if sessao else None)
+
     async def _encerrar_ciclo(self, job: Job, conta: Conta, sessao,
                               reservado: int = 0,
                               card_trocado: Exception | None = None) -> None:
@@ -1067,6 +1117,8 @@ class Orquestrador:
         entre "gera de novo" e "chama uma pessoa" depende de a geracao ter sido
         cobrada, e `delta` e a unica evidencia disso. Ver `_fechar_card_trocado`.
         """
+        if job.estado in (EstadoJob.PRONTO, EstadoJob.FALHOU):
+            self._evitar.pop(job.id, None)   # so vale enquanto o job volta a fila
         saudavel = False
         delta: int | None = None
         try:

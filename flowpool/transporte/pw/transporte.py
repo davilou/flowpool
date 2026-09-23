@@ -17,6 +17,7 @@ from pathlib import Path
 from flowpool.nucleo import tipos
 from flowpool.nucleo.tipos import Conta, Modo
 from flowpool.transporte.base import (
+    CardFalhou,
     CardTrocado,
     Estado,
     GeracaoFalhou,
@@ -1518,6 +1519,19 @@ class TransportePlaywright:
             await self._traco_da_falha(s)
             raise
 
+    @staticmethod
+    async def _texto_do_card(card) -> str:
+        """O texto do card numa linha, para o erro. Nunca levanta.
+
+        E so a explicacao da falha, e nao a decisao: se a leitura falhar, a falha
+        continua sendo do Flow e o erro diz que o texto nao pode ser lido.
+        """
+        try:
+            bruto = dom.seguro(await card.inner_text(timeout=5_000))
+        except Exception:
+            return "(texto do card ilegivel)"
+        return " ".join(bruto.split())[:200] or "(card sem texto)"
+
     async def _consultar(self, s: Sessao, id_remoto: str) -> Estado:
         """Le o estado pela GRADE, nunca pela conversa.
 
@@ -1626,15 +1640,22 @@ class TransportePlaywright:
             if await acoes.quantos(pagina, sel.AVISO_ALTA_DEMANDA) > 0:
                 raise GeracaoFalhou(
                     "Flow em alta demanda: falha do Google, a conta esta boa")
-            # o Flow desistiu do card. Isto NAO levanta — quem transforma em falha do
-            # job e o orquestrador —, entao o traco tem que ser guardado aqui ou ele
-            # seria descartado em `fechar` como se o job tivesse dado certo.
-            self._diario(s.conta.id).passo(f"{id_remoto}: o Flow devolveu FALHOU")
+            # o Flow desistiu do card. O traco tem que ser guardado aqui ou ele seria
+            # descartado em `fechar` como se o job tivesse dado certo.
+            #
+            # ⚠️ LEVANTA `CardFalhou`, E NAO DEVOLVE FALHOU. RELATADO 2026-09-23, jobs
+            # 2443/2445/2446/2447: com FALHOU o job voltava a fila com `id_remoto`, a
+            # retomada na mesma conta achava a referencia no lugar do card — que some
+            # da grade no recarregamento — e o erro final era um CardTrocado. O texto
+            # do card ("Nao foi possivel gerar o video") nunca chegava a ninguem.
+            texto = await self._texto_do_card(card)
+            self._diario(s.conta.id).passo(
+                f"{id_remoto}: o Flow marcou a geracao como falha: {texto!r}")
             # o outro caminho de FALHOU (o "parou de progredir", la embaixo) ja soltava
             # o cronometro; este nao, e a assimetria vazava para a geracao seguinte.
             self._parado.pop((s.conta.id, id_remoto), None)
             await self._traco_da_falha(s)
-            return Estado.FALHOU
+            raise CardFalhou(f"o Flow marcou a geracao como falha: {texto!r}")
 
         # A DECISAO E PURA (`analise.estado_do_card`) e a ORDEM dos sinais e a decisao:
         # porcentagem antes de midia. MEDIDO por print em 2026-09-06 (job 189): um

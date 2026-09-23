@@ -8,6 +8,7 @@ from pathlib import Path
 from flowpool.nucleo.custos import custo_de
 from flowpool.nucleo.tipos import Conta
 from flowpool.transporte.base import (
+    CardFalhou,
     ErroTransporte,
     Estado,
     Pedido,
@@ -24,6 +25,8 @@ class TransporteFalso:
     - `mortas`: `abrir_sessao` levanta `SessaoMorta` (login caiu antes de comecar).
     - `morre_ao_gerar`: `gerar` levanta `SessaoMorta` (o Chrome caiu no meio).
     - `falha_em`: a geracao e aceita e volta `FALHOU`.
+    - `card_falho_em`: o Flow aceita, NAO cobra e declara o card falho —
+      `consultar` levanta `CardFalhou` com o texto do card, como o real.
     - `passos_rodando`: as N primeiras consultas de cada geracao voltam `RODANDO`.
     - `passos_na_fila`: e as N PRIMEIRAS DE TODAS voltam `NA_FILA` — o Flow aceitou o
       pedido e ainda nem comecou. Vem antes de `passos_rodando` porque e essa a ordem
@@ -38,10 +41,13 @@ class TransporteFalso:
                  passos_rodando: int = 0, passos_na_fila: int = 0,
                  nunca_termina: set[int] | None = None,
                  morre_ao_gerar: set[int] | None = None,
-                 projetos: dict[int, list[str]] | None = None) -> None:
+                 projetos: dict[int, list[str]] | None = None,
+                 card_falho_em: set[int] | None = None) -> None:
         self.saldos = dict(saldos)
         self.mortas = mortas or set()
         self.falha_em = falha_em or set()
+        self.card_falho_em = card_falho_em or set()
+        self._cards_falhos: set[str] = set()
         self.latencia = latencia
         self.passos_rodando = passos_rodando
         self.passos_na_fila = passos_na_fila
@@ -128,9 +134,14 @@ class TransporteFalso:
         custo = custo_de(p.modelo, s.conta.tier, p.duracao) * p.quantidade
         if self.saldos.get(s.conta.id, 0) < custo:
             raise SaldoInsuficiente(f"conta {s.conta.email} sem credito")
-        self.saldos[s.conta.id] -= custo
         self._seq += 1
         id_remoto = f"falso-{self._seq}"
+        if s.conta.id in self.card_falho_em:
+            # MEDIDO 2026-09-23, jobs 2443-2447: o saldo lido depois do card falho
+            # era o de antes da geracao. O falso nao cobra, igual.
+            self._cards_falhos.add(id_remoto)
+        else:
+            self.saldos[s.conta.id] -= custo
         if s.conta.id in self.nunca_termina:
             final = Estado.RODANDO
         elif s.conta.id in self.falha_em:
@@ -142,6 +153,9 @@ class TransporteFalso:
         return id_remoto
 
     async def consultar(self, s: Sessao, id_remoto: str) -> Estado:
+        if id_remoto in self._cards_falhos:
+            raise CardFalhou('o Flow marcou a geracao como falha: "Falha '
+                             'Nao foi possivel gerar o video."')
         _, final = self.geracoes[id_remoto]
         vistas = self.consultas[id_remoto]
         self.consultas[id_remoto] = vistas + 1

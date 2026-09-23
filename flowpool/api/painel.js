@@ -265,6 +265,8 @@ function explicarErro(erro) {
     return "A conta bateu no limite de uso do Flow — não é falta de crédito, e o saldo continua valendo. O job já foi para outra conta sozinho; esta volta ao pool depois do descanso.";
   if (casaTermo(e, ["age-restricted", "portao de idade"]))
     return "A conta caiu no portão de idade do Flow. Resolver é verificar a idade na conta Google, e isso só o dono da conta faz.";
+  if (casaTermo(e, ["cardfalhou"]))
+    return "O próprio Flow marcou a geração como falha — o texto do card está na mensagem acima. Nas vezes medidas ele não cobrou. O job já foi gerado de novo em OUTRA conta; se falhar em todas as tentativas, o problema provavelmente é o pedido (prompt ou referência), não a conta.";
   if (casaTermo(e, ["nao e o resultado deste job", "cardtrocado"]))
     return "O robô abriu um card que não é o resultado deste job (card de imagem num job de vídeo, em geral a referência enviada). Ele parou na hora em vez de insistir. NÃO se sabe se a geração existe: abra a grade do projeto na conta e veja se há card do tipo certo antes de gerar de novo.";
   if (e.includes("download nativo") || e.includes("nenhum blob"))

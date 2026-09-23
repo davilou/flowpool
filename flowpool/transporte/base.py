@@ -20,6 +20,7 @@ from flowpool.nucleo.tipos import (
 # `transporte.base` continuar funcionando. Duas classes com o mesmo nome fariam o
 # `except` do orquestrador pegar uma e deixar a outra passar como falha de rede.
 __all__ = [
+    "CardFalhou",
     "CardTrocado",
     "ErroTransporte",
     "Estado",
@@ -116,6 +117,20 @@ class CardTrocado(GeracaoFalhou):
     """
 
 
+class CardFalhou(GeracaoFalhou):
+    """O Flow declarou a geracao falha NO PROPRIO CARD. Nao ha o que retomar.
+
+    Diferente do FALHOU por "parou de progredir", que e deducao do robo sobre um card
+    que pode so estar lento: aqui quem desistiu foi o Flow, e o card some da grade no
+    recarregamento. RELATADO 2026-09-23, jobs 2443/2445/2446/2447: "Nao foi possivel
+    gerar o video", sem cobranca; a retomada na mesma conta achava a referencia no
+    lugar do card morto e terminava num CardTrocado que escondia a recusa.
+
+    A mensagem carrega o TEXTO DO CARD — e a unica explicacao que existe. Filha de
+    `GeracaoFalhou` para que todo `except GeracaoFalhou` continue pegando.
+    """
+
+
 class FlowTransport(Protocol):
     async def abrir_sessao(self, conta: Conta) -> Sessao: ...
     # O motor GUARDA a sessao entre jobs da mesma conta (abrir um Chrome, navegar e
@@ -131,6 +146,8 @@ class FlowTransport(Protocol):
     async def criar_projeto(self, s: Sessao, nome: str) -> str: ...
     async def abrir_projeto(self, s: Sessao, id_remoto: str) -> None: ...
     async def gerar(self, s: Sessao, p: Pedido) -> str: ...
+    # FALHOU e so o card que parou de progredir. Quando o proprio Flow declara a falha
+    # no card, `consultar` levanta `CardFalhou` com o texto dele: nao ha o que retomar.
     async def consultar(self, s: Sessao, id_remoto: str) -> Estado: ...
     async def baixar(self, s: Sessao, id_remoto: str, destino: Path) -> Path: ...
     async def fechar(self, s: Sessao) -> None: ...
