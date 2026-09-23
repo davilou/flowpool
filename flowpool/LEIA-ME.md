@@ -8,7 +8,8 @@ O desenho inteiro está em `docs/superpowers/specs/2026-08-19-flowpool-design.md
 
 ## Onde o projeto mora
 
-`C:\Users\User\Documents\Vibe Code\flowpool` — repositorio proprio desde 09/09/2026.
+`C:\Users\User\Documents\Vibe Code\flowpool` — repositorio proprio desde 09/09/2026,
+no GitHub (privado) em https://github.com/davilou/flowpool desde 23/09/2026.
 Antes era uma pasta dentro do repo da Tiktok Shop, e a midia veio junto na mudanca:
 as pastas de produto (`Mega Bauwerke/clipes/`, `Canal Japones/clipes/`, ...) e as
 referencias coladas (`_coladas/`) ficam aqui.
@@ -24,7 +25,8 @@ app e a midia morarem em lugares diferentes.
 .venv/Scripts/python.exe -m flowpool
 ```
 
-Depois abra **http://127.0.0.1:8777/** no navegador.
+Depois abra **http://127.0.0.1:8900/** no navegador. `FLOWPOOL_PORTA` muda a porta —
+foi 8777 até 18/09, quando colidiu com o Escritório.
 
 É a mesma porta da API — o painel é HTML/JS puro servido pelo próprio FastAPI, sem build
 step, sem Node e sem segundo servidor. Subir o serviço já liga o motor da fila: jobs
@@ -185,13 +187,9 @@ retransmissor local sem senha.
 
 ## API
 
-Documentação interativa em **http://127.0.0.1:8777/docs**.
-
-`GET /saude`, `GET /info`, `GET|POST /contas`, `PATCH /contas/{id}`,
-`POST /contas/{id}/revalidar`, `POST /contas/{id}/saldo`, `POST /contas/{id}/abrir`,
-`GET /contas/{id}/eventos`,
-`GET|POST /jobs`, `POST /jobs/lote`, `GET|PATCH|DELETE /jobs/{id}`,
-`GET /jobs/{id}/eventos`, `GET /projetos`, `DELETE /projetos/{id}`.
+O guia com exemplos — criar job, lote, acompanhar, baixar, contas — está em
+[`docs/API.md`](../docs/API.md). A referência completa, gerada do código, fica em
+**http://127.0.0.1:8900/docs** com o serviço no ar.
 
 ## Quando o Google muda a interface
 
