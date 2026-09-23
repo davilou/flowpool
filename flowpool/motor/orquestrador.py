@@ -26,10 +26,12 @@ from flowpool.transporte.base import (
     CardFalhou,
     CardTrocado,
     Estado,
+    FlowEmAltaDemanda,
     FlowTransport,
     GeracaoFalhou,
     LimiteDeUso,
     Pedido,
+    RecusaPorPolitica,
     SaldoInsuficiente,
     Sessao,
     SessaoMorta,
@@ -49,6 +51,11 @@ INTERVALO_POLLING = 2.0
 # minutos. Adiar por uma hora um job que so esbarrou numa janela ocupada deixaria o
 # pool ocioso com a fila cheia.
 ESPERA_JANELA = timedelta(seconds=30)
+
+# Quando TODAS as contas ja responderam "alta demanda" para o mesmo job. Uma so tenta
+# outra conta na hora (pedido do Davi, 2026-09-23); o pool inteiro sobrecarregado e o
+# Google, e girar entre as contas so martelaria o Flow no pico.
+ESPERA_ALTA_DEMANDA = timedelta(minutes=10)
 
 # ⚠️ QUANTO O MOTOR ESPERA ENTRE UM DESPACHO E O SEGUINTE, e por que existe.
 #
@@ -849,6 +856,12 @@ class Orquestrador:
             # tentativa seguinte retomava o ponteiro morto e chegava na mesma recusa.
             # Jobs 1114-1116 e 1120-1128 (2026-09-13).
 
+        except RecusaPorPolitica as e:
+            self._ao_recusar_por_politica(job, conta, sessao, e)
+
+        except FlowEmAltaDemanda as e:
+            self._ao_pegar_alta_demanda(job, conta, sessao, e)
+
         except CardFalhou as e:
             self._ao_card_falhar(job, conta, sessao, e)
 
@@ -1106,6 +1119,44 @@ class Orquestrador:
         job.id_remoto = None
         job.conta_id = None
         self._devolver(job, f"{type(e).__name__}: {e}", gasta_tentativa=True,
+                       falha=sessao.falha if sessao else None)
+
+    def _ao_recusar_por_politica(self, job: Job, conta: Conta, sessao,
+                                 e: RecusaPorPolitica) -> None:
+        """O Flow barrou o PROMPT. O job falha na hora — nenhuma outra conta resolve.
+
+        Pedido do Davi, 2026-09-23: quem chama e um LLM, que le o erro pela API e
+        reescreve o prompt num job novo. O que NAO pode acontecer e o mesmo prompt ser
+        levado a outras contas. `RecusaPorPolitica:` no comeco de `job.erro` e o
+        contrato com esse cliente (ver docs/API.md).
+        """
+        self._estornar(job, conta)
+        self.repo.salvar_conta(conta)
+        self._evento_de_falha(job, conta, "recusa_politica", {"erro": str(e)})
+        job.id_remoto = None
+        self._devolver(job, f"{type(e).__name__}: {e}", gasta_tentativa=False,
+                       falha=sessao.falha if sessao else None, desistir=True)
+
+    def _ao_pegar_alta_demanda(self, job: Job, conta: Conta, sessao,
+                               e: FlowEmAltaDemanda) -> None:
+        """O Flow esta sobrecarregado. Outra conta na hora, sem gastar tentativa.
+
+        A conta nao e marcada: o pico e do Google. Se o job volta a uma conta que ja
+        respondeu isso para ele, e porque nenhuma outra serviu — o pool inteiro esta no
+        pico —, e ai ele espera `ESPERA_ALTA_DEMANDA` e recomeca a rodada do zero.
+        """
+        self._estornar(job, conta)
+        self.repo.salvar_conta(conta)
+        evitar = self._evitar.setdefault(job.id, set())
+        if conta.id in evitar:
+            evitar.clear()
+            job.reavaliar_em = datetime.now(timezone.utc) + ESPERA_ALTA_DEMANDA
+        else:
+            evitar.add(conta.id)
+        self._evento_de_falha(job, conta, "alta_demanda", {"erro": str(e)})
+        job.id_remoto = None
+        job.conta_id = None
+        self._devolver(job, f"{type(e).__name__}: {e}", gasta_tentativa=False,
                        falha=sessao.falha if sessao else None)
 
     async def _encerrar_ciclo(self, job: Job, conta: Conta, sessao,

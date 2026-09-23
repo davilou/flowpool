@@ -265,6 +265,10 @@ function explicarErro(erro) {
     return "A conta bateu no limite de uso do Flow — não é falta de crédito, e o saldo continua valendo. O job já foi para outra conta sozinho; esta volta ao pool depois do descanso.";
   if (casaTermo(e, ["age-restricted", "portao de idade"]))
     return "A conta caiu no portão de idade do Flow. Resolver é verificar a idade na conta Google, e isso só o dono da conta faz.";
+  if (casaTermo(e, ["recusaporpolitica"]))
+    return "O Flow barrou o PROMPT por política de conteúdo — não é a conta, e nenhuma outra resolveria, por isso o job parou sem tentar em outras. Reescreva o prompt e envie um job novo.";
+  if (casaTermo(e, ["flowemaltademanda"]))
+    return "O Flow estava sobrecarregado e não cobrou. O job foi para outra conta na hora, sem gastar tentativa; se todas responderem o mesmo, ele espera 10 minutos e recomeça.";
   if (casaTermo(e, ["cardfalhou"]))
     return "O próprio Flow marcou a geração como falha — o texto do card está na mensagem acima. Nas vezes medidas ele não cobrou. O job já foi gerado de novo em OUTRA conta; se falhar em todas as tentativas, o problema provavelmente é o pedido (prompt ou referência), não a conta.";
   if (casaTermo(e, ["nao e o resultado deste job", "cardtrocado"]))

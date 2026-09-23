@@ -14,9 +14,11 @@ from flowpool.transporte.base import (
     CardFalhou,
     CardTrocado,
     Estado,
+    FlowEmAltaDemanda,
     GeracaoFalhou,
     LimiteDeUso,
     Pedido,
+    RecusaPorPolitica,
     SaldoInsuficiente,
     Sessao,
 )
@@ -1585,9 +1587,11 @@ async def test_nem_card_nem_aviso_devolve_falso_no_teto():
 class _CardDaGrade:
     """Um card da grade, com ou sem midia, com ou sem porcentagem, de um TIPO."""
 
-    def __init__(self, midia=False, texto="", tipo=None, falha=False):
+    def __init__(self, midia=False, texto="", tipo=None, falha=False, marcas=()):
         self.midia = midia
         self.texto = texto
+        # seletores de texto do card que casam (motivo de falha, por exemplo)
+        self.marcas = set(marcas)
         # "imagem" | "video" | None. None e o card que nao casa nenhum dos dois
         # elementos de tipo — falha, ou tile ainda nascendo.
         self.tipo = tipo
@@ -1605,7 +1609,7 @@ class _CardDaGrade:
             return 1 if self.tipo == "imagem" else 0
         if seletor in (sel.CARD_FALHA, sel.CARD_FALHA_TITULO):
             return 1 if self.falha else 0
-        return 0
+        return 1 if seletor in self.marcas else 0
 
     async def inner_text(self, timeout=None):
         return self.texto
@@ -1815,6 +1819,27 @@ async def test_card_de_falha_do_flow_levanta_card_falhou_com_o_texto_do_card():
     # `dom.seguro` normaliza: minusculas, sem acento
     with pytest.raises(CardFalhou, match="nao foi possivel gerar o video"):
         await _consultar(t, falho)
+
+
+async def test_card_barrado_por_politica_levanta_recusa_por_politica():
+    # MEDIDO 2026-09-23 por print do Davi: "Esse comando pode violar nossas politicas
+    # contra a geracao de conteudo prejudicial. Tente usar outro comando ou envie
+    # feedback." E o PROMPT que foi barrado: outra conta recusa igual.
+    t = TransportePlaywright()
+    card = _CardDaGrade(texto="Falha Esse comando pode violar nossas políticas",
+                        falha=True, marcas={sel.CARD_POLITICA})
+    with pytest.raises(RecusaPorPolitica, match="violar nossas politicas"):
+        await _consultar(t, card)
+
+
+async def test_card_de_alta_demanda_levanta_flow_em_alta_demanda():
+    # MEDIDO 2026-09-23 por print do Davi: "O Flow esta com alta demanda. Tente de
+    # novo mais tarde." Nem a conta nem o prompt: o Google sobrecarregado.
+    t = TransportePlaywright()
+    card = _CardDaGrade(texto="Falha O Flow está com alta demanda.",
+                        falha=True, marcas={sel.CARD_ALTA_DEMANDA})
+    with pytest.raises(FlowEmAltaDemanda, match="alta demanda"):
+        await _consultar(t, card)
 
 
 async def test_card_que_parou_de_progredir_continua_devolvendo_falhou():

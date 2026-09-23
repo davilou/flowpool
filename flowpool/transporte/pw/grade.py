@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from flowpool.transporte.base import GeracaoFalhou
+from flowpool.transporte.base import FlowEmAltaDemanda, GeracaoFalhou, RecusaPorPolitica
 from flowpool.transporte.pw import acoes
 from flowpool.transporte.pw import seletores as sel
 from flowpool.transporte.pw.diario import Diario
@@ -246,6 +246,28 @@ async def motivo_da_recusa(card) -> str | None:
     for seletor in _MOTIVOS_DE_RECUSA:
         if await acoes.quantos(card, seletor) > 0:
             return seletor
+    return None
+
+
+# Falhas declaradas no card que NAO sao da conta, cada uma com o erro que a carrega.
+# A ordem nao importa hoje (os textos nao se cruzam); a lista e a decisao inteira.
+_FALHAS_FORA_DA_CONTA: tuple[tuple[str, type[GeracaoFalhou]], ...] = (
+    (sel.CARD_POLITICA, RecusaPorPolitica),
+    (sel.CARD_ALTA_DEMANDA, FlowEmAltaDemanda),
+)
+
+
+async def falha_fora_da_conta(card) -> type[GeracaoFalhou] | None:
+    """O erro certo para um card de falha que nao e culpa da conta, ou None.
+
+    MEDIDO 2026-09-23: politica (o prompt foi barrado) e alta demanda (o Google
+    sobrecarregado). Sem esta pergunta os dois viravam `CardFalhou`, e o motor levava o
+    mesmo prompt barrado a outra conta, gastando tentativa — o "martelar" que o Davi
+    pediu para nao acontecer.
+    """
+    for seletor, erro in _FALHAS_FORA_DA_CONTA:
+        if await acoes.quantos(card, seletor) > 0:
+            return erro
     return None
 
 

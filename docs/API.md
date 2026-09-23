@@ -189,6 +189,21 @@ A linha do tempo do job: `despachado`, `conta_no_limite`, `download_falhou`, `pr
 `falhou`… cada evento com `em`, `conta_id` e um `payload` com o detalhe. É o que
 responde "o que aconteceu", já que `erro` guarda só a última tentativa.
 
+### O que o `erro` diz, e o que o cliente faz
+
+`erro` começa com o nome do erro, seguido de `:` — um prefixo estável, feito para
+quem chama por código (um script ou um LLM) decidir sem interpretar a frase:
+
+| prefixo | o que houve | o que o motor já fez | o que o cliente faz |
+|---|---|---|---|
+| `RecusaPorPolitica:` | o Flow barrou o **prompt** por política de conteúdo | parou na hora, **sem** levar o prompt a outra conta | reescrever o prompt e criar um job **novo** |
+| `FlowEmAltaDemanda:` | o Flow estava sobrecarregado | tentou outra conta na hora, sem gastar tentativa; com o pool todo no pico, espera 10 min | nada — o job segue sozinho |
+| `CardFalhou:` | o Flow marcou a geração como falha, sem dizer por quê | gerou de novo em outra conta, até o teto de tentativas | se falhou de vez, revisar prompt e referência |
+| `LimiteDeUso:` | a conta bateu no limite de uso ou no antiabuso | trocou de conta, sem gastar tentativa | nada |
+
+Depois do prefixo vem o texto do card do Flow, normalizado (minúsculas, sem acento).
+Nenhum desses casos foi cobrado nas vezes medidas.
+
 `POST /jobs/{id}/diagnosticar` pede ao modelo de visão local uma explicação do print da
 falha (exige o llama.cpp da auto-cura no ar — ver o [LEIA-ME](../flowpool/LEIA-ME.md)).
 

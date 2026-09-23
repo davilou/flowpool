@@ -542,6 +542,20 @@ CARD_SEM_COBRANCA = 'text=/n[ãa]o houve cobran[çc]a|no charge/i'
 # no recurso caro, que é por que a recusa parecia aleatória.
 CARD_ATIVIDADE_INCOMUM = 'text=/atividade incomum|unusual activity/i'
 
+# DUAS FALHAS QUE NAO SAO DA CONTA. MEDIDO 2026-09-23 por dois prints do Davi, os
+# dois com o mesmo titulo "Falha" e "Nao houve cobranca por esta geracao":
+#
+#     Esse comando pode violar nossas politicas contra a geracao de conteudo
+#     prejudicial. Tente usar outro comando ou envie feedback.
+#
+#     O Flow esta com alta demanda. Tente de novo mais tarde.
+#
+# Nao entram em `grade._MOTIVOS_DE_RECUSA`, que e "a CONTA foi recusada, troque de
+# conta": politica e o PROMPT (qualquer conta recusa igual) e alta demanda e o Google.
+# O ingles entra pelo mesmo motivo de `CARD_LIMITE_DE_USO` — o rotulo vem do i18n.
+CARD_POLITICA = 'text=/violar nossas pol[ií]ticas|conte[úu]do prejudicial|violate our policies/i'
+CARD_ALTA_DEMANDA = 'text=/alta demanda|high demand/i'
+
 BOTAO_REPETIR_CARD = PENDENTE
 
 # MEDIDO: os menus são `mat-menu` renderizados no overlay do CDK.

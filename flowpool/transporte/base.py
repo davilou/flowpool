@@ -24,11 +24,13 @@ __all__ = [
     "CardTrocado",
     "ErroTransporte",
     "Estado",
+    "FlowEmAltaDemanda",
     "FlowTransport",
     "GeracaoFalhou",
     "LimiteDeUso",
     "Pedido",
     "ProjetoRemoto",
+    "RecusaPorPolitica",
     "SaldoInsuficiente",
     "Sessao",
     "SessaoMorta",
@@ -131,6 +133,26 @@ class CardFalhou(GeracaoFalhou):
     """
 
 
+class RecusaPorPolitica(GeracaoFalhou):
+    """O Flow barrou o PROMPT por politica de conteudo. Nenhuma conta resolve.
+
+    MEDIDO 2026-09-23 por print: "Esse comando pode violar nossas politicas contra a
+    geracao de conteudo prejudicial. Tente usar outro comando ou envie feedback." Levar
+    o mesmo prompt a outra conta so repete a recusa — quem resolve e quem ESCREVEU o
+    prompt. O nome da classe e o prefixo de `job.erro` na API, e e por ele que o
+    cliente sabe que tem de reescrever, e nao so reenviar.
+    """
+
+
+class FlowEmAltaDemanda(GeracaoFalhou):
+    """O Flow recusou por estar sobrecarregado. Nem a conta nem o prompt tem culpa.
+
+    MEDIDO 2026-09-23 por print: "O Flow esta com alta demanda. Tente de novo mais
+    tarde." Marcar a conta (seca, limite) tiraria do pool uma conta boa por um pico do
+    Google.
+    """
+
+
 class FlowTransport(Protocol):
     async def abrir_sessao(self, conta: Conta) -> Sessao: ...
     # O motor GUARDA a sessao entre jobs da mesma conta (abrir um Chrome, navegar e
@@ -147,7 +169,8 @@ class FlowTransport(Protocol):
     async def abrir_projeto(self, s: Sessao, id_remoto: str) -> None: ...
     async def gerar(self, s: Sessao, p: Pedido) -> str: ...
     # FALHOU e so o card que parou de progredir. Quando o proprio Flow declara a falha
-    # no card, `consultar` levanta `CardFalhou` com o texto dele: nao ha o que retomar.
+    # no card, `consultar` LEVANTA, com o texto dele: `RecusaPorPolitica` (o prompt),
+    # `FlowEmAltaDemanda` (o Google) ou `CardFalhou` (o resto). Nao ha o que retomar.
     async def consultar(self, s: Sessao, id_remoto: str) -> Estado: ...
     async def baixar(self, s: Sessao, id_remoto: str, destino: Path) -> Path: ...
     async def fechar(self, s: Sessao) -> None: ...

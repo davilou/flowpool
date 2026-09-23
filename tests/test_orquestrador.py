@@ -7,6 +7,7 @@ import pytest
 
 from flowpool.dados.repo import Repo
 from flowpool.motor.orquestrador import (
+    ESPERA_ALTA_DEMANDA,
     MAX_SIMULTANEOS,
     MAX_TENTATIVAS,
     Orquestrador,
@@ -2010,3 +2011,64 @@ def test_depois_do_card_falho_sem_outra_apta_volta_na_mesma(repo, tmp_path):
 
     escolhida = orq._conta_para(job, datetime.now(timezone.utc))
     assert escolhida is not None and escolhida.id == recusa
+
+
+# --- recusa por politica e alta demanda: duas falhas que NAO sao da conta ---------
+# MEDIDO 2026-09-23 por print do Davi. Politica: e o PROMPT, e qualquer conta recusa
+# igual — o job para na hora, com um erro que o cliente (um LLM) reconhece e reescreve.
+# Alta demanda: e o Google — outra conta na hora, sem gastar tentativa.
+
+
+async def test_recusa_por_politica_falha_na_hora_sem_passar_por_outra_conta(
+        repo, tmp_path):
+    a = _conta_com_saldo(repo, "a@b.com", 500, "p/1")
+    b = _conta_com_saldo(repo, "b@b.com", 400, "p/2")
+    jid = repo.criar_job(job_fast())
+
+    t = TransporteFalso(saldos={a: 500, b: 400}, politica_em={a, b})
+    orq = Orquestrador(repo, t, raiz=tmp_path)
+    for _ in range(3):
+        await ciclo(orq)
+
+    j = repo.job(jid)
+    assert j.estado is EstadoJob.FALHOU
+    # o prefixo e o contrato com quem chama pela API: e por ele que o cliente sabe
+    # que tem de reescrever o prompt, e nao so reenviar
+    assert j.erro.startswith("RecusaPorPolitica:")
+    despachos = [e for e in repo.eventos() if e["tipo"] == "despachado"]
+    assert len(despachos) == 1, "martelou o mesmo prompt em outra conta"
+
+
+async def test_alta_demanda_vai_para_outra_conta_sem_gastar_tentativa(repo, tmp_path):
+    ocupada = _conta_com_saldo(repo, "a@b.com", 500, "p/1")
+    boa = _conta_com_saldo(repo, "b@b.com", 400, "p/2")
+    jid = repo.criar_job(job_fast())
+
+    t = TransporteFalso(saldos={ocupada: 500, boa: 400}, alta_demanda_em={ocupada})
+    orq = Orquestrador(repo, t, raiz=tmp_path)
+    for _ in range(3):
+        await ciclo(orq)
+        if repo.job(jid).estado is EstadoJob.PRONTO:
+            break
+
+    j = repo.job(jid)
+    assert j.estado is EstadoJob.PRONTO
+    assert j.conta_id == boa
+    assert j.tentativas == 0
+    assert repo.conta(ocupada).limite_ate is None   # a conta nao tem culpa
+
+
+async def test_alta_demanda_no_pool_inteiro_espera_em_vez_de_girar(repo, tmp_path):
+    cid = _conta_com_saldo(repo, "a@b.com", 500, "p/1")
+    jid = repo.criar_job(job_fast())
+
+    t = TransporteFalso(saldos={cid: 500}, alta_demanda_em={cid})
+    orq = Orquestrador(repo, t, raiz=tmp_path)
+    await ciclo(orq)          # recusa 1: sem outra conta, volta nela
+    await ciclo(orq)          # recusa 2 na MESMA conta: o pool todo esta sobrecarregado
+
+    j = repo.job(jid)
+    assert j.estado is EstadoJob.PENDENTE
+    assert j.tentativas == 0
+    espera = j.reavaliar_em - datetime.now(timezone.utc)
+    assert timedelta(minutes=9) < espera <= ESPERA_ALTA_DEMANDA

@@ -1577,6 +1577,15 @@ class TransportePlaywright:
                     f"(sem cobranca por esta geracao; o saldo continua valendo)",
                     motivo="atividade_incomum" if antiabuso else "limite_de_uso")
 
+            # POLITICA E ALTA DEMANDA: o Flow disse o motivo, e nenhum dos dois e da
+            # conta nem se resolve com `redo` aqui. Cada um sobe com o seu erro.
+            fora_da_conta = await grade.falha_fora_da_conta(card)
+            if fora_da_conta is not None:
+                texto = await self._texto_do_card(card)
+                self._diario(s.conta.id).passo(f"{id_remoto}: {texto!r}")
+                self._parado.pop((s.conta.id, id_remoto), None)
+                raise fora_da_conta(f"o Flow recusou a geracao: {texto!r}")
+
             vezes = self._repeticoes.get((s.conta.id, id_remoto), 0)
             # CONFERIR o botao antes de mirar nele. O card de falha tem tres botoes em
             # fila e um deles APAGA; com zero ou com dois candidatos o certo e desistir
