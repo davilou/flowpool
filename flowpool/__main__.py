@@ -2,8 +2,9 @@
 
     python -m flowpool
 
-O painel abre em http://127.0.0.1:8777/ — mesma porta da API, porque o painel E cliente
-dela: servido pelo proprio FastAPI, sem build step e sem segundo servidor.
+O painel abre em http://127.0.0.1:8900/ (ou FLOWPOOL_PORTA) — mesma porta da API,
+porque o painel E cliente dela: servido pelo proprio FastAPI, sem build step e sem
+segundo servidor.
 """
 
 from __future__ import annotations
@@ -35,7 +36,18 @@ RAIZ = Path(os.environ.get("FLOWPOOL_RAIZ")
             or Path(__file__).resolve().parent.parent).resolve()
 BANCO = RAIZ / "flowpool" / "flowpool.db"
 
-PORTA = 8777
+# ⚠️ 8900 DESDE 19/09/2026 (foi 8777 ate 18/09, depois 8778 por um dia). O
+# Escritorio (Predio dos Canais, Vibe Code/Escritorio/servir.py) tambem cravou
+# 8777, e quem subisse primeiro trancava o outro: o FlowPool morria com
+# WinError 10048 e o CLI respondia "HTTP 404 em /saude" -- que parece servico
+# quebrado, nao porta tomada. Levou meia hora para achar porque os dois sao do
+# mesmo dono e o 404 mente.
+# ⚠️ POR ISSO A PORTA VIROU CONFIGURAVEL. Numero cravado em dois projetos e
+# uma colisao esperando data; `FLOWPOOL_PORTA` e a saida sem editar codigo.
+# Quem mudar aqui tem de mudar tambem `BASE` em
+# ~/.claude/skills/flowpool-gerar/scripts/flowpool.py -- a skill e GLOBAL e
+# outros canais dependem dela.
+PORTA = int(os.environ.get("FLOWPOOL_PORTA") or 8900)
 
 # Quantas geracoes ao mesmo tempo. Padrao 5, configuravel por
 # `FLOWPOOL_MAX_SIMULTANEOS` — ver `motor/orquestrador.py`, onde o numero mora.

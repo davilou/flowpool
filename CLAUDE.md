@@ -61,7 +61,7 @@ O 20º erro era bug de verdade e já foi consertado: `transporte.py` usava
 > frame não envia arquivo** — só escolhe do acervo (`seletores.POPOVER_SLOT`), e é por
 > isso que `_gerar` sai de Frames antes de enviar.
 
-Subir o serviço: `.venv/Scripts/python.exe -m flowpool` → http://127.0.0.1:8777/
+Subir o serviço: `.venv/Scripts/python.exe -m flowpool` → http://127.0.0.1:8900/ (`FLOWPOOL_PORTA` muda)
 
 ## A direção das dependências
 

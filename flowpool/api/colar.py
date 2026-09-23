@@ -197,7 +197,7 @@ async def buscar(url: str, transporte: httpx.AsyncBaseTransport | None = None) -
     """Busca a imagem da URL, com teto de tamanho e de tempo, e devolve os bytes.
 
     Redirecionamento NAO e seguido pelo httpx de proposito. `validar_url` olhou o
-    endereco que a pessoa colou; um `302` para `http://127.0.0.1:8777/` passaria por
+    endereco que a pessoa colou; um `302` para `http://127.0.0.1:8900/` passaria por
     baixo dela sem nenhum aviso. Cada salto e revalidado a mao, aqui.
 
     `transporte` existe para o teste montar as respostas sem rede.

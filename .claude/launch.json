@@ -5,7 +5,7 @@
       "name": "flowpool",
       "runtimeExecutable": ".venv/Scripts/python.exe",
       "runtimeArgs": ["-m", "flowpool"],
-      "port": 8777
+      "port": 8900
     }
   ]
 }
