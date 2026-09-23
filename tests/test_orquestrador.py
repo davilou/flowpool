@@ -705,6 +705,27 @@ async def test_pool_seco_de_verdade_nao_abre_navegador(repo, tmp_path):
     assert [e["tipo"] for e in repo.eventos() if e["tipo"] == "saldo_semeado"] == []
 
 
+async def test_free_confiavel_com_leitura_velha_e_relida_e_gera(repo, tmp_path):
+    # O CASO DE 2026-09-23. Saldo 5 lido na vespera e marcado confiavel; o Flow ja
+    # tinha resetado para 50. A semeadura pulava a conta por ser confiavel, e job
+    # nenhum rodava nela para a reconciliacao descobrir — impasse sem erro nenhum.
+    cid = repo.criar_conta("a@b.com", Tier.FREE, "p/1")
+    c = repo.conta(cid)
+    c.saldo = 5
+    c.saldo_confiavel = True
+    c.saldo_lido_em = datetime.now(timezone.utc) - timedelta(hours=20)
+    repo.salvar_conta(c)
+    jid = repo.criar_job(job_fast())
+
+    orq = Orquestrador(repo, TransporteFalso(saldos={cid: 50}), raiz=tmp_path)
+    for _ in range(3):
+        await ciclo(orq)
+        if repo.job(jid).estado is EstadoJob.PRONTO:
+            break
+
+    assert repo.job(jid).estado is EstadoJob.PRONTO, "o reset diario nao foi visto"
+
+
 async def test_conta_seca_nao_e_relida_antes_do_prazo(repo, tmp_path):
     # `seca_ate` no futuro significa que o Flow ja recusou gerar apesar do saldo. Reler
     # o saldo nao muda isso, e relê-lo a cada volta e o mesmo laco quente de sempre.

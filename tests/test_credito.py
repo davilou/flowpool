@@ -1,8 +1,15 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from flowpool.nucleo.credito import LIMIAR_DIVERGENCIA, liberar, reconciliar, reservar
+from flowpool.nucleo.credito import (
+    LIMIAR_DIVERGENCIA,
+    RELER_FREE_APOS,
+    liberar,
+    reconciliar,
+    reservar,
+    saldo_pode_ter_resetado,
+)
 from flowpool.nucleo.erros import SaldoInsuficiente
 from flowpool.nucleo.tipos import Conta, Modelo, Tier
 
@@ -182,3 +189,40 @@ def test_reservar_recusa_o_clipe_longo_que_o_saldo_curto_nao_paga():
         reservar(c, Modelo.OMNI_FLASH, duracao="8s")
     assert c.saldo == 10
     assert reservar(c, Modelo.OMNI_FLASH, duracao="4s") == 7
+
+
+# --- saldo_pode_ter_resetado ---
+# RELATADO pelo Davi 2026-09-23: nove contas free com saldo lido 2 ou 5 na vespera,
+# todas `saldo_confiavel`, e o Flow ja tinha devolvido os 50. Ninguem relia: a
+# semeadura pula conta confiavel e job nenhum rodava nelas para reconciliar.
+
+def test_free_abaixo_do_teto_com_leitura_velha_pode_ter_resetado():
+    c = conta(5)
+    c.saldo_lido_em = AGORA - RELER_FREE_APOS
+    assert saldo_pode_ter_resetado(c, AGORA) is True
+
+
+def test_leitura_recente_nao_pede_releitura():
+    # sem esse corte, pool seco de verdade vira laco de abrir Chrome
+    c = conta(5)
+    c.saldo_lido_em = AGORA - RELER_FREE_APOS + timedelta(minutes=1)
+    assert saldo_pode_ter_resetado(c, AGORA) is False
+
+
+def test_free_no_teto_nao_tem_o_que_ganhar_com_reset():
+    c = conta(50)
+    c.saldo_lido_em = AGORA - timedelta(days=2)
+    assert saldo_pode_ter_resetado(c, AGORA) is False
+
+
+def test_paga_nao_reseta_por_dia():
+    # credito pago acumula ate o fim do mes; o reset diario e coisa da free
+    c = conta(5, tier=Tier.PRO)
+    c.saldo_lido_em = AGORA - timedelta(days=2)
+    assert saldo_pode_ter_resetado(c, AGORA) is False
+
+
+def test_free_nunca_lida_pode_ter_resetado():
+    c = conta(5)
+    c.saldo_lido_em = None
+    assert saldo_pode_ter_resetado(c, AGORA) is True

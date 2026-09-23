@@ -8,7 +8,7 @@ conta seca e a fila trava sem explicacao. Por isso a leitura real sempre vence.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from flowpool.nucleo.custos import TETO_DIARIO_FREE, custo_de
 from flowpool.nucleo.erros import SaldoInsuficiente
@@ -17,6 +17,13 @@ from flowpool.nucleo.tipos import Conta, Modelo, Tier
 # Gastar mais do que o previsto acima disso significa que o modelo de custo esta
 # errado — o numero lido continua valido, mas projetar em cima dele nao.
 LIMIAR_DIVERGENCIA = 5
+
+# Idade a partir da qual o saldo baixo de uma conta free deixa de merecer confianca.
+# RELATADO 2026-09-23: o horario do reset diario do Flow nao foi medido — por isso a
+# regra e "leitura velha", e nao "passou da meia-noite de algum fuso". 3 h e barato:
+# reler e abrir o menu do avatar, sem gastar credito, e so acontece quando um job
+# nao acha conta.
+RELER_FREE_APOS = timedelta(hours=3)
 
 
 def reservar(conta: Conta, modelo: Modelo, quantidade: int = 1,
@@ -76,3 +83,15 @@ def reconciliar(conta: Conta, lido: int, agora: datetime) -> int:
 def _parece_reset(conta: Conta, lido: int, delta: int) -> bool:
     """Conta gratuita que volta ao teto diario nao divergiu: ela resetou."""
     return conta.tier == Tier.FREE and delta > 0 and lido >= TETO_DIARIO_FREE
+
+
+def saldo_pode_ter_resetado(conta: Conta, agora: datetime) -> bool:
+    """Conta free abaixo do teto com leitura velha: o Flow pode ja ter devolvido o teto.
+
+    `saldo_confiavel` diz que o numero foi LIDO, nao que ainda vale. Numa free ele
+    vence com o reset diario, e sem esta pergunta ninguem o relia: a semeadura pula
+    conta confiavel, e job nenhum roda numa conta que parece sem saldo.
+    """
+    if conta.tier != Tier.FREE or conta.saldo >= TETO_DIARIO_FREE:
+        return False
+    return conta.saldo_lido_em is None or agora - conta.saldo_lido_em >= RELER_FREE_APOS

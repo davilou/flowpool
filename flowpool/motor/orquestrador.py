@@ -13,7 +13,13 @@ from pathlib import Path
 
 from flowpool.dados.repo import Repo
 from flowpool.motor import diagnostico
-from flowpool.nucleo.credito import LIMIAR_DIVERGENCIA, liberar, reconciliar, reservar
+from flowpool.nucleo.credito import (
+    LIMIAR_DIVERGENCIA,
+    liberar,
+    reconciliar,
+    reservar,
+    saldo_pode_ter_resetado,
+)
 from flowpool.nucleo.escolha import apta, escolher
 from flowpool.nucleo.tipos import Conta, EstadoJob, Job, Modo, SaudeSessao
 from flowpool.transporte.base import (
@@ -655,13 +661,17 @@ class Orquestrador:
 
         Fica de fora quem ja tem saldo confiavel: sem esse corte, um pool
         legitimamente seco viraria um laco de abrir e fechar navegador a cada volta.
+        A excecao e a free com leitura velha (`saldo_pode_ter_resetado`) — RELATADO
+        2026-09-23: nove contas presas em 5 com 50 no Flow, porque o reset diario
+        nunca era relido. Nao vira laco: cada leitura renova `saldo_lido_em`.
         Fica de fora tambem a conta seca com prazo em aberto — o Flow ja recusou gerar
         nela apesar do saldo, e reler o numero nao muda isso ate o reset. E fica de
         fora a conta OCUPADA: ler saldo abre navegador, e naquele perfil ja ha um.
         """
         candidatas = [
             c for c in contas
-            if c.ativa and c.saude == SaudeSessao.VIVA and not c.saldo_confiavel
+            if c.ativa and c.saude == SaudeSessao.VIVA
+            and (not c.saldo_confiavel or saldo_pode_ter_resetado(c, agora))
             and c.id not in ocupadas
             and (c.seca_ate is None or c.seca_ate <= agora)
         ]
