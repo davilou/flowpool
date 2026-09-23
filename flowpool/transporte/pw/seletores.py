@@ -669,7 +669,15 @@ BANNER_CREDITO = "flow-credit-banner"
 BOTAO_INFO_BARRA = f'{BARRA_PROMPT} button:has-text("info")'
 AVISO_SEM_CREDITO = PENDENTE
 AVISO_ALTA_DEMANDA = PENDENTE
-AVISO_DIREITOS = PENDENTE
+# O AVISO DE DIREITOS. MEDIDO 2026-09-23 so pelo PRINT
+# (`scratch/falhas/saldo-timeouterror.png`), nao pelo DOM: modal "Direitos de uso desta
+# imagem", botoes "Cancelar" e "Concordo", com `cdk-overlay-dark-backdrop` por tras e
+# ABERTO POR CIMA do seletor de midia. Escape nao o fecha. Enquanto era PENDENTE, ele
+# travou o upload da conta 12 (jobs 2327/2382/2393 refeitos na Pro) e a leitura de
+# saldo (14 `reconciliacao_falhou` por "intercepts pointer events"). O painel
+# (`.cdk-overlay-pane`) e medido; o TEXTO so foi visto no print — o `conferir` nao o
+# checa, e a prova e o log "aviso de direitos dispensado" no proximo upload.
+AVISO_DIREITOS = f'{OVERLAY}:has-text("Direitos de uso")'
 
 # O BANNER DE COOKIES DO `labs.google/fx`. MEDIDO 2026-09-09 por sonda no perfil da
 # conta 2, lendo o DOM sem clicar em nada:
@@ -696,7 +704,10 @@ BANNER_COOKIES = "div.glue-cookie-notification-bar"
 # exata do botão e não a posição.
 BANNER_COOKIES_RECUSAR = (
     f"{BANNER_COOKIES} button.glue-cookie-notification-bar__reject")
-BOTAO_CONCORDO = PENDENTE
+# O "Concordo" DENTRO do aviso — o do banner de cookies tambem se chama assim e
+# mora fora do overlay. Aceitar autorizado pelo Davi em 2026-08-20 e de novo em
+# 2026-09-23; continua em `NAO_CURAVEIS`.
+BOTAO_CONCORDO = f'{AVISO_DIREITOS} button:has-text("Concordo")'
 # O VÉU DO OVERLAY. MEDIDO por um clique que falhou: com um menu aberto, o Playwright
 # recusa o clique seguinte com
 #     <div class="cdk-overlay-backdrop ..."> ... intercepts pointer events

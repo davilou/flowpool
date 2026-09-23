@@ -2486,3 +2486,90 @@ async def test_navegador_fecha_quando_a_navegacao_falha(monkeypatch, tmp_path):
 
     assert ctx.fechado, "o Chrome ficaria aberto segurando o perfil da conta"
     assert pw.parado, "e o driver do Playwright junto"
+
+
+# --- o aviso de direitos na frente do menu do avatar ---------------------
+# MEDIDO 2026-09-23 por `scratch/falhas/saldo-timeouterror.png`: o aviso "Direitos de
+# uso desta imagem" ficou aberto por cima do seletor de midia depois de um upload, e a
+# leitura de saldo morreu 14 vezes em `intercepts pointer events` no avatar. Escape
+# NAO fecha esse modal — `sem_veu` desistia e o clique seguia mesmo assim.
+
+
+class _LocTelaSaldo:
+    def __init__(self, pagina, seletor):
+        self.pagina = pagina
+        self.seletor = seletor
+
+    @property
+    def first(self):
+        return self
+
+    async def wait_for(self, timeout=None):
+        return None
+
+    async def count(self):
+        return self.pagina.quantos(self.seletor)
+
+    async def click(self, timeout=None):
+        self.pagina.clique(self.seletor)
+
+
+class _Teclado:
+    def __init__(self, pagina):
+        self.pagina = pagina
+
+    async def press(self, tecla):
+        if tecla == "Escape":
+            self.pagina.seletor_midia = False   # o seletor fecha; o aviso nao
+
+
+class _TelaSaldoComAviso:
+    def __init__(self, aviso=True):
+        self.aviso = aviso
+        self.seletor_midia = True
+        self.menu_aberto = False
+        self.clicados = []
+        self.keyboard = _Teclado(self)
+
+    def quantos(self, seletor):
+        if seletor == sel.AVISO_DIREITOS or seletor == sel.BOTAO_CONCORDO:
+            return 1 if self.aviso else 0
+        if seletor == sel.VEU_ABERTO:
+            return 1 if (self.aviso or self.seletor_midia) else 0
+        return 1
+
+    def clique(self, seletor):
+        self.clicados.append(seletor)
+        if seletor == sel.BOTAO_CONCORDO:
+            self.aviso = False
+        elif seletor == sel.BOTAO_AVATAR:
+            if self.quantos(sel.VEU_ABERTO):
+                raise TimeoutError("cdk-overlay-backdrop intercepts pointer events")
+            self.menu_aberto = True
+
+    def locator(self, seletor):
+        return _LocTelaSaldo(self, seletor)
+
+    async def evaluate(self, script, *args):
+        return ["50 Créditos do Google Flow"] if self.menu_aberto else []
+
+    async def wait_for_timeout(self, ms):
+        return None
+
+
+def _sessao_com(pagina):
+    return Sessao(conta=Conta(id=12, email="a@b.com", tier=Tier.FREE, perfil="p"),
+                  handle=(None, None, pagina))
+
+
+async def test_saldo_dispensa_o_aviso_de_direitos_antes_do_avatar():
+    pagina = _TelaSaldoComAviso()
+    assert await TransportePlaywright()._saldo(_sessao_com(pagina)) == 50
+    assert pagina.clicados.index(sel.BOTAO_CONCORDO) \
+        < pagina.clicados.index(sel.BOTAO_AVATAR)
+
+
+async def test_saldo_sem_aviso_nao_clica_em_concordo():
+    pagina = _TelaSaldoComAviso(aviso=False)
+    assert await TransportePlaywright()._saldo(_sessao_com(pagina)) == 50
+    assert sel.BOTAO_CONCORDO not in pagina.clicados

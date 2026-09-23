@@ -349,7 +349,14 @@ class TransportePlaywright:
         # E preciso o VEU FORA antes: com qualquer overlay aberto, o Playwright recusa
         # o clique dizendo "intercepts pointer events" e fala do elemento coberto,
         # nunca do que o cobre.
-        await acoes.sem_veu(pagina)
+        #
+        # O AVISO DE DIREITOS PRIMEIRO. MEDIDO 2026-09-23: ele fica por cima do seletor
+        # de midia depois de um upload, Escape nao o fecha, e a reconciliacao morreu
+        # aqui (14 vezes no banco) dizendo "intercepts pointer events" sobre o avatar.
+        await self._dispensar_aviso_de_direitos(pagina)
+        if not await acoes.sem_veu(pagina):
+            raise GeracaoFalhou("um overlay que Escape nao fecha cobre o avatar "
+                                "(ver o print desta falha)")
         await pagina.locator(sel.BOTAO_AVATAR).first.click(timeout=15_000)
         try:
             # ESPERA PELO CONTEUDO, nao por tempo. A versao anterior dormia 1200ms
