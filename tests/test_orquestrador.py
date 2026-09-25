@@ -10,6 +10,7 @@ from flowpool.motor.orquestrador import (
     ESPERA_ALTA_DEMANDA,
     MAX_SIMULTANEOS,
     MAX_TENTATIVAS,
+    RELER_OCIOSO_CADA,
     Orquestrador,
     teto_do_ambiente,
 )
@@ -2072,3 +2073,90 @@ async def test_alta_demanda_no_pool_inteiro_espera_em_vez_de_girar(repo, tmp_pat
     assert j.tentativas == 0
     espera = j.reavaliar_em - datetime.now(timezone.utc)
     assert timedelta(minutes=9) < espera <= ESPERA_ALTA_DEMANDA
+
+
+# --- quando reler: antes de pagar, e com o motor ocioso ----------------------------
+# O CASO QUE FALTOU EM 2026-09-23. A regra das 3 h (`saldo_pode_ter_resetado`) dizia
+# QUEM reler, mas a releitura so rodava quando NENHUMA conta servia — e num pool de 14
+# quase sempre alguma serve. Em 2026-09-24 as contas 7, 8 e 14 estavam com saldo de
+# 22-23/09 enquanto a Pro pagava video. O teste de ontem passava por ter UMA conta so.
+
+
+def _free_com_leitura_velha(repo, email, saldo, perfil, horas=20):
+    cid = repo.criar_conta(email, Tier.FREE, perfil)
+    c = repo.conta(cid)
+    c.saldo = saldo
+    c.saldo_confiavel = True
+    c.saldo_lido_em = datetime.now(timezone.utc) - timedelta(hours=horas)
+    repo.salvar_conta(c)
+    return cid
+
+
+def _pro(repo, saldo=500):
+    cid = repo.criar_conta("pro@b.com", Tier.PRO, "p/pro")
+    c = repo.conta(cid)
+    c.saldo = saldo
+    c.saldo_confiavel = True
+    c.saldo_lido_em = datetime.now(timezone.utc)
+    repo.salvar_conta(c)
+    return cid
+
+
+async def test_antes_de_usar_a_pro_rele_a_free_de_leitura_velha(repo, tmp_path):
+    free = _free_com_leitura_velha(repo, "a@b.com", 5, "p/1")
+    pro = _pro(repo)
+    jid = repo.criar_job(job_fast(modelo=Modelo.OMNI_FLASH, duracao="4s"))
+
+    t = TransporteFalso(saldos={free: 50, pro: 500})
+    await ciclo(Orquestrador(repo, t, raiz=tmp_path))
+
+    j = repo.job(jid)
+    assert j.estado is EstadoJob.PRONTO
+    assert j.conta_id == free, "a Pro pagou com a free cheia sem ninguem saber"
+    assert t.saldos[pro] == 500
+
+
+async def test_free_lida_ha_pouco_nao_segura_a_pro(repo, tmp_path):
+    # o contrapeso: leitura recente e numero em que se confia. Reler aqui seria abrir
+    # um Chrome por job para descobrir o que ja se sabe.
+    free = _free_com_leitura_velha(repo, "a@b.com", 5, "p/1", horas=1)
+    pro = _pro(repo)
+    jid = repo.criar_job(job_fast(modelo=Modelo.OMNI_FLASH, duracao="4s"))
+
+    t = TransporteFalso(saldos={free: 5, pro: 500})
+    await ciclo(Orquestrador(repo, t, raiz=tmp_path))
+
+    assert repo.job(jid).conta_id == pro
+    assert [e for e in repo.eventos() if e["tipo"] == "saldo_semeado"] == []
+
+
+async def test_motor_ocioso_rele_uma_free_velha_e_respeita_o_intervalo(repo, tmp_path):
+    a = _free_com_leitura_velha(repo, "a@b.com", 5, "p/1")
+    b = _free_com_leitura_velha(repo, "b@b.com", 5, "p/2")
+    t = TransporteFalso(saldos={a: 50, b: 50})
+    orq = Orquestrador(repo, t, raiz=tmp_path)
+    agora = datetime.now(timezone.utc)
+
+    assert await orq._reler_ocioso(agora) is True
+    # UMA por vez, e nao de novo antes do intervalo: ocioso nao pode virar laco de Chrome
+    assert await orq._reler_ocioso(agora + timedelta(seconds=10)) is False
+    assert await orq._reler_ocioso(agora + RELER_OCIOSO_CADA) is True
+    assert {repo.conta(a).saldo, repo.conta(b).saldo} == {50}
+
+
+async def test_releitura_que_falhou_nao_e_tentada_de_novo_logo_em_seguida(
+        repo, tmp_path):
+    a = _free_com_leitura_velha(repo, "a@b.com", 5, "p/1")
+    t = TransporteFalso(saldos={a: 50})
+
+    async def saldo_quebrado(s):
+        raise TimeoutError("menu do avatar nao abriu")
+
+    t.saldo = saldo_quebrado
+    orq = Orquestrador(repo, t, raiz=tmp_path)
+    agora = datetime.now(timezone.utc)
+
+    assert await orq._reler_ocioso(agora) is False
+    aberturas = t.aberturas
+    assert await orq._reler_ocioso(agora + RELER_OCIOSO_CADA) is False
+    assert t.aberturas == aberturas, "a mesma conta quebrada foi aberta de novo"

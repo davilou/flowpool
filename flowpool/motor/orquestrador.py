@@ -21,7 +21,7 @@ from flowpool.nucleo.credito import (
     saldo_pode_ter_resetado,
 )
 from flowpool.nucleo.escolha import apta, escolher
-from flowpool.nucleo.tipos import Conta, EstadoJob, Job, Modo, SaudeSessao
+from flowpool.nucleo.tipos import Conta, EstadoJob, Job, Modo, SaudeSessao, Tier
 from flowpool.transporte.base import (
     CardFalhou,
     CardTrocado,
@@ -56,6 +56,16 @@ ESPERA_JANELA = timedelta(seconds=30)
 # outra conta na hora (pedido do Davi, 2026-09-23); o pool inteiro sobrecarregado e o
 # Google, e girar entre as contas so martelaria o Flow no pico.
 ESPERA_ALTA_DEMANDA = timedelta(minutes=10)
+
+# QUANDO RELER SALDO. RELATADO 2026-09-24: a regra das 3 h dizia QUEM reler, mas a
+# releitura so rodava quando nenhuma conta servia — quase nunca, num pool de 14. As
+# contas 7, 8 e 14 ficaram com saldo de 22-23/09 enquanto a Pro pagava video. Dois
+# gatilhos a mais: antes de usar conta paga, e com o motor ocioso — este com intervalo
+# entre releituras, porque cada uma abre um Chrome.
+RELER_OCIOSO_CADA = timedelta(minutes=2)
+# Conta cuja releitura falhou fica fora por este tempo. Sem isto ela seria sempre a
+# "de leitura mais antiga" e abriria um Chrome quebrado a cada job.
+NAO_RELER_APOS_FALHA = timedelta(minutes=30)
 
 # ⚠️ QUANTO O MOTOR ESPERA ENTRE UM DESPACHO E O SEGUINTE, e por que existe.
 #
@@ -203,6 +213,9 @@ class Orquestrador:
         self._ocupadas: set[int] = set()
         # downloads que falharam por job — nao gastam tentativa, mas tem teto
         self._downloads_falhos: dict[int, int] = {}
+        # releitura de saldo: a ultima do motor ocioso, e quando cada conta falhou
+        self._releitura_ociosa_em: datetime | None = None
+        self._releitura_falhou: dict[int, datetime] = {}
         # contas em que o Flow declarou o card falho, por job. A proxima tentativa
         # prefere OUTRA conta (pedido do Davi, 2026-09-23). Em memoria, como
         # `_ocupadas`: reiniciar esquece, e o pior caso e uma tentativa a mais.
@@ -478,6 +491,8 @@ class Orquestrador:
                 # `agora` continua o mesmo de proposito: o relogio do passo nao anda no
                 # meio dele, e a semeadura demora segundos, nao horas.
                 conta = self._reservar_conta(job, agora)
+            elif conta is not None and await self._soltar_paga_para_reler(conta, agora):
+                conta = self._reservar_conta(job, agora)
         except Exception as e:
             # `reivindicar` ja marcou o job `rodando`. Deixar a excecao subir daqui o
             # deixaria travado nesse estado ate o proximo boot — e `ModeloSemCusto`,
@@ -678,9 +693,53 @@ class Orquestrador:
 
         Devolve True quando alguma leitura entrou no banco — e so entao vale reescolher.
         """
-        alvo = self._proxima_a_semear(self.repo.contas(), agora, self._ocupadas)
+        alvo = self._proxima_a_semear(self.repo.contas(), agora,
+                                      self._ocupadas | self._releitura_recusada(agora))
         if alvo is None:
             return False
+        return await self.semear_saldo(alvo)
+
+    def _releitura_recusada(self, agora: datetime) -> set[int]:
+        """Contas cuja releitura falhou ha pouco — entram na escolha como ocupadas."""
+        return {cid for cid, em in self._releitura_falhou.items()
+                if agora - em < NAO_RELER_APOS_FALHA}
+
+    async def _soltar_paga_para_reler(self, conta: Conta, agora: datetime) -> bool:
+        """Antes de gastar conta PAGA, rele uma free que pode ter resetado.
+
+        Devolve True quando soltou a reserva — quem chama escolhe de novo, ja com o
+        numero novo no banco. A paga e o ultimo recurso (pedido do Davi, 2026-09-23),
+        e "a free parece sem saldo" nao basta quando a leitura dela tem 20 horas.
+        """
+        if conta.tier == Tier.FREE:
+            return False
+        frees = [c for c in self.repo.contas() if c.tier == Tier.FREE]
+        alvo = self._proxima_a_semear(
+            frees, agora, self._ocupadas | self._releitura_recusada(agora))
+        if alvo is None or not saldo_pode_ter_resetado(alvo, agora):
+            return False
+        # solta a reserva ANTES do await, e quem chama reserva de novo depois: a paga
+        # pode continuar sendo a resposta, e a escolha tem que ver o banco atualizado
+        self._ocupadas.discard(conta.id)
+        await self.semear_saldo(alvo)
+        return True
+
+    async def _reler_ocioso(self, agora: datetime) -> bool:
+        """Motor sem nada rodando: rele UMA conta de leitura velha. True se leu.
+
+        Existe para o painel mostrar saldo real, e para a proxima escolha ja nascer
+        certa. O intervalo `RELER_OCIOSO_CADA` e o que impede um laco de Chrome.
+        """
+        if self._tarefas:
+            return False
+        ultima = self._releitura_ociosa_em
+        if ultima is not None and agora - ultima < RELER_OCIOSO_CADA:
+            return False
+        alvo = self._proxima_a_semear(self.repo.contas(), agora,
+                                      self._ocupadas | self._releitura_recusada(agora))
+        if alvo is None:
+            return False
+        self._releitura_ociosa_em = agora
         return await self.semear_saldo(alvo)
 
     @staticmethod
@@ -751,6 +810,7 @@ class Orquestrador:
             # merece nova avaliacao agora, e nao daqui a uma hora
             self.repo.antecipar_reavaliacao(None)
             self._acordar.set()
+            self._releitura_falhou.pop(conta.id, None)
             return True
         except SessaoMorta as e:
             # campo a campo, como no resto do motor: `salvar_conta` grava a linha
@@ -761,6 +821,7 @@ class Orquestrador:
                                        json.dumps({"erro": str(e), "sessao": "morta"}))
             return False
         except Exception as e:
+            self._releitura_falhou[conta.id] = datetime.now(timezone.utc)
             self.repo.registrar_evento(
                 None, conta.id, "saldo_nao_semeado",
                 json.dumps({"erro": f"{type(e).__name__}: {e}"}))
@@ -1427,6 +1488,7 @@ class Orquestrador:
                     self.marcar_despacho()
                     await self._espacar_despacho()
                 else:
+                    await self._reler_ocioso(datetime.now(timezone.utc))
                     await self._dormir(intervalo)
             except Exception as e:
                 self.repo.registrar_evento(
