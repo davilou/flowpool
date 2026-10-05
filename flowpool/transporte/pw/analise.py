@@ -356,6 +356,12 @@ def id_da_midia(src: str | None) -> str:
     dele para achar o recem-enviado confere TAMBEM o nome do arquivo — ver
     `escolher_novo_item`.
 
+    MEDIDO 2026-10-05 na conta 14, e corrige o "40 s" acima: numa lista parada o uuid
+    durou 120 s no `src`; o que troca a cara e a lista se redesenhar (recarga, ou nova
+    geracao), e a cara nova e `flow.google.com/asb/<token>` — host que o padrao daqui
+    NAO le. O token e estavel entre recargas, e a FICHA da barra continua mostrando o
+    uuid. Quem precisa achar o item depois disso e `pw/acervo.py`.
+
     `""` para o que nao tem id — item ainda sem miniatura, por exemplo. Quem chama
     trata isso como "ainda nao da para identificar", nunca como um id valido; ids
     vazios que se comparassem iguais fariam dois itens diferentes parecerem o mesmo,

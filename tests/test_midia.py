@@ -36,6 +36,8 @@ Os 18 metodos do bloco de midia estao cobertos, menos os tres de leitura direta
 (`_ids_anexados`, `_itens_da_lista`, `_slot_cheio`) que sao uma linha de `evaluate`.
 """
 
+from pathlib import Path
+
 import pytest
 
 from flowpool.nucleo.tipos import Modelo, Modo
@@ -195,6 +197,8 @@ class _Pagina:
         self.clicados = []
         self.escapes = []
         self.dormiu_ms = 0
+        # vazia = "nao sei em que projeto estou", e sem projeto nada e lembrado
+        self.url = ""
 
     # --- o que o transporte pergunta
     def quantos(self, seletor):
@@ -794,3 +798,113 @@ async def test_devolve_no_maximo_o_que_foi_pedido():
         pagina, ["a.png"], Diario(1))
 
     assert len(novos) == 1, f"pedi 1 arquivo e voltaram {len(novos)} itens"
+
+
+
+# ============================================================================
+# o acervo LEMBRADO — a mesma referencia nao sobe duas vezes para o mesmo projeto
+# ============================================================================
+# MEDIDO 2026-10-05: ~18 s de envio num job de 62 s, repetidos em todo job do lote. E
+# MEDIDO na conta 14: no job seguinte a lista ja mostra o item na cara opaca `asb/...`,
+# e a ficha da barra continua mostrando o uuid. A primeira versao (71bbcc5) so
+# procurava o uuid na lista — o duplo dela tinha id estavel, e producao nao tem.
+
+_URL = "https://flow.google.com/project/proj-1"
+
+
+def _ref(tmp_path, nome, conteudo=b"foto"):
+    caminho = tmp_path / nome
+    caminho.write_bytes(conteudo)
+    return str(caminho)
+
+
+def _opaco(nome, token):
+    return {"texto": f"{nome}\nImagem", "selecionado": False, "miniaturas": 1,
+            "src": f"https://flow.google.com/asb/{token}=s512-rw"}
+
+
+async def _primeiro_envio(t, arquivo, monkeypatch, uuid="midia-a"):
+    chamadas = _envio_falso(monkeypatch, [{"id": uuid, "nome": Path(arquivo).name}])
+    pagina = _pagina_para_anexar([uuid])
+    pagina.url = _URL
+    await t._anexar(pagina, _pedido(Modo.IMAGEM, [arquivo]), Diario(1))
+    return chamadas
+
+
+def _lista_redesenhada(itens, alvos, fichas):
+    """O job seguinte: lista na cara opaca, ficha da barra com o uuid."""
+    pagina = _pagina_para_anexar([], fichas=fichas)
+    for token in alvos:
+        pagina.presentes[sel.ITEM_MIDIA_POR_ID.format(id=token)] = 1
+    pagina.itens = itens
+    pagina.url = _URL
+    return pagina
+
+
+async def test_referencia_ja_enviada_e_achada_na_cara_opaca_e_nao_sobe(
+        tmp_path, monkeypatch):
+    t = TransportePlaywright()
+    a = _ref(tmp_path, "a.png")
+    chamadas = await _primeiro_envio(t, a, monkeypatch)
+
+    pagina = _lista_redesenhada([_opaco("a.png", "TOK-A")], ["TOK-A"], ["midia-a"])
+    await t._anexar(pagina, _pedido(Modo.IMAGEM, [a]), Diario(1))
+
+    assert len(chamadas) == 1, "a segunda geracao reenviou o que ja estava no acervo"
+    assert pagina.clicados.count(sel.BOTAO_INCLUIR_NO_COMANDO) == 1
+
+
+async def test_arquivo_que_mudou_sobe_de_novo(tmp_path, monkeypatch):
+    t = TransportePlaywright()
+    a = _ref(tmp_path, "a.png")
+    chamadas = await _primeiro_envio(t, a, monkeypatch)
+    _ref(tmp_path, "a.png", b"outra foto")
+
+    pagina = _lista_redesenhada([_opaco("a.png", "TOK-A")], ["midia-a"], ["midia-a"])
+    pagina.presentes[sel.ITEM_MIDIA_POR_ID.format(id="midia-a")] = 1
+    await t._anexar(pagina, _pedido(Modo.IMAGEM, [a]), Diario(1))
+
+    assert len(chamadas) == 2
+
+
+async def test_dois_homonimos_novos_e_ambiguo_e_sobe_de_novo(tmp_path, monkeypatch):
+    t = TransportePlaywright()
+    a = _ref(tmp_path, "a.png")
+    chamadas = await _primeiro_envio(t, a, monkeypatch)
+
+    itens = [_opaco("a.png", "TOK-1"), _opaco("a.png", "TOK-2")]
+    pagina = _lista_redesenhada(itens, ["midia-a"], ["midia-a"])
+    pagina.presentes[sel.ITEM_MIDIA_POR_ID.format(id="midia-a")] = 1
+    await t._anexar(pagina, _pedido(Modo.IMAGEM, [a]), Diario(1))
+
+    assert len(chamadas) == 2
+
+
+async def test_ficha_errada_apaga_a_memoria_do_projeto(tmp_path, monkeypatch):
+    # aprendeu o item errado: a barra mostra outra midia. O erro sobe como sempre —
+    # antes de gerar —, e a proxima tentativa nao pode confiar no que foi aprendido
+    t = TransportePlaywright()
+    a = _ref(tmp_path, "a.png")
+    chamadas = await _primeiro_envio(t, a, monkeypatch)
+
+    pagina = _lista_redesenhada([_opaco("a.png", "TOK-A")], ["TOK-A"], ["intrusa"])
+    with pytest.raises(GeracaoFalhou, match="anexo TROCADO"):
+        await t._anexar(pagina, _pedido(Modo.IMAGEM, [a]), Diario(1))
+
+    pagina = _lista_redesenhada([_opaco("a.png", "TOK-A")], ["TOK-A", "midia-a"],
+                                ["midia-a"])
+    await t._anexar(pagina, _pedido(Modo.IMAGEM, [a]), Diario(1))
+    assert len(chamadas) == 2, "confiou de novo no que a barra acabou de desmentir"
+
+
+async def test_so_a_referencia_nova_sobe_e_a_ordem_se_mantem(tmp_path, monkeypatch):
+    t = TransportePlaywright()
+    a, b = _ref(tmp_path, "a.png", b"A"), _ref(tmp_path, "b.png", b"B")
+    await _primeiro_envio(t, a, monkeypatch)
+
+    chamadas = _envio_falso(monkeypatch, [{"id": "midia-b", "nome": "b.png"}])
+    pagina = _lista_redesenhada([_opaco("a.png", "TOK-A")], ["TOK-A", "midia-b"],
+                                ["midia-b", "midia-a"])
+    await t._anexar(pagina, _pedido(Modo.IMAGEM, [b, a]), Diario(1))
+
+    assert chamadas == [[b]], "so o arquivo que o acervo ainda nao tinha"
