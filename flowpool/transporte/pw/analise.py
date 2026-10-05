@@ -553,8 +553,13 @@ def arquivos_do_pedido(p) -> list[str]:
     return [str(Path(r)) for r in p.referencias[:tipos.max_referencias(p.modo)]]
 
 
-def indice_por_sufixo(rotulos, alvo: str) -> int:
+def indice_por_sufixo(rotulos, alvo: str | tuple[str, ...]) -> int:
     """Acha o item cujo rotulo TERMINA em `alvo`. Recusa empate e ausencia.
+
+    `alvo` pode ser uma tupla de nomes ACEITOS, em ordem de preferencia — o caso do
+    modelo renomeado que chega conta a conta (`seletores.ROTULO_MODELO`). Vale o
+    primeiro nome que casa UM rotulo; qualquer nome que case DOIS e recusa, nunca
+    desempate pelo proximo.
 
     Existe porque nenhum seletor CSS do Playwright da conta do menu de modelos, e
     MEDIDO em 2026-08-20 e o que prova cada tentativa:
@@ -574,15 +579,23 @@ def indice_por_sufixo(rotulos, alvo: str) -> int:
     Mesmo padrao que `escolher_opcao` usa no submenu de download: ler os rotulos e
     escolher aqui, onde da para testar, em vez de espremer a regra num seletor.
     """
-    achados = [
-        i for i, bruto in enumerate(rotulos)
-        if (bruto or "").strip().splitlines()[-1].strip().endswith(alvo)
-    ]
-    if len(achados) != 1:
-        raise GeracaoFalhou(
-            f"modelo {alvo!r}: esperava 1 rotulo terminando nele, achei "
-            f"{len(achados)} em {list(rotulos)!r}")
-    return achados[0]
+    for nome in rotulos_aceitos(alvo):
+        achados = [
+            i for i, bruto in enumerate(rotulos)
+            if ((bruto or "").strip().splitlines() or [""])[-1].strip().endswith(nome)
+        ]
+        if len(achados) > 1:
+            break
+        if len(achados) == 1:
+            return achados[0]
+    raise GeracaoFalhou(
+        f"modelo {alvo!r}: esperava 1 rotulo terminando nele, achei "
+        f"{len(achados)} em {list(rotulos)!r}")
+
+
+def rotulos_aceitos(alvo: str | tuple[str, ...]) -> tuple[str, ...]:
+    """O rotulo de `seletores.ROTULO_MODELO` sempre como tupla de nomes aceitos."""
+    return (alvo,) if isinstance(alvo, str) else alvo
 
 
 # Quanto tempo um card pode ficar SEM porcentagem e SEM midia antes de ser dado como

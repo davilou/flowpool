@@ -338,10 +338,11 @@ async def configurar(pagina, p: Pedido, d: Diario, cura: AutoCura) -> Config:
 
     # o modelo NAO aparece no texto do chip: confere-se aqui, com o painel aberto
     rotulo = dom.seguro(await painel.locator(sel.DROPDOWN_MODELO).first.inner_text())
-    esperado = dom.sem_acento(sel.ROTULO_MODELO[p.modelo.value])
-    if esperado not in rotulo:
+    aceitos = [dom.sem_acento(r) for r in
+               analise.rotulos_aceitos(sel.ROTULO_MODELO[p.modelo.value])]
+    if not any(r in rotulo for r in aceitos):
         raise GeracaoFalhou(f"modelo nao trocou: dropdown diz {rotulo!r}, "
-                            f"esperado {esperado!r}")
+                            f"esperado um de {aceitos!r}")
 
     await garantir(pagina, d)
     await acoes.clicar_unico(painel, sel.PROPORCAO[p.proporcao], "proporcao", cura)

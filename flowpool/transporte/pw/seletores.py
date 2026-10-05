@@ -419,7 +419,7 @@ DROPDOWN_MODELO = 'button:has-text("arrow_drop_down")'
 # MEDIDO no dropdown, texto cru:
 #   imagem : "<emoji> Nano Banana Pro", "<emoji> Nano Banana 2", "<emoji> Nano Banana 2 Lite"
 #   video  : "volume_up" + quebra de linha + "Omni 1.1 Flash" (idem para os tres Veo)
-ROTULO_MODELO = {
+ROTULO_MODELO: dict[str, str | tuple[str, ...]] = {
     "omni-flash": "Omni 1.1 Flash",
     "veo-lite": "Veo 3.1 - Lite",
     "veo-fast": "Veo 3.1 - Fast",
@@ -427,7 +427,11 @@ ROTULO_MODELO = {
     "nano-banana": "Nano Banana Pro",
     # os dois medidos em 2026-09-06 no mesmo dropdown; "Nano Banana 2" nao e sufixo de
     # "Nano Banana 2 Lite", entao o `endswith` de `analise` separa os dois
-    "nano-banana-2": "Nano Banana 2",
+    # ⚠️ DOIS NOMES, NA ORDEM. MEDIDO 2026-10-05 21:32 (job 6015): o Flow renomeou para
+    # "Nano Banana 2.1", e a troca chega CONTA A CONTA — as 20:21 a conta 3 ainda
+    # mostrava o antigo. "2.1" nao termina em "2" nem em "2 Lite": o sufixo separa os
+    # tres. Quando nenhuma conta mostrar mais o antigo, ele sai daqui.
+    "nano-banana-2": ("Nano Banana 2.1", "Nano Banana 2"),
     "nano-banana-2-lite": "Nano Banana 2 Lite",
 }
 OPCAO_MODELO = f"{OVERLAY} [role=menuitem], {OVERLAY} [role=option]"

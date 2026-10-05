@@ -2627,3 +2627,38 @@ async def test_saldo_sem_aviso_nao_clica_em_concordo():
     pagina = _TelaSaldoComAviso(aviso=False)
     assert await TransportePlaywright()._saldo(_sessao_com(pagina)) == 50
     assert sel.BOTAO_CONCORDO not in pagina.clicados
+
+
+# --- o rotulo do modelo no dropdown ------------------------------------------------
+# MEDIDO 2026-10-05 21:32 (job 6015, contas 1 e 3): o Flow renomeou "Nano Banana 2"
+# para "Nano Banana 2.1", e a troca chega conta a conta — as 20:21 a conta 3 ainda
+# gerava com o nome antigo. Toda imagem falhava em 7 s nas contas ja trocadas.
+
+_BANANA = "\U0001f34c"
+_DROPDOWN_ANTIGO = [f"{_BANANA} Nano Banana Pro", f"{_BANANA} Nano Banana 2",
+                    f"{_BANANA} Nano Banana 2 Lite"]
+_DROPDOWN_NOVO = [f"{_BANANA} Nano Banana Pro", f"{_BANANA} Nano Banana 2 Lite",
+                  f"{_BANANA} Nano Banana 2.1"]
+
+
+def test_nano_banana_2_acha_o_nome_novo_e_o_antigo():
+    alvo = sel.ROTULO_MODELO["nano-banana-2"]
+    assert analise.indice_por_sufixo(_DROPDOWN_NOVO, alvo) == 2
+    assert analise.indice_por_sufixo(_DROPDOWN_ANTIGO, alvo) == 1
+
+
+def test_o_lite_continua_separado_nos_dois_dropdowns():
+    alvo = sel.ROTULO_MODELO["nano-banana-2-lite"]
+    assert analise.indice_por_sufixo(_DROPDOWN_NOVO, alvo) == 1
+    assert analise.indice_por_sufixo(_DROPDOWN_ANTIGO, alvo) == 2
+
+
+def test_rotulo_ambiguo_continua_recusado():
+    with pytest.raises(GeracaoFalhou, match="esperava 1 rotulo"):
+        analise.indice_por_sufixo(["a Nano Banana 2.1", "b Nano Banana 2.1"],
+                                  ("Nano Banana 2.1", "Nano Banana 2"))
+
+
+def test_rotulo_ausente_continua_recusado_e_lista_o_que_viu():
+    with pytest.raises(GeracaoFalhou, match="Nano Banana Pro"):
+        analise.indice_por_sufixo([f"{_BANANA} Nano Banana Pro"], "Nano Banana 2")
