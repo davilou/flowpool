@@ -32,6 +32,7 @@ class TransporteFalso:
       `consultar` levanta `CardFalhou` com o texto do card, como o real.
     - `politica_em` / `alta_demanda_em`: o mesmo, com o motivo dito no card —
       `RecusaPorPolitica` e `FlowEmAltaDemanda`.
+    - `trava_ao_gerar`: `gerar` nunca volta — o job 6015 (2026-10-05).
     - `passos_rodando`: as N primeiras consultas de cada geracao voltam `RODANDO`.
     - `passos_na_fila`: e as N PRIMEIRAS DE TODAS voltam `NA_FILA` — o Flow aceitou o
       pedido e ainda nem comecou. Vem antes de `passos_rodando` porque e essa a ordem
@@ -49,7 +50,8 @@ class TransporteFalso:
                  projetos: dict[int, list[str]] | None = None,
                  card_falho_em: set[int] | None = None,
                  politica_em: set[int] | None = None,
-                 alta_demanda_em: set[int] | None = None) -> None:
+                 alta_demanda_em: set[int] | None = None,
+                 trava_ao_gerar: set[int] | None = None) -> None:
         self.saldos = dict(saldos)
         self.mortas = mortas or set()
         self.falha_em = falha_em or set()
@@ -60,6 +62,7 @@ class TransporteFalso:
             **dict.fromkeys(alta_demanda_em or set(), FlowEmAltaDemanda),
         }
         self._cards_falhos: dict[str, type[GeracaoFalhou]] = {}
+        self.trava_ao_gerar = trava_ao_gerar or set()
         self.latencia = latencia
         self.passos_rodando = passos_rodando
         self.passos_na_fila = passos_na_fila
@@ -137,6 +140,8 @@ class TransporteFalso:
 
     async def gerar(self, s: Sessao, p: Pedido) -> str:
         await asyncio.sleep(self.latencia)
+        if s.conta.id in self.trava_ao_gerar:
+            await asyncio.Event().wait()     # ninguem acorda: so o teto tira daqui
         # antes de debitar: sessao que cai aqui nao chegou a fazer o Flow cobrar
         if s.conta.id in self.morre_ao_gerar:
             raise SessaoMorta(f"sessao da conta {s.conta.email} caiu ao gerar")

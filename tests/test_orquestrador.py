@@ -2160,3 +2160,35 @@ async def test_releitura_que_falhou_nao_e_tentada_de_novo_logo_em_seguida(
     aberturas = t.aberturas
     assert await orq._reler_ocioso(agora + RELER_OCIOSO_CADA) is False
     assert t.aberturas == aberturas, "a mesma conta quebrada foi aberta de novo"
+
+
+# --- teto do preparo: job travado nao prende a conta para sempre --------------------
+# RELATADO 2026-10-05: o job 6015 ficou `rodando` de 18:57 a 21:31, sem `id_remoto`,
+# segurando a conta 1. O teto de `timeout_geracao` so corria na espera do card; dentro
+# de sessao/projeto/gerar nao havia teto nenhum.
+
+
+async def test_gerar_que_trava_estoura_o_teto_e_solta_a_conta(repo, tmp_path):
+    cid = _conta_com_saldo(repo, "a@b.com", 500, "p/1")
+    jid = repo.criar_job(job_fast())
+    t = TransporteFalso(saldos={cid: 500}, trava_ao_gerar={cid})
+    orq = Orquestrador(repo, t, raiz=tmp_path,
+                       timeout_preparo=timedelta(milliseconds=50))
+
+    await asyncio.wait_for(ciclo(orq), timeout=5)
+
+    j = repo.job(jid)
+    assert j.estado is EstadoJob.PENDENTE
+    assert j.tentativas == 1
+    assert "passou de" in j.erro
+    assert not orq.ocupada(cid), "a conta ficou presa no job travado"
+    assert repo.conta(cid).saldo == 500, "o credito reservado nao voltou"
+
+
+async def test_preparo_normal_nao_e_afetado_pelo_teto(repo, tmp_path):
+    cid = _conta_com_saldo(repo, "a@b.com", 500, "p/1")
+    jid = repo.criar_job(job_fast())
+    orq = Orquestrador(repo, TransporteFalso(saldos={cid: 500}), raiz=tmp_path,
+                       timeout_preparo=timedelta(seconds=5))
+    await ciclo(orq)
+    assert repo.job(jid).estado is EstadoJob.PRONTO

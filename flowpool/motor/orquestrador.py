@@ -7,6 +7,7 @@ import json
 import os
 import random
 import time
+from collections.abc import Awaitable
 from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -40,6 +41,15 @@ from flowpool.transporte.base import (
 MAX_TENTATIVAS = 3
 ESPERA_RESET = timedelta(hours=1)
 TIMEOUT_GERACAO = timedelta(minutes=10)
+# O teto do PREPARO: abrir a sessao, abrir o projeto e o `gerar` (configurar, anexar,
+# enviar). RELATADO 2026-10-05: o job 6015 ficou preso ali de 18:57 a 21:31, segurando
+# a conta 1 — `TIMEOUT_GERACAO` so corre na espera do card. 8 min porque os tetos
+# internos dessa fase somam ~7 no pior caso LEGITIMO (240 s de upload, 120 s ate o card
+# nascer, a abertura do seletor): um teto menor derrubaria upload lento de verdade.
+# Estourar DEPOIS do clique em gerar pode deixar geracao no Flow e a proxima tentativa
+# gerar de novo; a reconciliacao corrige o saldo, e o risco e uma geracao a mais —
+# contra uma conta presa para sempre.
+TIMEOUT_PREPARO = timedelta(minutes=8)
 # De quanto em quanto o card e consultado durante a geracao. Era 5 s: o "pronto"
 # chegava ate 5 s atrasado em TODO job, por uma leitura de DOM que custa
 # milissegundos. 2 s corta a media de 2,5 s para 1 s por job (2026-09-06).
@@ -184,6 +194,7 @@ class Orquestrador:
     def __init__(self, repo: Repo, transporte: FlowTransport, raiz: Path | str,
                  max_simultaneos: int = MAX_SIMULTANEOS,
                  timeout_geracao: timedelta = TIMEOUT_GERACAO,
+                 timeout_preparo: timedelta = TIMEOUT_PREPARO,
                  intervalo_polling: float = INTERVALO_POLLING,
                  espaco_entre_despachos: float = ESPACO_ENTRE_DESPACHOS,
                  diagnosticador: diagnostico.Diagnosticador | None = None) -> None:
@@ -199,6 +210,7 @@ class Orquestrador:
         self.max_simultaneos = max(1, int(max_simultaneos))
         # parametrizados para o teste nao ter que esperar dez minutos de verdade
         self.timeout_geracao = timeout_geracao
+        self.timeout_preparo = timeout_preparo
         self.intervalo_polling = intervalo_polling
         # o espaco entre despachos, e o relogio/sono/sorteio que ele usa. Entram como
         # atributo — e nao `time`/`random`/`asyncio` chamados direto no meio do metodo —
@@ -867,8 +879,9 @@ class Orquestrador:
         # reconciliacao, no `finally`. Ver `_fechar_card_trocado`.
         card_trocado: Exception | None = None
         try:
-            sessao = await self._obter_sessao(conta)
-            await self._resolver_projeto(sessao, job, conta)
+            sessao = await self._com_teto(self._obter_sessao(conta), "abrir a sessao")
+            await self._com_teto(self._resolver_projeto(sessao, job, conta),
+                                 "abrir o projeto")
             if not retomando:
                 # a conta mudou: a geracao anterior nao serve mais, comeca do zero
                 job.id_remoto = None
@@ -882,7 +895,8 @@ class Orquestrador:
                 self.repo.salvar_conta(conta)
                 self.repo.salvar_job(job)
 
-                job.id_remoto = await self.transporte.gerar(sessao, self._pedido(job))
+                job.id_remoto = await self._com_teto(
+                    self.transporte.gerar(sessao, self._pedido(job)), "gerar")
                 self.repo.salvar_job(job)
 
             estado = await self._esperar(sessao, job, job.id_remoto)
@@ -1408,6 +1422,19 @@ class Orquestrador:
         if self.diagnosticador is None:
             return None
         return await diagnostico.diagnosticar_job(self.repo, job_id, self.diagnosticador)
+
+    async def _com_teto[T](self, passo: Awaitable[T], o_que: str) -> T:
+        """`passo` com o teto do preparo. Estourar vira `TimeoutError` comum.
+
+        TimeoutError cai no `except Exception` de `_executar`: falha que gasta
+        tentativa, estorna o reservado e — o que faltava no 6015 — SOLTA A CONTA.
+        """
+        try:
+            return await asyncio.wait_for(passo, self.timeout_preparo.total_seconds())
+        except TimeoutError:
+            raise TimeoutError(
+                f"{o_que} passou de {self.timeout_preparo}: travou e foi abandonado"
+            ) from None
 
     async def _esperar(self, sessao, job: Job, id_remoto: str) -> Estado:
         """Espera a geracao sair de RODANDO. NA_FILA espera igual, e conta diferente.
