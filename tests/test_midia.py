@@ -195,8 +195,6 @@ class _Pagina:
         self.clicados = []
         self.escapes = []
         self.dormiu_ms = 0
-        # vazia = "nao sei em que projeto estou", e sem projeto nada e lembrado
-        self.url = ""
 
     # --- o que o transporte pergunta
     def quantos(self, seletor):
@@ -796,86 +794,3 @@ async def test_devolve_no_maximo_o_que_foi_pedido():
         pagina, ["a.png"], Diario(1))
 
     assert len(novos) == 1, f"pedi 1 arquivo e voltaram {len(novos)} itens"
-
-
-
-# ============================================================================
-# o acervo LEMBRADO — a mesma referencia nao sobe duas vezes para o mesmo projeto
-# ============================================================================
-# MEDIDO 2026-10-05: ~18 s de envio num job de 62 s, repetidos em todo job do lote.
-
-_URL = "https://flow.google.com/project/proj-1"
-
-
-def _ref(tmp_path, nome, conteudo=b"foto"):
-    caminho = tmp_path / nome
-    caminho.write_bytes(conteudo)
-    return str(caminho)
-
-
-async def _duas_vezes(t, tmp_path, monkeypatch, segunda_url=_URL, troca=None,
-                      some_do_acervo=False):
-    """Anexa a.png duas vezes no mesmo transporte; devolve os envios feitos."""
-    a = _ref(tmp_path, "a.png")
-    chamadas = _envio_falso(monkeypatch, [{"id": "midia-a", "nome": "a.png"}])
-    pagina = _pagina_para_anexar(["midia-a"])
-    pagina.url = _URL
-    await t._anexar(pagina, _pedido(Modo.IMAGEM, [a]), Diario(1))
-
-    if troca is not None:
-        _ref(tmp_path, "a.png", troca)
-    # o item que SOME do acervo e reenviado e volta com id NOVO; o velho nao esta la
-    ids = ["midia-a2"] if some_do_acervo else ["midia-a"]
-    if some_do_acervo:
-        async def reenvio(self, pagina, arquivos, d):
-            chamadas.append(list(arquivos))
-            return [{"id": "midia-a2", "nome": "a.png"}]
-
-        monkeypatch.setattr(TransportePlaywright, "_enviar_arquivos", reenvio)
-    pagina = _pagina_para_anexar(ids, fichas=ids if some_do_acervo else None)
-    pagina.url = segunda_url
-    await t._anexar(pagina, _pedido(Modo.IMAGEM, [a]), Diario(1))
-    return chamadas, pagina
-
-
-async def test_a_mesma_referencia_no_mesmo_projeto_nao_sobe_de_novo(
-        tmp_path, monkeypatch):
-    chamadas, pagina = await _duas_vezes(TransportePlaywright(), tmp_path, monkeypatch)
-    assert len(chamadas) == 1, "a segunda geracao reenviou o que ja estava no acervo"
-    assert pagina.clicados.count(sel.BOTAO_INCLUIR_NO_COMANDO) == 1
-
-
-async def test_arquivo_que_mudou_sobe_de_novo(tmp_path, monkeypatch):
-    chamadas, _ = await _duas_vezes(TransportePlaywright(), tmp_path, monkeypatch,
-                                    troca=b"outra foto")
-    assert len(chamadas) == 2
-
-
-async def test_item_que_sumiu_do_acervo_sobe_de_novo(tmp_path, monkeypatch):
-    chamadas, _ = await _duas_vezes(TransportePlaywright(), tmp_path, monkeypatch,
-                                    some_do_acervo=True)
-    assert len(chamadas) == 2
-
-
-async def test_outro_projeto_sobe_de_novo(tmp_path, monkeypatch):
-    chamadas, _ = await _duas_vezes(
-        TransportePlaywright(), tmp_path, monkeypatch,
-        segunda_url="https://flow.google.com/project/proj-2")
-    assert len(chamadas) == 2
-
-
-async def test_so_a_referencia_nova_sobe_e_a_ordem_se_mantem(tmp_path, monkeypatch):
-    t = TransportePlaywright()
-    a, b = _ref(tmp_path, "a.png", b"A"), _ref(tmp_path, "b.png", b"B")
-    _envio_falso(monkeypatch, [{"id": "midia-a", "nome": "a.png"}])
-    pagina = _pagina_para_anexar(["midia-a"])
-    pagina.url = _URL
-    await t._anexar(pagina, _pedido(Modo.IMAGEM, [a]), Diario(1))
-
-    chamadas = _envio_falso(monkeypatch, [{"id": "midia-b", "nome": "b.png"}])
-    # a ordem das fichas e a ordem do pedido: b vai na frente
-    pagina = _pagina_para_anexar(["midia-a", "midia-b"], fichas=["midia-b", "midia-a"])
-    pagina.url = _URL
-    await t._anexar(pagina, _pedido(Modo.IMAGEM, [b, a]), Diario(1))
-
-    assert chamadas == [[b]], "so o arquivo que o acervo ainda nao tinha"

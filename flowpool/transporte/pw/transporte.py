@@ -30,7 +30,6 @@ from flowpool.transporte.base import (
 )
 from flowpool.transporte.pw import acoes, analise, chip, dom, download, grade, janela
 from flowpool.transporte.pw import seletores as sel
-from flowpool.transporte.pw.acervo import MemoriaDoAcervo
 from flowpool.transporte.pw.cura import AutoCura
 from flowpool.transporte.pw.diario import (
     Diario,
@@ -79,8 +78,6 @@ class TransportePlaywright:
         # de "o Google refez a tela", e um contador que renasce a cada clique nao
         # separaria nada. Ela se desliga sozinha sem modelo respondendo.
         self.cura = cura if cura is not None else AutoCura()
-        # o que ja subiu para o acervo de cada projeto — ver `pw/acervo.py`
-        self._acervo = MemoriaDoAcervo()
         # As duas tabelas abaixo sao por (CONTA, card), nunca so por card.
         #
         # `id_remoto` e POSICIONAL — `card-0` e "o primeiro item da grade daquela
@@ -898,7 +895,10 @@ class TransportePlaywright:
         # homonimo velho passando por recem-enviado, o `+` fechando quando devia abrir,
         # e o indice decorado numa lista que reordena. Nenhum deles some por magica: o
         # que some e a repeticao do trecho onde eles aconteciam.
-        novos = await self._itens_para_anexar(pagina, arquivos, d)
+        d.passo(f"enviando {len(arquivos)} arquivo(s) de uma vez")
+        quanto = d.cronometro()
+        novos = await self._enviar_arquivos(pagina, arquivos, d)
+        d.passo(f"{len(novos)} arquivo(s) prontos no acervo em {quanto():.1f}s")
 
         esperados: list[str] = []
         for n, item in enumerate(novos, 1):
@@ -915,41 +915,6 @@ class TransportePlaywright:
         # conferindo a conta. Cada ficha carrega o id da midia (MEDIDO 21/08), entao
         # da para comparar identidade em vez de numero.
         analise.exigir_referencias_completas(await self._ids_anexados(pagina), esperados)
-
-    async def _itens_para_anexar(self, pagina, arquivos: list[str],
-                                 d: Diario) -> list[dict]:
-        """O item do acervo de cada arquivo, NA ORDEM do pedido. So envia o que falta.
-
-        MEDIDO 2026-10-05: o envio era ~18 s de um job de 62 s, e repetia em todo job
-        do lote com as mesmas referencias. Arquivo que ja subiu para ESTE projeto — o
-        mesmo conteudo, ver `pw/acervo.py` — e incluido direto pelo id, depois de
-        conferido na tela. O que nao esta mais la sobe de novo, como antes.
-        """
-        projeto = analise.id_do_href(pagina.url)
-        itens = {a: self._acervo.buscar(projeto, a) for a in arquivos}
-        if any(itens.values()):
-            await self._abrir_seletor_midia(pagina, d)
-            for a, item in itens.items():
-                if item and not await self._ainda_no_acervo(pagina, item["id"]):
-                    self._acervo.esquecer(projeto, a)
-                    itens[a] = None
-        faltam = [a for a in arquivos if not itens[a]]
-        d.passo(f"{len(arquivos) - len(faltam)} referencia(s) ja no acervo; "
-                f"enviando {len(faltam)}")
-        if faltam:
-            quanto = d.cronometro()
-            novos = await self._enviar_arquivos(pagina, faltam, d)
-            d.passo(f"{len(novos)} arquivo(s) prontos no acervo em {quanto():.1f}s")
-            por_nome = {i["nome"]: i for i in novos}
-            for a in faltam:
-                itens[a] = por_nome[Path(a).name]
-                self._acervo.lembrar(projeto, a, por_nome[Path(a).name])
-        return [item for a in arquivos if (item := itens[a])]
-
-    async def _ainda_no_acervo(self, pagina, id_midia: str) -> bool:
-        """Se o item lembrado esta no seletor AGORA, uma vez so. Zero ou dois = nao."""
-        alvo = sel.ITEM_MIDIA_POR_ID.format(id=id_midia)
-        return await pagina.locator(alvo).count() == 1
 
     async def _preencher_slots(self, pagina, frames: list[dict], d: Diario) -> None:
         """Poe cada frame ja enviado no seu slot da barra de Frames.
